@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // 导出新模块
-pub mod mock_storage;
 pub mod mock_network;
+pub mod mock_storage;
 
 // 类型定义
 pub type NodeId = String;
@@ -47,7 +47,7 @@ pub enum Event {
     // RPC 响应事件（其他节点对本节点请求的回复）
     RequestVoteReply(NodeId, RequestVoteResponse),
     AppendEntriesReply(NodeId, AppendEntriesResponse),
-    InstallSnapshotReply(NodeId, InstallSnapshotReply),
+    InstallSnapshotReply(NodeId, InstallSnapshotResponse),
 
     // 客户端事件
     ClientPropose {
@@ -56,7 +56,7 @@ pub enum Event {
     },
 }
 
-// === 回调接口定义（替代 Action，外部实现）===
+// === 回调接口定义（包含原Storage功能）===
 pub trait RaftCallbacks: Send + Sync {
     // 发送 RPC 回调
     fn send_request_vote_request(
@@ -92,25 +92,67 @@ pub trait RaftCallbacks: Send + Sync {
     fn send_install_snapshot_reply(
         &self,
         target: NodeId,
-        args: InstallSnapshotReply,
+        args: InstallSnapshotResponse,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
-    // 持久化回调
+    // 持久化回调（原Storage功能）
     fn save_hard_state(
         &self,
         term: u64,
         voted_for: Option<NodeId>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
-    fn save_log_entries(&self, entries: Vec<LogEntry>) -> Pin<Box<dyn Future<Output = ()> + Send>>;
-    fn save_snapshot(&self, snap: Snapshot) -> Pin<Box<dyn Future<Output = ()> + Send>>;
-    fn save_cluster_config(&self, conf: ClusterConfig) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    fn load_hard_state(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<(u64, Option<NodeId>), Error>> + Send>>;
+
+    fn append_log_entries(
+        &self,
+        entries: &[LogEntry],
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+
+    fn get_log_entries(
+        &self,
+        low: u64,
+        high: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<LogEntry>, Error>> + Send>>;
+
+    fn truncate_log_suffix(
+        &self,
+        idx: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+
+    fn truncate_log_prefix(
+        &self,
+        idx: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+
+    fn get_last_log_index(&self) -> Pin<Box<dyn Future<Output = Result<u64, Error>> + Send>>;
+
+    fn get_log_term(&self, idx: u64) -> Pin<Box<dyn Future<Output = Result<u64, Error>> + Send>>;
+
+    fn save_snapshot(
+        &self,
+        snap: Snapshot,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+
+    fn load_snapshot(&self) -> Pin<Box<dyn Future<Output = Result<Snapshot, Error>> + Send>>;
+
+    fn save_cluster_config(
+        &self,
+        conf: ClusterConfig,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+
+    fn load_cluster_config(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<ClusterConfig, Error>> + Send>>;
 
     // 定时器回调
     fn set_election_timer(&self, dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
     fn set_heartbeat_timer(&self, dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
-    fn set_apply_timer(&self, dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>; // 日志应用定时器
+    fn set_apply_timer(&self, dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
-    // 客户端响应回调（带请求ID）
+    // 客户端响应回调
     fn client_response(
         &self,
         request_id: RequestId,
@@ -120,12 +162,21 @@ pub trait RaftCallbacks: Send + Sync {
     // 状态变更通知回调
     fn state_changed(&self, role: Role) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
-    // 日志应用到状态机的回调（由外部实现状态机逻辑）
+    // 日志应用到状态机的回调
     fn apply_command(
         &self,
         index: u64,
         term: u64,
         cmd: Command,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    // 处理快照数据（由业务层实现）
+    fn process_snapshot(
+        &self,
+        index: u64,
+        term: u64,
+        data: Vec<u8>,
+        request_id: RequestId,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 }
 
@@ -202,7 +253,7 @@ impl ClusterConfig {
     }
 }
 
-// === 网络与存储接口 ===
+// === 网络接口 ===
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallSnapshotRequest {
     pub term: u64,
@@ -211,13 +262,22 @@ pub struct InstallSnapshotRequest {
     pub last_included_term: u64,
     pub data: Vec<u8>,
     pub request_id: RequestId,
+    // 空消息标记 - 用于探测安装状态
+    pub is_probe: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum InstallSnapshotState {
+    Failed(String), // 失败，附带原因
+    Installing,     // 正在安装
+    Success,        // 成功完成
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstallSnapshotReply {
+pub struct InstallSnapshotResponse {
     pub term: u64,
-    pub success: bool,
     pub request_id: RequestId,
+    pub state: InstallSnapshotState,
 }
 
 #[async_trait::async_trait]
@@ -238,7 +298,7 @@ pub trait Network: Send + Sync {
         &self,
         target: NodeId,
         args: InstallSnapshotRequest,
-    ) -> InstallSnapshotReply;
+    ) -> InstallSnapshotResponse;
 }
 
 #[derive(Debug, Clone)]
@@ -252,22 +312,14 @@ pub struct Snapshot {
     pub config: ClusterConfig,
 }
 
-pub trait Storage: Send + Sync {
-    fn save_hard_state(&self, term: u64, voted_for: Option<NodeId>);
-    fn load_hard_state(&self) -> (u64, Option<NodeId>);
-
-    fn append(&self, entries: &[LogEntry]) -> Result<(), Error>;
-    fn entries(&self, low: u64, high: u64) -> Result<Vec<LogEntry>, Error>;
-    fn truncate_suffix(&self, idx: u64) -> Result<(), Error>;
-    fn truncate_prefix(&self, idx: u64) -> Result<(), Error>; // 保留>=idx的日志
-    fn last_index(&self) -> Result<u64, Error>;
-    fn term(&self, idx: u64) -> Result<u64, Error>;
-
-    fn save_snapshot(&self, snap: &Snapshot) -> Result<(), Error>;
-    fn load_snapshot(&self) -> Result<Snapshot, Error>;
-
-    fn save_cluster_config(&self, conf: &ClusterConfig) -> Result<(), Error>;
-    fn load_cluster_config(&self) -> Result<ClusterConfig, Error>;
+// 快照探测计划结构
+#[derive(Debug, Clone)]
+struct SnapshotProbeSchedule {
+    peer: NodeId,
+    next_probe_time: Instant,
+    interval: Duration, // 探测间隔
+    max_attempts: u32,  // 最大尝试次数
+    attempts: u32,      // 当前尝试次数
 }
 
 // === 核心状态与逻辑 ===
@@ -353,7 +405,6 @@ pub struct RaftState {
     last_heartbeat: Instant,
 
     // 外部依赖
-    storage: Arc<dyn Storage>,
     network: Arc<dyn Network + Send + Sync>,
     callbacks: Arc<dyn RaftCallbacks>,
 
@@ -365,15 +416,19 @@ pub struct RaftState {
     current_election_id: Option<RequestId>,
 
     // 快照请求跟踪（仅 Follower 有效）
-    current_snapshot_id: Option<RequestId>,
+    current_snapshot_request_id: Option<RequestId>,
+
+    // 快照相关状态（Leader 用）
+    follower_snapshot_states: HashMap<NodeId, InstallSnapshotState>,
+    follower_last_snapshot_index: HashMap<NodeId, u64>,
+    snapshot_probe_schedules: Vec<SnapshotProbeSchedule>,
 }
 
 impl RaftState {
     /// 初始化状态
-    pub fn new(
+    pub async fn new(
         id: NodeId,
         peers: Vec<NodeId>,
-        storage: Arc<dyn Storage>,
         network: Arc<dyn Network + Send + Sync>,
         election_timeout_min: u64,
         election_timeout_max: u64,
@@ -381,17 +436,21 @@ impl RaftState {
         apply_interval: u64,
         callbacks: Arc<dyn RaftCallbacks>,
     ) -> Self {
-        let (current_term, voted_for) = storage.load_hard_state();
-        let loaded_config = match storage.load_cluster_config() {
+        // 从回调加载持久化状态
+        let (current_term, voted_for) = callbacks.load_hard_state().await.unwrap_or((0, None));
+        let loaded_config = match callbacks.load_cluster_config().await {
             Ok(conf) => conf,
             Err(_) => ClusterConfig::empty(),
         };
-        let snap = storage.load_snapshot().unwrap_or(Snapshot {
-            index: 0,
-            term: 0,
-            data: vec![],
-            config: loaded_config.clone(),
-        });
+        let snap = match callbacks.load_snapshot().await {
+            Ok(s) => s,
+            Err(_) => Snapshot {
+                index: 0,
+                term: 0,
+                data: vec![],
+                config: loaded_config.clone(),
+            },
+        };
         let timeout = election_timeout_min
             + rand::random::<u64>() % (election_timeout_max - election_timeout_min + 1);
 
@@ -415,7 +474,6 @@ impl RaftState {
             heartbeat_interval: Duration::from_millis(heartbeat_interval),
             apply_interval: Duration::from_millis(apply_interval),
             last_heartbeat: Instant::now(),
-            storage,
             network,
             callbacks,
             election_votes: HashMap::new(),
@@ -423,7 +481,10 @@ impl RaftState {
             election_joint_config: None,
             election_max_term: current_term,
             current_election_id: None,
-            current_snapshot_id: None,
+            current_snapshot_request_id: None,
+            follower_snapshot_states: HashMap::new(),
+            follower_last_snapshot_index: HashMap::new(),
+            snapshot_probe_schedules: Vec::new(),
         }
     }
 
@@ -483,8 +544,8 @@ impl RaftState {
             .await;
 
         // 发送投票请求
-        let last_log_index = self.get_last_log_index();
-        let last_log_term = self.get_last_log_term();
+        let last_log_index = self.get_last_log_index().await;
+        let last_log_term = self.get_last_log_term().await;
         let req = RequestVoteRequest {
             term: self.current_term,
             candidate_id: self.id.clone(),
@@ -519,8 +580,8 @@ impl RaftState {
         }
 
         // 日志最新性检查
-        let last_log_index = self.get_last_log_index();
-        let last_log_term = self.get_last_log_term();
+        let last_log_index = self.get_last_log_index().await;
+        let last_log_term = self.get_last_log_term().await;
         let log_ok = args.last_log_term > last_log_term
             || (args.last_log_term == last_log_term && args.last_log_index >= last_log_index);
 
@@ -620,9 +681,13 @@ impl RaftState {
         self.current_election_id = None;
 
         // 初始化复制状态
-        let last_log_index = self.get_last_log_index();
+        let last_log_index = self.get_last_log_index().await;
         self.next_index.clear();
         self.match_index.clear();
+        self.follower_snapshot_states.clear();
+        self.follower_last_snapshot_index.clear();
+        self.snapshot_probe_schedules.clear();
+
         for peer in &self.peers {
             self.next_index.insert(peer.clone(), last_log_index + 1);
             self.match_index.insert(peer.clone(), 0);
@@ -664,14 +729,34 @@ impl RaftState {
         let current_term = self.current_term;
         let leader_id = self.id.clone();
         let leader_commit = self.commit_index;
-        let last_log_index = self.get_last_log_index();
+        let last_log_index = self.get_last_log_index().await;
         let max_batch_size = 100;
+        let now = Instant::now();
 
-        // 向所有节点发送日志
+        // 检查并执行到期的快照探测计划
+        self.process_pending_probes(now).await;
+
+        // 向所有节点发送日志或探测消息
         let peers = self.get_effective_peers();
         for peer in peers {
             if peer == self.id {
                 continue;
+            }
+
+            // 检查Follower是否正在安装快照
+            if let Some(state) = self.follower_snapshot_states.get(&peer) {
+                match state {
+                    InstallSnapshotState::Installing => {
+                        // 探测计划已处理，此处不需要额外操作
+                        continue;
+                    }
+                    InstallSnapshotState::Failed(_) => {
+                        // 失败状态，尝试重新发送快照
+                        self.send_snapshot_to(peer.clone()).await;
+                        continue;
+                    }
+                    _ => {}
+                }
             }
 
             // 检查是否需要发送快照（日志差距过大）
@@ -688,10 +773,17 @@ impl RaftState {
             } else if prev_log_index <= self.last_snapshot_index {
                 self.last_snapshot_term
             } else {
-                self.storage.term(prev_log_index).unwrap_or(0)
+                self.callbacks
+                    .get_log_term(prev_log_index)
+                    .await
+                    .unwrap_or(0)
             };
 
-            let entries = match self.storage.entries(next_idx, last_log_index + 1) {
+            let entries = match self
+                .callbacks
+                .get_log_entries(next_idx, last_log_index + 1)
+                .await
+            {
                 Ok(entries) => entries.into_iter().take(max_batch_size).collect(),
                 Err(_) => vec![],
             };
@@ -716,7 +808,7 @@ impl RaftState {
             let resp = AppendEntriesResponse {
                 term: self.current_term,
                 success: false,
-                conflict_index: Some(self.get_last_log_index() + 1),
+                conflict_index: Some(self.get_last_log_index().await + 1),
                 request_id: args.request_id,
             };
             self.callbacks
@@ -742,12 +834,16 @@ impl RaftState {
             args.prev_log_term == self.last_snapshot_term
         } else {
             // 检查日志任期是否匹配
-            self.storage.term(args.prev_log_index).unwrap_or(0) == args.prev_log_term
+            self.callbacks
+                .get_log_term(args.prev_log_index)
+                .await
+                .unwrap_or(0)
+                == args.prev_log_term
         };
 
         if !prev_log_ok {
-            let conflict_idx = if args.prev_log_index > self.get_last_log_index() {
-                self.get_last_log_index() + 1
+            let conflict_idx = if args.prev_log_index > self.get_last_log_index().await {
+                self.get_last_log_index().await + 1
             } else {
                 args.prev_log_index
             };
@@ -764,12 +860,14 @@ impl RaftState {
         }
 
         // 截断冲突日志并追加新日志
-        if args.prev_log_index < self.get_last_log_index() {
-            let _ = self.storage.truncate_suffix(args.prev_log_index + 1);
+        if args.prev_log_index < self.get_last_log_index().await {
+            let _ = self
+                .callbacks
+                .truncate_log_suffix(args.prev_log_index + 1)
+                .await;
         }
         if !args.entries.is_empty() {
-            let _ = self.storage.append(&args.entries);
-            self.callbacks.save_log_entries(args.entries.clone()).await;
+            let _ = self.callbacks.append_log_entries(&args.entries).await;
 
             // 处理配置变更日志
             self.process_config_entries(&args.entries).await;
@@ -777,7 +875,7 @@ impl RaftState {
 
         // 更新提交索引
         if args.leader_commit > self.commit_index {
-            self.commit_index = std::cmp::min(args.leader_commit, self.get_last_log_index());
+            self.commit_index = std::cmp::min(args.leader_commit, self.get_last_log_index().await);
         }
 
         // 发送成功响应
@@ -813,8 +911,9 @@ impl RaftState {
         if reply.success {
             let req_next_idx = self.next_index.get(&peer).copied().unwrap_or(1);
             let entries_len = self
-                .storage
-                .entries(req_next_idx, self.get_last_log_index() + 1)
+                .callbacks
+                .get_log_entries(req_next_idx, self.get_last_log_index().await + 1)
+                .await
                 .unwrap_or_default()
                 .len() as u64;
             let new_match_idx = req_next_idx + entries_len - 1;
@@ -824,7 +923,7 @@ impl RaftState {
             self.next_index.insert(peer.clone(), new_next_idx);
 
             // 尝试更新commit_index
-            self.update_commit_index();
+            self.update_commit_index().await;
         } else {
             // 日志冲突，回退next_index
             let current_next = self.next_index.get(&peer).copied().unwrap_or(1);
@@ -835,7 +934,7 @@ impl RaftState {
 
     // === 快照相关逻辑 ===
     async fn send_snapshot_to(&mut self, target: NodeId) {
-        let snap = match self.storage.load_snapshot() {
+        let snap = match self.callbacks.load_snapshot().await {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!("加载快照失败: {}", e.0);
@@ -850,6 +949,39 @@ impl RaftState {
             last_included_term: snap.term,
             data: snap.data.clone(),
             request_id: RequestId::new(),
+            is_probe: false,
+        };
+
+        // 记录发送的快照信息
+        self.follower_last_snapshot_index
+            .insert(target.clone(), snap.index);
+        self.follower_snapshot_states
+            .insert(target.clone(), InstallSnapshotState::Installing);
+
+        // 为这个Follower创建探测计划
+        self.schedule_snapshot_probe(target.clone(), Duration::from_secs(10), 30);
+
+        self.callbacks
+            .send_install_snapshot_request(target, req)
+            .await;
+    }
+
+    // 发送探测消息检查快照安装状态（Leader端）
+    async fn probe_snapshot_status(&mut self, target: NodeId) {
+        let last_snap_index = self
+            .follower_last_snapshot_index
+            .get(&target)
+            .copied()
+            .unwrap_or(0);
+
+        let req = InstallSnapshotRequest {
+            term: self.current_term,
+            leader_id: self.id.clone(),
+            last_included_index: last_snap_index,
+            last_included_term: 0, // 探测消息不需要实际任期
+            data: vec![],          // 空数据
+            request_id: RequestId::new(),
+            is_probe: true,
         };
 
         self.callbacks
@@ -860,10 +992,10 @@ impl RaftState {
     async fn handle_install_snapshot(&mut self, args: InstallSnapshotRequest) {
         // 处理更低任期的请求
         if args.term < self.current_term {
-            let resp = InstallSnapshotReply {
+            let resp = InstallSnapshotResponse {
                 term: self.current_term,
-                success: false,
                 request_id: args.request_id,
+                state: InstallSnapshotState::Failed("Term too low".into()),
             };
             self.callbacks
                 .send_install_snapshot_reply(args.leader_id, resp)
@@ -875,17 +1007,29 @@ impl RaftState {
         self.role = Role::Follower;
         self.current_term = args.term;
         self.last_heartbeat = Instant::now();
-        self.current_snapshot_id = Some(args.request_id);
         self.callbacks
             .set_election_timer(self.election_timeout)
             .await;
 
-        // 仅处理比当前快照更新的快照
-        if args.last_included_index <= self.last_snapshot_index {
-            let resp = InstallSnapshotReply {
+        // 处理空探测消息
+        if args.is_probe {
+            // 返回当前快照安装状态
+            let current_state = if let Some(req_id) = &self.current_snapshot_request_id {
+                // 如果是正在处理的那个快照请求
+                if *req_id == args.request_id {
+                    InstallSnapshotState::Installing
+                } else {
+                    InstallSnapshotState::Failed("No such snapshot in progress".into())
+                }
+            } else {
+                // 没有正在处理的快照
+                InstallSnapshotState::Success
+            };
+
+            let resp = InstallSnapshotResponse {
                 term: self.current_term,
-                success: true,
                 request_id: args.request_id,
+                state: current_state,
             };
             self.callbacks
                 .send_install_snapshot_reply(args.leader_id, resp)
@@ -893,35 +1037,75 @@ impl RaftState {
             return;
         }
 
-        // 保存快照并截断日志
-        let snap = Snapshot {
-            index: args.last_included_index,
-            term: args.last_included_term,
-            data: args.data.clone(),
-            config: self.config.clone(), // 快照包含当前配置
-        };
-        let _ = self.storage.save_snapshot(&snap);
-        self.callbacks.save_snapshot(snap.clone()).await;
+        // 仅处理比当前快照更新的快照
+        if args.last_included_index <= self.last_snapshot_index {
+            let resp = InstallSnapshotResponse {
+                term: self.current_term,
+                request_id: args.request_id,
+                state: InstallSnapshotState::Success,
+            };
+            self.callbacks
+                .send_install_snapshot_reply(args.leader_id, resp)
+                .await;
+            return;
+        }
 
-        // 截断快照之前的日志
-        let _ = self.storage.truncate_prefix(args.last_included_index);
-        self.last_snapshot_index = args.last_included_index;
-        self.last_snapshot_term = args.last_included_term;
-        self.commit_index = self.commit_index.max(args.last_included_index);
-        self.last_applied = self.last_applied.max(args.last_included_index);
+        // 记录当前正在处理的快照请求
+        self.current_snapshot_request_id = Some(args.request_id);
 
-        // 发送成功响应
-        let resp = InstallSnapshotReply {
+        // 立即返回正在安装状态，不等待实际处理完成
+        let resp = InstallSnapshotResponse {
             term: self.current_term,
-            success: true,
             request_id: args.request_id,
+            state: InstallSnapshotState::Installing,
         };
         self.callbacks
             .send_install_snapshot_reply(args.leader_id, resp)
             .await;
+
+        // 将快照数据交给业务层处理（异步）
+        // 注意：这里不阻塞Raft状态机，实际处理由业务层完成
+        self.callbacks
+            .process_snapshot(
+                args.last_included_index,
+                args.last_included_term,
+                args.data,
+                args.request_id,
+            )
+            .await;
     }
 
-    async fn handle_install_snapshot_reply(&mut self, peer: NodeId, reply: InstallSnapshotReply) {
+    // 业务层完成快照处理后调用此方法更新状态（Follower端）
+    pub async fn complete_snapshot_installation(
+        &mut self,
+        request_id: RequestId,
+        success: bool,
+        reason: Option<String>,
+        index: u64,
+        term: u64,
+    ) {
+        // 检查是否是当前正在处理的快照
+        if self.current_snapshot_request_id != Some(request_id) {
+            return;
+        }
+
+        // 更新快照状态
+        if success {
+            self.last_snapshot_index = index;
+            self.last_snapshot_term = term;
+            self.commit_index = self.commit_index.max(index);
+            self.last_applied = self.last_applied.max(index);
+        }
+
+        // 清除当前处理标记
+        self.current_snapshot_request_id = None;
+    }
+
+    async fn handle_install_snapshot_reply(
+        &mut self,
+        peer: NodeId,
+        reply: InstallSnapshotResponse,
+    ) {
         if self.role != Role::Leader {
             return;
         }
@@ -935,15 +1119,106 @@ impl RaftState {
                 .save_hard_state(self.current_term, self.voted_for.clone())
                 .await;
             self.callbacks.state_changed(Role::Follower).await;
+            // 清除该节点的探测计划
+            self.remove_snapshot_probe(&peer);
             return;
         }
 
-        if reply.success {
-            // 快照安装成功，更新复制状态
-            let snap_index = self.last_snapshot_index;
-            self.next_index.insert(peer.clone(), snap_index + 1);
-            self.match_index.insert(peer.clone(), snap_index);
+        // 更新Follower的快照状态
+        self.follower_snapshot_states
+            .insert(peer.clone(), reply.state.clone());
+
+        match reply.state {
+            InstallSnapshotState::Success => {
+                // 快照安装成功，更新复制状态
+                let snap_index = self
+                    .follower_last_snapshot_index
+                    .get(&peer)
+                    .copied()
+                    .unwrap_or(0);
+                self.next_index.insert(peer.clone(), snap_index + 1);
+                self.match_index.insert(peer.clone(), snap_index);
+                tracing::info!("Follower {} completed snapshot installation", peer);
+                // 清除探测计划
+                self.remove_snapshot_probe(&peer);
+            }
+            InstallSnapshotState::Installing => {
+                // 仍在安装中，更新探测计划（延长尝试次数）
+                tracing::debug!("Follower {} is still installing snapshot", peer);
+                self.extend_snapshot_probe(&peer);
+            }
+            InstallSnapshotState::Failed(reason) => {
+                tracing::warn!("Follower {} snapshot install failed: {}", peer, reason);
+                // 清除探测计划
+                self.remove_snapshot_probe(&peer);
+                // 可以安排重试
+                self.schedule_snapshot_retry(peer).await;
+            }
         }
+    }
+
+    // 安排快照状态探测（无内部线程）
+    fn schedule_snapshot_probe(&mut self, peer: NodeId, interval: Duration, max_attempts: u32) {
+        // 先移除可能存在的旧计划
+        self.remove_snapshot_probe(&peer);
+
+        // 添加新的探测计划
+        self.snapshot_probe_schedules.push(SnapshotProbeSchedule {
+            peer: peer.clone(),
+            next_probe_time: Instant::now() + interval,
+            interval,
+            max_attempts,
+            attempts: 0,
+        });
+    }
+
+    // 延长快照探测计划
+    fn extend_snapshot_probe(&mut self, peer: &NodeId) {
+        if let Some(schedule) = self
+            .snapshot_probe_schedules
+            .iter_mut()
+            .find(|s| &s.peer == peer)
+        {
+            if schedule.attempts < schedule.max_attempts {
+                schedule.attempts += 1;
+                schedule.next_probe_time = Instant::now() + schedule.interval;
+            } else {
+                // 达到最大尝试次数，标记为失败
+                self.follower_snapshot_states.insert(
+                    peer.clone(),
+                    InstallSnapshotState::Failed("Max probe attempts reached".into()),
+                );
+                self.remove_snapshot_probe(peer);
+            }
+        }
+    }
+
+    // 移除快照探测计划
+    fn remove_snapshot_probe(&mut self, peer: &NodeId) {
+        self.snapshot_probe_schedules.retain(|s| &s.peer != peer);
+    }
+
+    // 处理到期的探测计划
+    async fn process_pending_probes(&mut self, now: Instant) {
+        // 收集需要执行的探测
+        let pending_peers: Vec<NodeId> = self
+            .snapshot_probe_schedules
+            .iter()
+            .filter(|s| s.next_probe_time <= now)
+            .map(|s| s.peer.clone())
+            .collect();
+
+        // 执行每个到期的探测
+        for peer in pending_peers {
+            self.probe_snapshot_status(peer).await;
+        }
+    }
+
+    // 安排快照重发（无内部线程）
+    async fn schedule_snapshot_retry(&mut self, peer: NodeId) {
+        // 直接在当前事件循环中延迟发送，而非启动新线程
+        // 实际实现中可根据需要调整重试延迟
+        self.send_snapshot_to(peer).await;
     }
 
     // === 客户端请求与日志应用 ===
@@ -956,7 +1231,7 @@ impl RaftState {
         }
 
         // 生成日志条目
-        let last_idx = self.get_last_log_index();
+        let last_idx = self.get_last_log_index().await;
         let new_entry = LogEntry {
             term: self.current_term,
             index: last_idx + 1,
@@ -965,8 +1240,10 @@ impl RaftState {
         };
 
         // 追加日志
-        let _ = self.storage.append(&[new_entry.clone()]);
-        self.callbacks.save_log_entries(vec![new_entry]).await;
+        let _ = self
+            .callbacks
+            .append_log_entries(&[new_entry.clone()])
+            .await;
 
         // 记录客户端请求与日志索引的映射
         self.client_requests.insert(request_id, last_idx + 1);
@@ -983,7 +1260,7 @@ impl RaftState {
 
         let start = self.last_applied + 1;
         let end = self.commit_index;
-        let entries = match self.storage.entries(start, end + 1) {
+        let entries = match self.callbacks.get_log_entries(start, end + 1).await {
             Ok(entries) => entries,
             Err(e) => {
                 tracing::error!("读取日志失败: {}", e.0);
@@ -1025,10 +1302,11 @@ impl RaftState {
     async fn process_config_entries(&mut self, entries: &[LogEntry]) {
         for entry in entries {
             if entry.is_config {
-                // 解析配置变更命令（实际实现需序列化/反序列化）
+                // 解析配置变更命令
                 if let Ok(new_config) = bincode::deserialize(&entry.command) {
                     self.config = new_config;
-                    self.callbacks
+                    let _ = self
+                        .callbacks
                         .save_cluster_config(self.config.clone())
                         .await;
 
@@ -1050,7 +1328,8 @@ impl RaftState {
 
         if all_replicated {
             self.config.leave_joint();
-            self.callbacks
+            let _ = self
+                .callbacks
                 .save_cluster_config(self.config.clone())
                 .await;
         }
@@ -1071,28 +1350,30 @@ impl RaftState {
             .collect()
     }
 
-    fn get_last_log_index(&self) -> u64 {
-        self.storage
-            .last_index()
+    async fn get_last_log_index(&self) -> u64 {
+        self.callbacks
+            .get_last_log_index()
+            .await
             .unwrap_or(0)
             .max(self.last_snapshot_index)
     }
 
-    fn get_last_log_term(&self) -> u64 {
-        let last_log_idx = self.storage.last_index().unwrap_or(0);
+    async fn get_last_log_term(&self) -> u64 {
+        let last_log_idx = self.callbacks.get_last_log_index().await.unwrap_or(0);
         if last_log_idx == 0 {
             self.last_snapshot_term
         } else {
-            self.storage
-                .term(last_log_idx)
+            self.callbacks
+                .get_log_term(last_log_idx)
+                .await
                 .unwrap_or(self.last_snapshot_term)
         }
     }
 
-    fn update_commit_index(&mut self) {
+    async fn update_commit_index(&mut self) {
         // 仅Leader更新commit_index：寻找大多数节点已复制的日志
         let mut match_indices: Vec<u64> = self.match_index.values().cloned().collect();
-        match_indices.push(self.get_last_log_index()); // 包含自身
+        match_indices.push(self.get_last_log_index().await); // 包含自身
         match_indices.sort_unstable_by(|a, b| b.cmp(a)); // 降序排列
 
         let quorum = self.config.quorum();
@@ -1100,178 +1381,10 @@ impl RaftState {
             let candidate = match_indices[quorum - 1];
             // 确保候选索引的任期与当前任期相同（Raft约束）
             if candidate > self.commit_index
-                && self.storage.term(candidate).unwrap_or(0) == self.current_term
+                && self.callbacks.get_log_term(candidate).await.unwrap_or(0) == self.current_term
             {
                 self.commit_index = candidate;
             }
         }
-    }
-}
-
-// === 外部驱动层 ===
-pub struct RaftDriver {
-    state: RaftState,
-}
-
-impl RaftDriver {
-    pub fn new(state: RaftState) -> Self {
-        Self { state }
-    }
-
-    pub async fn run(&mut self) {
-        loop {
-            // 实际实现应从事件源（网络/定时器/客户端）接收事件
-            let event = self.receive_event().await;
-            self.state.handle_event(event).await;
-        }
-    }
-
-    async fn receive_event(&self) -> Event {
-        // 示例：等待定时器事件（实际应实现真实事件接收）
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        Event::ElectionTimeout
-    }
-}
-
-// === 回调接口的默认实现（示例）===
-#[derive(Clone)]
-pub struct DefaultCallbacks {
-    network: Arc<dyn Network + Send + Sync>,
-    storage: Arc<dyn Storage>,
-}
-
-impl DefaultCallbacks {
-    pub fn new(network: Arc<dyn Network + Send + Sync>, storage: Arc<dyn Storage>) -> Self {
-        Self { network, storage }
-    }
-}
-
-impl RaftCallbacks for DefaultCallbacks {
-    fn send_request_vote_request(
-        &self,
-        target: NodeId,
-        args: RequestVoteRequest,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        let network = self.network.clone();
-        Box::pin(async move {
-            let _ = network.send_request_vote(target, args).await;
-        })
-    }
-
-    fn send_request_vote_response(
-        &self,
-        target: NodeId,
-        _args: RequestVoteResponse,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async move {
-            // 实际实现应将响应发送给目标节点
-        })
-    }
-
-    fn send_append_entries_request(
-        &self,
-        target: NodeId,
-        args: AppendEntriesRequest,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        let network = self.network.clone();
-        Box::pin(async move {
-            let _ = network.send_append_entries(target, args).await;
-        })
-    }
-
-    fn send_append_entries_response(
-        &self,
-        target: NodeId,
-        _args: AppendEntriesResponse,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async move {
-            // 实际实现应将响应发送给目标节点
-        })
-    }
-
-    fn send_install_snapshot_request(
-        &self,
-        target: NodeId,
-        args: InstallSnapshotRequest,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        let network = self.network.clone();
-        Box::pin(async move {
-            let _ = network.send_install_snapshot(target, args).await;
-        })
-    }
-
-    fn send_install_snapshot_reply(
-        &self,
-        target: NodeId,
-        _args: InstallSnapshotReply,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async move {
-            // 实际实现应将响应发送给目标节点
-        })
-    }
-
-    fn save_hard_state(
-        &self,
-        term: u64,
-        voted_for: Option<NodeId>,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        let storage = self.storage.clone();
-        Box::pin(async move {
-            storage.save_hard_state(term, voted_for);
-        })
-    }
-
-    fn save_log_entries(&self, entries: Vec<LogEntry>) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        let storage = self.storage.clone();
-        Box::pin(async move {
-            let _ = storage.append(&entries);
-        })
-    }
-
-    fn save_snapshot(&self, snap: Snapshot) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        let storage = self.storage.clone();
-        Box::pin(async move {
-            let _ = storage.save_snapshot(&snap);
-        })
-    }
-
-    fn save_cluster_config(&self, conf: ClusterConfig) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        let storage = self.storage.clone();
-        Box::pin(async move {
-            let _ = storage.save_cluster_config(&conf);
-        })
-    }
-
-    fn set_election_timer(&self, _dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async {})
-    }
-
-    fn set_heartbeat_timer(&self, _dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async {})
-    }
-
-    fn set_apply_timer(&self, _dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async {})
-    }
-
-    fn client_response(
-        &self,
-        _request_id: RequestId,
-        _result: Result<u64, Error>,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async {})
-    }
-
-    fn state_changed(&self, _role: Role) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async {})
-    }
-
-    fn apply_command(
-        &self,
-        _index: u64,
-        _term: u64,
-        _cmd: Command,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async {})
     }
 }

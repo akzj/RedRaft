@@ -1,16 +1,16 @@
 use super::RequestId;
 use super::{
-    AppendEntriesRequest, AppendEntriesResponse, Error, InstallSnapshotReply,
-    InstallSnapshotRequest, Network, NodeId, RequestVoteRequest, RequestVoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, Error, InstallSnapshotRequest,
+    InstallSnapshotResponse, Network, NodeId, RequestVoteRequest, RequestVoteResponse,
 };
+use async_trait::async_trait;
+use rand::Rng;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
-use rand::Rng;
-use async_trait::async_trait;
 
 /// 模拟网络节点，用于测试
 #[derive(Clone)]
@@ -49,7 +49,9 @@ impl MockNetworkNode {
 
     pub fn register_install_snapshot_handler<F>(&self, handler: F)
     where
-        F: Fn(InstallSnapshotRequest) -> Pin<Box<dyn Future<Output = InstallSnapshotReply> + Send>>
+        F: Fn(
+                InstallSnapshotRequest,
+            ) -> Pin<Box<dyn Future<Output = InstallSnapshotResponse> + Send>>
             + Send
             + Sync
             + 'static,
@@ -62,8 +64,8 @@ impl MockNetworkNode {
 /// 模拟网络实现
 pub struct MockNetwork {
     nodes: Arc<RwLock<HashMap<NodeId, MockNetworkNodeInner>>>,
-    latency: RwLock<Duration>,  // 使用RwLock实现内部可变性
-    drop_rate: RwLock<f64>,     // 使用RwLock实现内部可变性
+    latency: RwLock<Duration>, // 使用RwLock实现内部可变性
+    drop_rate: RwLock<f64>,    // 使用RwLock实现内部可变性
 }
 
 struct MockNetworkNodeInner {
@@ -87,7 +89,7 @@ struct MockNetworkNodeInner {
         Arc<
             dyn Fn(
                     InstallSnapshotRequest,
-                ) -> Pin<Box<dyn Future<Output = InstallSnapshotReply> + Send>>
+                ) -> Pin<Box<dyn Future<Output = InstallSnapshotResponse> + Send>>
                 + Send
                 + Sync,
         >,
@@ -141,7 +143,9 @@ impl MockNetwork {
 
     pub fn register_install_snapshot_handler<F>(&self, node_id: NodeId, handler: Arc<F>)
     where
-        F: Fn(InstallSnapshotRequest) -> Pin<Box<dyn Future<Output = InstallSnapshotReply> + Send>>
+        F: Fn(
+                InstallSnapshotRequest,
+            ) -> Pin<Box<dyn Future<Output = InstallSnapshotResponse> + Send>>
             + Send
             + Sync
             + 'static,
@@ -269,7 +273,7 @@ impl Network for MockNetwork {
         &self,
         target: NodeId,
         args: InstallSnapshotRequest,
-    ) -> InstallSnapshotReply {
+    ) -> InstallSnapshotResponse {
         let handler = {
             let nodes = self.nodes.read().unwrap();
             nodes
@@ -285,10 +289,10 @@ impl Network for MockNetwork {
         // 模拟丢包
         let drop_rate = *self.drop_rate.read().unwrap();
         if rand::random::<f64>() < drop_rate {
-            return InstallSnapshotReply {
+            return InstallSnapshotResponse {
                 term: 0,
-                success: false,
                 request_id: args.request_id,
+                state: crate::InstallSnapshotState::Success,
             };
         }
 
@@ -297,10 +301,10 @@ impl Network for MockNetwork {
         }
 
         // 目标节点不存在或无处理器
-        InstallSnapshotReply {
+        InstallSnapshotResponse {
             term: 0,
-            success: false,
             request_id: args.request_id,
+            state: crate::InstallSnapshotState::Success,
         }
     }
 }

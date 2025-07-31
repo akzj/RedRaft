@@ -1,5 +1,43 @@
-use super::{ClusterConfig, Error, LogEntry, Snapshot, Storage};
+use super::{ClusterConfig, Error, LogEntry, Snapshot};
 use std::sync::RwLock;
+
+pub trait Storage {
+    /// 保存硬状态（任期和投票信息）
+    fn save_hard_state(&self, term: u64, voted_for: Option<String>);
+
+    /// 加载硬状态
+    fn load_hard_state(&self) -> (u64, Option<String>);
+
+    /// 追加日志条目
+    fn append(&self, entries: &[LogEntry]) -> Result<(), Error>;
+
+    /// 获取指定范围的日志条目 [low, high)
+    fn entries(&self, low: u64, high: u64) -> Result<Vec<LogEntry>, Error>;
+
+    /// 截断日志后缀（保留 <= idx 的条目）
+    fn truncate_suffix(&self, idx: u64) -> Result<(), Error>;
+
+    /// 截断日志前缀（保留 >= idx 的条目）
+    fn truncate_prefix(&self, idx: u64) -> Result<(), Error>;
+
+    /// 获取最后一条日志的索引
+    fn last_index(&self) -> Result<u64, Error>;
+
+    /// 获取指定索引对应的任期
+    fn term(&self, idx: u64) -> Result<u64, Error>;
+
+    /// 保存快照
+    fn save_snapshot(&self, snap: Snapshot) -> Result<(), Error>;
+
+    /// 加载快照
+    fn load_snapshot(&self) -> Result<Snapshot, Error>;
+
+    /// 保存集群配置
+    fn save_cluster_config(&self, conf: ClusterConfig) -> Result<(), Error>;
+
+    /// 加载集群配置
+    fn load_cluster_config(&self) -> Result<ClusterConfig, Error>;
+}
 
 /// 内存存储实现（用于测试和单机场景）
 pub struct MockStorage {
@@ -174,7 +212,7 @@ impl Storage for MockStorage {
     }
 
     // 保存快照
-    fn save_snapshot(&self, snap: &Snapshot) -> Result<(), Error> {
+    fn save_snapshot(&self, snap: Snapshot) -> Result<(), Error> {
         let mut snapshot = self.snapshot.write().unwrap();
         // 仅保存比当前更新的快照
         if snap.index > snapshot.index {
@@ -191,8 +229,8 @@ impl Storage for MockStorage {
     }
 
     // 保存集群配置
-    fn save_cluster_config(&self, conf: &ClusterConfig) -> Result<(), Error> {
-        *self.config.write().unwrap() = conf.clone();
+    fn save_cluster_config(&self, conf: ClusterConfig) -> Result<(), Error> {
+        *self.config.write().unwrap() = conf;
         Ok(())
     }
 
@@ -270,7 +308,7 @@ mod tests {
             data: vec![0x01],
             config: ClusterConfig::empty(),
         };
-        storage.save_snapshot(&snap).unwrap();
+        storage.save_snapshot(snap).unwrap();
 
         // 验证快照后日志截断
         assert!(storage.entries(1, 2).is_err()); // 已被快照覆盖
