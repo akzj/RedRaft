@@ -1,11 +1,15 @@
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use rand::Rng;
-use std::fmt;
+
+// 导出新模块
+pub mod mock_storage;
+pub mod mock_network;
 
 // 类型定义
 pub type NodeId = String;
@@ -17,8 +21,7 @@ pub struct RequestId(u64);
 
 impl RequestId {
     pub fn new() -> Self {
-        let mut rng = rand::thread_rng();
-        Self(rng.gen::<u64>())
+        Self(rand::random::<u64>())
     }
 }
 
@@ -118,7 +121,12 @@ pub trait RaftCallbacks: Send + Sync {
     fn state_changed(&self, role: Role) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
     // 日志应用到状态机的回调（由外部实现状态机逻辑）
-    fn apply_command(&self, index: u64, term: u64, cmd: Command) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn apply_command(
+        &self,
+        index: u64,
+        term: u64,
+        cmd: Command,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 }
 
 // === 集群配置 ===
@@ -212,24 +220,25 @@ pub struct InstallSnapshotReply {
     pub request_id: RequestId,
 }
 
+#[async_trait::async_trait]
 pub trait Network: Send + Sync {
-    fn send_request_vote(
+    async fn send_request_vote(
         &self,
         target: NodeId,
         args: RequestVoteRequest,
-    ) -> Pin<Box<dyn Future<Output = RequestVoteResponse> + Send>>;
+    ) -> RequestVoteResponse;
 
-    fn send_append_entries(
+    async fn send_append_entries(
         &self,
         target: NodeId,
         args: AppendEntriesRequest,
-    ) -> Pin<Box<dyn Future<Output = AppendEntriesResponse> + Send>>;
+    ) -> AppendEntriesResponse;
 
-    fn send_install_snapshot(
+    async fn send_install_snapshot(
         &self,
         target: NodeId,
         args: InstallSnapshotRequest,
-    ) -> Pin<Box<dyn Future<Output = InstallSnapshotReply> + Send>>;
+    ) -> InstallSnapshotReply;
 }
 
 #[derive(Debug, Clone)]
@@ -424,12 +433,20 @@ impl RaftState {
             Event::ElectionTimeout => self.handle_election_timeout().await,
             Event::RequestVote(args) => self.handle_request_vote(args).await,
             Event::AppendEntries(args) => self.handle_append_entries(args).await,
-            Event::RequestVoteReply(peer, reply) => self.handle_request_vote_reply(peer, reply).await,
-            Event::AppendEntriesReply(peer, reply) => self.handle_append_entries_reply(peer, reply).await,
+            Event::RequestVoteReply(peer, reply) => {
+                self.handle_request_vote_reply(peer, reply).await
+            }
+            Event::AppendEntriesReply(peer, reply) => {
+                self.handle_append_entries_reply(peer, reply).await
+            }
             Event::HeartbeatTimeout => self.handle_heartbeat_timeout().await,
-            Event::ClientPropose { cmd, request_id } => self.handle_client_propose(cmd, request_id).await,
+            Event::ClientPropose { cmd, request_id } => {
+                self.handle_client_propose(cmd, request_id).await
+            }
             Event::InstallSnapshot(args) => self.handle_install_snapshot(args).await,
-            Event::InstallSnapshotReply(peer, reply) => self.handle_install_snapshot_reply(peer, reply).await,
+            Event::InstallSnapshotReply(peer, reply) => {
+                self.handle_install_snapshot_reply(peer, reply).await
+            }
             Event::ApplyLogs => self.apply_committed_logs().await,
         }
     }
@@ -444,7 +461,9 @@ impl RaftState {
         self.current_term += 1;
         self.role = Role::Candidate;
         self.voted_for = Some(self.id.clone());
-        self.callbacks.save_hard_state(self.current_term, self.voted_for.clone()).await;
+        self.callbacks
+            .save_hard_state(self.current_term, self.voted_for.clone())
+            .await;
 
         // 生成新选举ID并初始化跟踪状态
         let election_id = RequestId::new();
@@ -459,7 +478,9 @@ impl RaftState {
         let new_timeout = self.election_timeout_min
             + rand::random::<u64>() % (self.election_timeout_max - self.election_timeout_min + 1);
         self.election_timeout = Duration::from_millis(new_timeout);
-        self.callbacks.set_election_timer(self.election_timeout).await;
+        self.callbacks
+            .set_election_timer(self.election_timeout)
+            .await;
 
         // 发送投票请求
         let last_log_index = self.get_last_log_index();
@@ -491,24 +512,28 @@ impl RaftState {
             self.current_term = args.term;
             self.role = Role::Follower;
             self.voted_for = None;
-            self.callbacks.save_hard_state(self.current_term, self.voted_for.clone()).await;
+            self.callbacks
+                .save_hard_state(self.current_term, self.voted_for.clone())
+                .await;
             self.callbacks.state_changed(Role::Follower).await;
         }
 
         // 日志最新性检查
         let last_log_index = self.get_last_log_index();
         let last_log_term = self.get_last_log_term();
-        let log_ok = args.last_log_term > last_log_term 
+        let log_ok = args.last_log_term > last_log_term
             || (args.last_log_term == last_log_term && args.last_log_index >= last_log_index);
 
         // 投票条件：同任期、未投票或投给同一人、日志最新
-        if args.term == self.current_term 
+        if args.term == self.current_term
             && (self.voted_for.is_none() || self.voted_for == Some(args.candidate_id.clone()))
             && log_ok
         {
             self.voted_for = Some(args.candidate_id.clone());
             vote_granted = true;
-            self.callbacks.save_hard_state(self.current_term, self.voted_for.clone()).await;
+            self.callbacks
+                .save_hard_state(self.current_term, self.voted_for.clone())
+                .await;
         }
 
         // 发送响应
@@ -517,7 +542,9 @@ impl RaftState {
             vote_granted,
             request_id: args.request_id,
         };
-        self.callbacks.send_request_vote_response(args.candidate_id, resp).await;
+        self.callbacks
+            .send_request_vote_response(args.candidate_id, resp)
+            .await;
     }
 
     async fn handle_request_vote_reply(&mut self, peer: NodeId, reply: RequestVoteResponse) {
@@ -538,7 +565,9 @@ impl RaftState {
             self.voted_for = None;
             self.election_votes.clear();
             self.current_election_id = None;
-            self.callbacks.save_hard_state(self.current_term, self.voted_for.clone()).await;
+            self.callbacks
+                .save_hard_state(self.current_term, self.voted_for.clone())
+                .await;
             self.callbacks.state_changed(Role::Follower).await;
             return;
         }
@@ -563,11 +592,15 @@ impl RaftState {
         let win = if let Some(joint) = &self.election_joint_config {
             let old_quorum = joint.old.len() / 2 + 1;
             let new_quorum = joint.new.len() / 2 + 1;
-            let old_votes = self.election_votes.iter()
+            let old_votes = self
+                .election_votes
+                .iter()
                 .filter(|(id, granted)| **granted && joint.old.contains(*id))
                 .count();
-            let new_votes = self.election_votes.iter()
-                .filter(|(id, granted)|** granted && joint.new.contains(*id))
+            let new_votes = self
+                .election_votes
+                .iter()
+                .filter(|(id, granted)| **granted && joint.new.contains(*id))
                 .count();
             old_votes >= old_quorum && new_votes >= new_quorum
         } else {
@@ -596,7 +629,9 @@ impl RaftState {
         }
 
         // 启动心跳和日志应用定时器
-        self.callbacks.set_heartbeat_timer(self.heartbeat_interval).await;
+        self.callbacks
+            .set_heartbeat_timer(self.heartbeat_interval)
+            .await;
         self.callbacks.set_apply_timer(self.apply_interval).await;
         self.callbacks.state_changed(Role::Leader).await;
 
@@ -609,7 +644,9 @@ impl RaftState {
         let new_timeout = self.election_timeout_min
             + rand::random::<u64>() % (self.election_timeout_max - self.election_timeout_min + 1);
         self.election_timeout = Duration::from_millis(new_timeout);
-        self.callbacks.set_election_timer(self.election_timeout).await;
+        self.callbacks
+            .set_election_timer(self.election_timeout)
+            .await;
     }
 
     // === 日志同步相关逻辑 ===
@@ -618,7 +655,9 @@ impl RaftState {
             return;
         }
         self.broadcast_append_entries().await;
-        self.callbacks.set_heartbeat_timer(self.heartbeat_interval).await;
+        self.callbacks
+            .set_heartbeat_timer(self.heartbeat_interval)
+            .await;
     }
 
     async fn broadcast_append_entries(&mut self) {
@@ -680,7 +719,9 @@ impl RaftState {
                 conflict_index: Some(self.get_last_log_index() + 1),
                 request_id: args.request_id,
             };
-            self.callbacks.send_append_entries_response(args.leader_id, resp).await;
+            self.callbacks
+                .send_append_entries_response(args.leader_id, resp)
+                .await;
             return;
         }
 
@@ -688,7 +729,9 @@ impl RaftState {
         self.role = Role::Follower;
         self.current_term = args.term;
         self.last_heartbeat = Instant::now();
-        self.callbacks.set_election_timer(self.election_timeout).await;
+        self.callbacks
+            .set_election_timer(self.election_timeout)
+            .await;
         self.callbacks.state_changed(Role::Follower).await;
 
         // 日志连续性检查
@@ -714,7 +757,9 @@ impl RaftState {
                 conflict_index: Some(conflict_idx),
                 request_id: args.request_id,
             };
-            self.callbacks.send_append_entries_response(args.leader_id, resp).await;
+            self.callbacks
+                .send_append_entries_response(args.leader_id, resp)
+                .await;
             return;
         }
 
@@ -725,7 +770,7 @@ impl RaftState {
         if !args.entries.is_empty() {
             let _ = self.storage.append(&args.entries);
             self.callbacks.save_log_entries(args.entries.clone()).await;
-            
+
             // 处理配置变更日志
             self.process_config_entries(&args.entries).await;
         }
@@ -742,7 +787,9 @@ impl RaftState {
             conflict_index: None,
             request_id: args.request_id,
         };
-        self.callbacks.send_append_entries_response(args.leader_id, resp).await;
+        self.callbacks
+            .send_append_entries_response(args.leader_id, resp)
+            .await;
     }
 
     async fn handle_append_entries_reply(&mut self, peer: NodeId, reply: AppendEntriesResponse) {
@@ -755,7 +802,9 @@ impl RaftState {
             self.current_term = reply.term;
             self.role = Role::Follower;
             self.voted_for = None;
-            self.callbacks.save_hard_state(self.current_term, self.voted_for.clone()).await;
+            self.callbacks
+                .save_hard_state(self.current_term, self.voted_for.clone())
+                .await;
             self.callbacks.state_changed(Role::Follower).await;
             return;
         }
@@ -763,8 +812,11 @@ impl RaftState {
         // 更新复制状态
         if reply.success {
             let req_next_idx = self.next_index.get(&peer).copied().unwrap_or(1);
-            let entries_len = self.storage.entries(req_next_idx, self.get_last_log_index() + 1)
-                .unwrap_or_default().len() as u64;
+            let entries_len = self
+                .storage
+                .entries(req_next_idx, self.get_last_log_index() + 1)
+                .unwrap_or_default()
+                .len() as u64;
             let new_match_idx = req_next_idx + entries_len - 1;
             let new_next_idx = new_match_idx + 1;
 
@@ -800,7 +852,9 @@ impl RaftState {
             request_id: RequestId::new(),
         };
 
-        self.callbacks.send_install_snapshot_request(target, req).await;
+        self.callbacks
+            .send_install_snapshot_request(target, req)
+            .await;
     }
 
     async fn handle_install_snapshot(&mut self, args: InstallSnapshotRequest) {
@@ -811,7 +865,9 @@ impl RaftState {
                 success: false,
                 request_id: args.request_id,
             };
-            self.callbacks.send_install_snapshot_reply(args.leader_id, resp).await;
+            self.callbacks
+                .send_install_snapshot_reply(args.leader_id, resp)
+                .await;
             return;
         }
 
@@ -820,7 +876,9 @@ impl RaftState {
         self.current_term = args.term;
         self.last_heartbeat = Instant::now();
         self.current_snapshot_id = Some(args.request_id);
-        self.callbacks.set_election_timer(self.election_timeout).await;
+        self.callbacks
+            .set_election_timer(self.election_timeout)
+            .await;
 
         // 仅处理比当前快照更新的快照
         if args.last_included_index <= self.last_snapshot_index {
@@ -829,7 +887,9 @@ impl RaftState {
                 success: true,
                 request_id: args.request_id,
             };
-            self.callbacks.send_install_snapshot_reply(args.leader_id, resp).await;
+            self.callbacks
+                .send_install_snapshot_reply(args.leader_id, resp)
+                .await;
             return;
         }
 
@@ -856,7 +916,9 @@ impl RaftState {
             success: true,
             request_id: args.request_id,
         };
-        self.callbacks.send_install_snapshot_reply(args.leader_id, resp).await;
+        self.callbacks
+            .send_install_snapshot_reply(args.leader_id, resp)
+            .await;
     }
 
     async fn handle_install_snapshot_reply(&mut self, peer: NodeId, reply: InstallSnapshotReply) {
@@ -869,7 +931,9 @@ impl RaftState {
             self.current_term = reply.term;
             self.role = Role::Follower;
             self.voted_for = None;
-            self.callbacks.save_hard_state(self.current_term, self.voted_for.clone()).await;
+            self.callbacks
+                .save_hard_state(self.current_term, self.voted_for.clone())
+                .await;
             self.callbacks.state_changed(Role::Follower).await;
             return;
         }
@@ -885,7 +949,9 @@ impl RaftState {
     // === 客户端请求与日志应用 ===
     async fn handle_client_propose(&mut self, cmd: Command, request_id: RequestId) {
         if self.role != Role::Leader {
-            self.callbacks.client_response(request_id, Err(Error("not leader".into()))).await;
+            self.callbacks
+                .client_response(request_id, Err(Error("not leader".into())))
+                .await;
             return;
         }
 
@@ -927,7 +993,9 @@ impl RaftState {
 
         // 逐个应用日志
         for entry in entries {
-            self.callbacks.apply_command(entry.index, entry.term, entry.command).await;
+            self.callbacks
+                .apply_command(entry.index, entry.term, entry.command)
+                .await;
             self.last_applied = entry.index;
 
             // 如果是客户端请求，返回响应
@@ -960,8 +1028,10 @@ impl RaftState {
                 // 解析配置变更命令（实际实现需序列化/反序列化）
                 if let Ok(new_config) = bincode::deserialize(&entry.command) {
                     self.config = new_config;
-                    self.callbacks.save_cluster_config(self.config.clone()).await;
-                    
+                    self.callbacks
+                        .save_cluster_config(self.config.clone())
+                        .await;
+
                     // 如果是联合配置且已提交，尝试退出联合状态
                     if self.config.joint.is_some() && entry.index <= self.commit_index {
                         self.try_leave_joint().await;
@@ -973,12 +1043,16 @@ impl RaftState {
 
     async fn try_leave_joint(&mut self) {
         // 检查是否所有节点都已复制联合配置日志
-        let all_replicated = self.peers.iter()
+        let all_replicated = self
+            .peers
+            .iter()
             .all(|peer| self.match_index.get(peer).copied().unwrap_or(0) >= self.commit_index);
 
         if all_replicated {
             self.config.leave_joint();
-            self.callbacks.save_cluster_config(self.config.clone()).await;
+            self.callbacks
+                .save_cluster_config(self.config.clone())
+                .await;
         }
     }
 
@@ -991,11 +1065,17 @@ impl RaftState {
     }
 
     fn get_effective_peers(&self) -> Vec<NodeId> {
-        self.get_effective_voters().into_iter().filter(|id| *id != self.id).collect()
+        self.get_effective_voters()
+            .into_iter()
+            .filter(|id| *id != self.id)
+            .collect()
     }
 
     fn get_last_log_index(&self) -> u64 {
-        self.storage.last_index().unwrap_or(0).max(self.last_snapshot_index)
+        self.storage
+            .last_index()
+            .unwrap_or(0)
+            .max(self.last_snapshot_index)
     }
 
     fn get_last_log_term(&self) -> u64 {
@@ -1003,7 +1083,9 @@ impl RaftState {
         if last_log_idx == 0 {
             self.last_snapshot_term
         } else {
-            self.storage.term(last_log_idx).unwrap_or(self.last_snapshot_term)
+            self.storage
+                .term(last_log_idx)
+                .unwrap_or(self.last_snapshot_term)
         }
     }
 
@@ -1017,7 +1099,9 @@ impl RaftState {
         if match_indices.len() >= quorum {
             let candidate = match_indices[quorum - 1];
             // 确保候选索引的任期与当前任期相同（Raft约束）
-            if candidate > self.commit_index && self.storage.term(candidate).unwrap_or(0) == self.current_term {
+            if candidate > self.commit_index
+                && self.storage.term(candidate).unwrap_or(0) == self.current_term
+            {
                 self.commit_index = candidate;
             }
         }
@@ -1151,10 +1235,7 @@ impl RaftCallbacks for DefaultCallbacks {
         })
     }
 
-    fn save_cluster_config(
-        &self,
-        conf: ClusterConfig,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    fn save_cluster_config(&self, conf: ClusterConfig) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let storage = self.storage.clone();
         Box::pin(async move {
             let _ = storage.save_cluster_config(&conf);
@@ -1185,7 +1266,12 @@ impl RaftCallbacks for DefaultCallbacks {
         Box::pin(async {})
     }
 
-    fn apply_command(&self, _index: u64, _term: u64, _cmd: Command) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    fn apply_command(
+        &self,
+        _index: u64,
+        _term: u64,
+        _cmd: Command,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         Box::pin(async {})
     }
 }
