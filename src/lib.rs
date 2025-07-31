@@ -109,22 +109,37 @@ pub trait Network {
 }
 
 /// Raft 持久化存储接口
+#[derive(Debug)]
+pub struct Error(pub String);
+
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub index: u64,
+    pub term: u64,
+    pub data: Vec<u8>,
+    pub config: ClusterConfig,
+}
+
 pub trait Storage {
-    /// 持久化当前任期
-    fn save_current_term(&mut self, term: u64);
-    fn load_current_term(&self) -> u64;
+    /* ========== HardState ========== */
+    fn save_hard_state(&mut self, term: u64, voted_for: Option<NodeId>);
+    fn load_hard_state(&self) -> (u64, Option<NodeId>);
 
-    /// 持久化投票对象
-    fn save_voted_for(&mut self, voted_for: Option<NodeId>);
-    fn load_voted_for(&self) -> Option<NodeId>;
+    /* ========== Log ========== */
+    fn append(&mut self, entries: &[LogEntry]) -> Result<(), Error>;
+    fn entries(&self, low: u64, high: u64) -> Result<Vec<LogEntry>, Error>;
+    fn truncate_suffix(&mut self, idx: u64) -> Result<(), Error>;
+    fn truncate_prefix(&mut self, idx: u64) -> Result<(), Error>;
+    fn last_index(&self) -> Result<u64, Error>;
+    fn term(&self, idx: u64) -> Result<u64, Error>;
 
-    /// 持久化日志条目
-    fn save_log(&mut self, log: &Vec<LogEntry>);
-    fn load_log(&self) -> Vec<LogEntry>;
+    /* ========== Snapshot ========== */
+    fn save_snapshot(&mut self, snap: &Snapshot) -> Result<(), Error>;
+    fn load_snapshot(&self) -> Result<Snapshot, Error>;
 
-    /// 持久化集群配置
-    fn save_cluster_config(&mut self, config: &ClusterConfig);
-    fn load_cluster_config(&self) -> ClusterConfig;
+    /* ========== Cluster Config ========== */
+    fn save_cluster_config(&mut self, conf: &ClusterConfig) -> Result<(), Error>;
+    fn load_cluster_config(&self) -> Result<ClusterConfig, Error>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,7 +163,7 @@ pub struct RaftNode {
     pub role: Role,
     pub current_term: u64,
     pub voted_for: Option<NodeId>,
-    pub log: Vec<LogEntry>,
+    // 日志依赖 Storage trait，不再直接持有 log
     pub commit_index: u64,
     pub last_applied: u64,
     pub next_index: HashMap<NodeId, u64>,
@@ -202,10 +217,11 @@ impl RaftNode {
         election_timeout_min: u64,
         election_timeout_max: u64,
     ) -> Self {
-        let current_term = storage.load_current_term();
-        let voted_for = storage.load_voted_for();
-        let log = storage.load_log();
-        let loaded_config = storage.load_cluster_config();
+        let (current_term, voted_for) = storage.load_hard_state();
+        let loaded_config = match storage.load_cluster_config() {
+            Ok(conf) => conf,
+            Err(_) => ClusterConfig::empty(),
+        };
         let timeout = election_timeout_min
             + rand::random::<u64>() % (election_timeout_max - election_timeout_min + 1);
         RaftNode {
@@ -215,7 +231,7 @@ impl RaftNode {
             role: Role::Follower,
             current_term,
             voted_for,
-            log,
+            // log 由 Storage trait 管理
             commit_index: 0,
             last_applied: 0,
             next_index: HashMap::new(),
@@ -240,31 +256,37 @@ impl RaftNode {
         self.election_timeout = Duration::from_millis(election_timeout);
         self.last_heartbeat = Instant::now();
         // 持久化 term 和 voted_for
-        self.storage.save_current_term(self.current_term);
-        self.storage.save_voted_for(self.voted_for.clone());
+        self.storage
+            .save_hard_state(self.current_term, self.voted_for.clone());
 
         // 统一投票集合（joint时为old+new，否则为voters）
         let effective: std::collections::HashSet<NodeId> = match self.config.joint.as_ref() {
             Some(j) => j.old.union(&j.new).cloned().collect(),
             None => self.config.voters.clone(),
         };
+        let last_index = self.storage.last_index().unwrap_or(0);
+        let last_term = self.storage.term(last_index).unwrap_or(0);
         let args = RequestVoteArgs {
             term: self.current_term,
             candidate_id: self.id.clone(),
-            last_log_index: self.log.len() as u64,
-            last_log_term: self.log.last().map_or(0, |entry| entry.term),
+            last_log_index: last_index,
+            last_log_term: last_term,
         };
 
         use tokio::time::{Duration as TokioDuration, timeout};
         let rpc_timeout = TokioDuration::from_millis(300);
         let mut max_term = self.current_term;
         use std::collections::HashMap;
-        let mut results: HashMap<NodeId, Result<RequestVoteReply, tokio::time::error::Elapsed>> = HashMap::new();
+        let mut results: HashMap<NodeId, Result<RequestVoteReply, tokio::time::error::Elapsed>> =
+            HashMap::new();
         // 自身投票直接插入
-        results.insert(self.id.clone(), Ok(RequestVoteReply {
-            term: self.current_term,
-            vote_granted: true,
-        }));
+        results.insert(
+            self.id.clone(),
+            Ok(RequestVoteReply {
+                term: self.current_term,
+                vote_granted: true,
+            }),
+        );
         let mut futs = Vec::new();
         for peer in &effective {
             if *peer == self.id {
@@ -272,9 +294,16 @@ impl RaftNode {
             }
             let net = self.network.as_ref();
             let args = args.clone();
-            futs.push((peer.clone(), timeout(rpc_timeout, net.send_request_vote(peer.clone(), args))));
+            futs.push((
+                peer.clone(),
+                timeout(rpc_timeout, net.send_request_vote(peer.clone(), args)),
+            ));
         }
-        let joined = futures::future::join_all(futs.into_iter().map(|(peer, fut)| async move { (peer, fut.await) })).await;
+        let joined = futures::future::join_all(
+            futs.into_iter()
+                .map(|(peer, fut)| async move { (peer, fut.await) }),
+        )
+        .await;
         for (peer, reply) in joined {
             results.insert(peer, reply);
         }
@@ -292,22 +321,29 @@ impl RaftNode {
             self.current_term = max_term;
             self.role = Role::Follower;
             self.voted_for = None;
-            self.storage.save_current_term(self.current_term);
-            self.storage.save_voted_for(self.voted_for.clone());
+            self.storage
+                .save_hard_state(self.current_term, self.voted_for.clone());
             return;
         }
 
         // 判断是否赢得选举（联合共识需新旧配置均过半）
         let win = if let Some(joint) = self.config.joint.as_ref() {
-            let votes_old = results.iter()
-                            .filter(|(id, r)| r.as_ref().map_or(false, |v| v.vote_granted) && joint.old.contains(&**id))
-                            .count();
-            let votes_new = results.iter()
-                            .filter(|(id, r)| r.as_ref().map_or(false, |v| v.vote_granted) && joint.new.contains(&**id))
-                            .count();
+            let votes_old = results
+                .iter()
+                .filter(|(id, r)| {
+                    r.as_ref().map_or(false, |v| v.vote_granted) && joint.old.contains(&**id)
+                })
+                .count();
+            let votes_new = results
+                .iter()
+                .filter(|(id, r)| {
+                    r.as_ref().map_or(false, |v| v.vote_granted) && joint.new.contains(&**id)
+                })
+                .count();
             votes_old >= (joint.old.len() / 2 + 1) && votes_new >= (joint.new.len() / 2 + 1)
         } else {
-            let votes = results.iter()
+            let votes = results
+                .iter()
                 .filter(|(_, r)| r.as_ref().map_or(false, |v| v.vote_granted))
                 .count();
             votes > effective.len() / 2
@@ -315,7 +351,7 @@ impl RaftNode {
         if win {
             self.role = Role::Leader;
             // 初始化 next_index/match_index
-            let last_index = self.log.last().map_or(0, |e| e.index);
+            let last_index = self.storage.last_index().unwrap_or(0);
             for peer in &self.peers {
                 self.next_index.insert(peer.clone(), last_index + 1);
                 self.match_index.insert(peer.clone(), 0);
@@ -334,8 +370,8 @@ impl RaftNode {
 
     /// 发送 AppendEntries RPC 到所有 follower
     pub fn broadcast_append_entries(&self, entries: Vec<LogEntry>, leader_commit: u64) {
-        let prev_log_index = self.log.last().map_or(0, |e| e.index);
-        let prev_log_term = self.log.last().map_or(0, |e| e.term);
+        let prev_log_index = self.storage.last_index().unwrap_or(0);
+        let prev_log_term = self.storage.term(prev_log_index).unwrap_or(0);
         let args = AppendEntriesArgs {
             term: self.current_term,
             leader_id: self.id.clone(),
@@ -361,34 +397,33 @@ impl RaftNode {
     }
 
     pub fn handle_request_vote(&mut self, args: RequestVoteArgs) -> RequestVoteReply {
-        // 如果接收到的请求的 term 较大，更新当前节点状态
+        // 1. 若 term 更大，无条件降级并更新
         if args.term > self.current_term {
             self.current_term = args.term;
             self.role = Role::Follower;
             self.voted_for = None;
-            self.storage.save_current_term(self.current_term);
-            self.storage.save_voted_for(self.voted_for.clone());
         }
 
-        // 投票规则校验
-        let mut vote_granted = false;
+        // 2. 日志最新性检查
+        let last_idx = self.storage.last_index().unwrap_or(0);
+        let last_term = self.storage.term(last_idx).unwrap_or(0);
+        let log_ok = args.last_log_term > last_term
+            || (args.last_log_term == last_term && args.last_log_index >= last_idx);
 
-        // 1. 检查 term
-        if args.term == self.current_term {
-            // 2. 检查是否已经投票给其他候选人
-            if self.voted_for.is_none() {
-                self.voted_for = Some(args.candidate_id.clone());
-                vote_granted = true;
-                self.storage.save_voted_for(self.voted_for.clone());
-            }
-        } else if args.term > self.current_term {
-            // 3. 如果收到的请求的 term 较大，更新当前节点状态
-            self.current_term = args.term;
-            self.role = Role::Follower;
+        // 3. 投票规则
+        let mut vote_granted = false;
+        if args.term == self.current_term
+            && (self.voted_for.is_none() || self.voted_for == Some(args.candidate_id.clone()))
+            && log_ok
+        {
             self.voted_for = Some(args.candidate_id.clone());
             vote_granted = true;
-            self.storage.save_current_term(self.current_term);
-            self.storage.save_voted_for(self.voted_for.clone());
+        }
+
+        // 4. 只在投票成功或 term 变化时写盘
+        if vote_granted || args.term > self.current_term {
+            self.storage
+                .save_hard_state(self.current_term, self.voted_for.clone());
         }
 
         RequestVoteReply {
@@ -399,20 +434,33 @@ impl RaftNode {
 
     // 日志复制相关
     pub fn handle_append_entries(&mut self, args: AppendEntriesArgs) -> AppendEntriesReply {
-        // 如果 term 较小，拒绝服务
+        // 1. term 太小直接拒绝
         if args.term < self.current_term {
             return AppendEntriesReply {
                 term: self.current_term,
                 success: false,
-                conflict_index: None,
+                conflict_index: Some(self.storage.last_index().unwrap_or(0) + 1),
             };
         }
 
-        // 更新 leader 信息
+        // 2. 更新 leader 心跳和状态
         self.last_heartbeat = Instant::now();
+        self.current_term = args.term;
+        self.role = Role::Follower;
 
-        // 如果接收到的日志条目不连续，返回冲突索引
-        if args.prev_log_index > 0 && self.log.len() as u64 <= args.prev_log_index {
+        // 3. 日志连续性检查
+        let last_idx = self.storage.last_index().unwrap_or(0);
+        if args.prev_log_index > last_idx {
+            return AppendEntriesReply {
+                term: self.current_term,
+                success: false,
+                conflict_index: Some(last_idx + 1),
+            };
+        }
+
+        // 4. prev_term 匹配检查
+        let prev_term = self.storage.term(args.prev_log_index).unwrap_or(0);
+        if prev_term != args.prev_log_term {
             return AppendEntriesReply {
                 term: self.current_term,
                 success: false,
@@ -420,38 +468,18 @@ impl RaftNode {
             };
         }
 
-        // 日志匹配，追加
-        let mut conflict_index = None;
-        if let Some(last_entry) = self.log.last_mut() {
-            if last_entry.term == args.prev_log_term {
-                // 索引连续，直接追加
-                self.log.truncate(args.prev_log_index as usize);
-                self.log.extend(args.entries);
-                conflict_index = Some(args.prev_log_index);
-                self.storage.save_log(&self.log);
-            } else {
-                // 索引不连续，找到冲突点
-                conflict_index = Some(args.prev_log_index);
-                self.log.truncate(args.prev_log_index as usize);
-                self.log.extend(args.entries);
-                self.storage.save_log(&self.log);
-            }
-        } else {
-            // 日志为空，直接追加
-            self.log.extend(args.entries);
-            conflict_index = Some(args.prev_log_index);
-            self.storage.save_log(&self.log);
-        }
+        // 5. 截断 + 追加
+        let _ = self.storage.truncate_suffix(args.prev_log_index + 1);
+        let _ = self.storage.append(&args.entries);
 
-        // 更新提交索引
-        if args.leader_commit > self.commit_index {
-            self.commit_index = std::cmp::min(args.leader_commit, self.log.len() as u64);
-        }
+        // 6. 更新 commit_index
+        let new_last = self.storage.last_index().unwrap_or(0);
+        self.commit_index = std::cmp::min(args.leader_commit, new_last);
 
         AppendEntriesReply {
             term: self.current_term,
             success: true,
-            conflict_index,
+            conflict_index: None,
         }
     }
 
