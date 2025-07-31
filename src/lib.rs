@@ -293,6 +293,12 @@ pub struct RaftState {
     storage: Arc<dyn Storage>,
     network: Arc<dyn Network + Send + Sync>,
     callbacks: Arc<dyn RaftCallbacks>, // 回调实例
+
+    // 选举跟踪（仅 Candidate 状态有效）
+    election_votes: HashMap<NodeId, bool>, // 已收到的投票（节点ID -> 是否同意）
+    election_effective_voters: HashSet<NodeId>, // 本次选举的有效投票者集合
+    election_joint_config: Option<JointConfig>, // 本次选举时的联合配置（快照）
+    election_max_term: u64,                // 本次选举中收到的最大 term
 }
 
 impl RaftState {
@@ -332,6 +338,10 @@ impl RaftState {
             storage,
             network,
             callbacks,
+            election_votes: HashMap::new(),
+            election_effective_voters: HashSet::new(),
+            election_joint_config: None,
+            election_max_term: current_term,
         }
     }
 
@@ -380,16 +390,24 @@ impl RaftState {
         };
         let last_log_index = self.storage.last_index().unwrap_or(0);
         let last_log_term = self.storage.term(last_log_index).unwrap_or(0);
-        let vote_args = RequestVoteRequest {
+        let req = RequestVoteRequest {
             term: self.current_term,
             candidate_id: self.id.clone(),
             last_log_index,
             last_log_term,
         };
+
+        // 初始化选举跟踪字段
+        self.election_votes.clear();
+        self.election_votes.insert(self.id.clone(), true);
+        self.election_effective_voters = effective_voters.clone();
+        self.election_joint_config = self.config.joint.clone();
+        self.election_max_term = self.current_term;
+
         for peer in &effective_voters {
             if *peer != self.id {
                 let target = peer.clone();
-                let args = vote_args.clone();
+                let args = req.clone();
                 self.callbacks.send_request_vote_request(target, args).await;
             }
         }
@@ -569,15 +587,27 @@ impl RaftState {
 
     /// 处理 RequestVote 响应
     async fn handle_request_vote_reply(&mut self, peer: NodeId, reply: RequestVoteResponse) {
+        // 非候选人忽略投票回复
         if self.role != Role::Candidate {
             return;
         }
 
-        // 若对方 term 更高，降级为 Follower
+        // 忽略非本次选举的投票者（可能配置已变更）
+        if !self.election_effective_voters.contains(&peer) {
+            return;
+        }
+
+        // 记录收到的最大 term
+        if reply.term > self.election_max_term {
+            self.election_max_term = reply.term;
+        }
+
+        // 若对方 term 更高，立即降级为 Follower
         if reply.term > self.current_term {
             self.current_term = reply.term;
             self.role = Role::Follower;
             self.voted_for = None;
+            self.election_votes.clear(); // 清空选举状态
             self.callbacks
                 .save_hard_state(self.current_term, self.voted_for.clone())
                 .await;
@@ -585,23 +615,85 @@ impl RaftState {
             return;
         }
 
-        // 统计选票（实际实现需维护投票计数）
-        // ...
+        // 记录投票结果（仅处理当前 term 的回复）
+        if reply.term == self.current_term {
+            self.election_votes.insert(peer, reply.vote_granted);
+        }
 
         // 检查是否赢得选举
-        if self.check_election_win() {
-            self.role = Role::Leader;
-            // 初始化 next_index 和 match_index
-            let last_idx = self.storage.last_index().unwrap_or(0);
-            for peer in &self.peers {
-                self.next_index.insert(peer.clone(), last_idx + 1);
-                self.match_index.insert(peer.clone(), 0);
-            }
-            self.callbacks.state_changed(Role::Leader).await;
-            self.callbacks
-                .set_heartbeat_timer(Duration::from_millis(100))
-                .await;
+        self.check_and_handle_election_result().await;
+    }
+
+    // 辅助方法：检查选举结果并处理
+    async fn check_and_handle_election_result(&mut self) {
+        // 尚未收集到足够投票（避免提前判断）
+        let received_count = self.election_votes.len();
+        let total_voters = self.election_effective_voters.len();
+        if received_count < total_voters {
+            return; // 继续等待其他投票
         }
+
+        // 判断是否赢得选举（复用 start_election 中的投票逻辑）
+        let win = if let Some(joint) = &self.election_joint_config {
+            // 联合配置：需新旧配置均满足多数
+            let votes_old = self
+                .election_votes
+                .iter()
+                .filter(|(id, granted)| **granted && joint.old.contains(*id))
+                .count();
+            let votes_new = self
+                .election_votes
+                .iter()
+                .filter(|(id, granted)| **granted && joint.new.contains(*id))
+                .count();
+            votes_old >= (joint.old.len() / 2 + 1) && votes_new >= (joint.new.len() / 2 + 1)
+        } else {
+            // 普通配置：超过半数同意
+            let votes_granted = self
+                .election_votes
+                .values()
+                .filter(|&&granted| granted)
+                .count();
+            votes_granted > total_voters / 2
+        };
+
+        if win {
+            // 赢得选举：成为 Leader
+            self.become_leader().await;
+        } else {
+            // 未赢得选举：保持 Candidate，等待下一轮超时
+            self.reset_election_timer().await;
+        }
+    }
+
+    // 成为 Leader 的处理逻辑
+    async fn become_leader(&mut self) {
+        self.role = Role::Leader;
+        // 初始化 next_index 和 match_index
+        let last_idx = self.storage.last_index().unwrap_or(0);
+        self.next_index.clear();
+        self.match_index.clear();
+        for peer in &self.peers {
+            self.next_index.insert(peer.clone(), last_idx + 1);
+            self.match_index.insert(peer.clone(), 0);
+        }
+        // 通知状态变更并启动心跳
+        self.callbacks.state_changed(Role::Leader).await;
+        self.callbacks
+            .set_heartbeat_timer(Duration::from_millis(100))
+            .await;
+        // 立即广播一次心跳（加速同步）
+        self.handle_heartbeat_timeout().await;
+    }
+
+    // 重置选举定时器（未赢得选举时）
+    async fn reset_election_timer(&mut self) {
+        let new_timeout = self.election_timeout_min
+            + rand::random::<u64>() % (self.election_timeout_max - self.election_timeout_min + 1);
+        self.election_timeout = Duration::from_millis(new_timeout);
+        self.callbacks
+            .set_election_timer(self.election_timeout)
+            .await;
     }
 
     /// 处理 AppendEntries 响应
