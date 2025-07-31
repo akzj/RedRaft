@@ -1,13 +1,95 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+// 类型定义
 pub type NodeId = String;
 
+// === 事件定义（输入）===
+#[derive(Debug)]
+pub enum Event {
+    // 定时器事件
+    ElectionTimeout,  // 选举超时（Follower/Candidate 触发）
+    HeartbeatTimeout, // 心跳超时（Leader 触发日志同步）
+
+    // RPC 请求事件（来自其他节点）
+    RequestVote(RequestVoteRequest),
+    AppendEntries(AppendEntriesRequest),
+    InstallSnapshot(InstallSnapshotRequest),
+
+    // RPC 响应事件（其他节点对本节点请求的回复）
+    RequestVoteReply(NodeId, RequestVoteResponse),
+    AppendEntriesReply(NodeId, AppendEntriesResponse),
+    InstallSnapshotReply(NodeId, InstallSnapshotReply),
+
+    // 客户端事件
+    ClientPropose(Vec<u8>), // 客户端提交命令
+}
+
+// === 回调接口定义（替代 Action，外部实现）===
+pub trait RaftCallbacks: Send + Sync {
+    // 发送 RPC 回调
+    fn send_request_vote_request(
+        &self,
+        target: NodeId,
+        args: RequestVoteRequest,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    fn send_request_vote_response(
+        &self,
+        target: NodeId,
+        args: RequestVoteResponse,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    fn send_append_entries_request(
+        &self,
+        target: NodeId,
+        args: AppendEntriesRequest,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    fn send_append_entries_response(
+        &self,
+        target: NodeId,
+        args: AppendEntriesResponse,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    fn send_install_snapshot_request(
+        &self,
+        target: NodeId,
+        args: InstallSnapshotRequest,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    // 持久化回调
+    fn save_hard_state(
+        &self,
+        term: u64,
+        voted_for: Option<NodeId>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn save_log_entries(&self, entries: Vec<LogEntry>) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn save_snapshot(&self, snap: Snapshot) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn save_cluster_config(&self, conf: ClusterConfig) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    // 定时器回调
+    fn set_election_timer(&self, dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn set_heartbeat_timer(&self, dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    // 客户端响应回调
+    fn client_response(
+        &self,
+        result: Result<u64, Error>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    // 状态变更通知回调
+    fn state_changed(&self, role: Role) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+}
+
+// === 集群配置 ===
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterConfig {
-    /// 当前生效的投票节点集合
     pub voters: HashSet<NodeId>,
-    /// 如果处于 joint 阶段，则记录旧+新两套配置
     pub joint: Option<JointConfig>,
 }
 
@@ -38,9 +120,15 @@ impl ClusterConfig {
         });
         self.voters = old.union(&new).cloned().collect();
     }
-    pub fn leave_joint(&mut self) {
+    pub fn leave_joint(&mut self) -> Self {
         if let Some(j) = self.joint.take() {
-            self.voters = j.new;
+            self.voters = j.new.clone();
+            Self {
+                voters: j.new,
+                joint: None,
+            }
+        } else {
+            self.clone()
         }
     }
     pub fn quorum(&self) -> usize {
@@ -63,18 +151,15 @@ impl ClusterConfig {
         }
     }
 }
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 
+// === 网络与存储接口 ===
 #[derive(Debug, Clone)]
-pub struct InstallSnapshotArgs {
+pub struct InstallSnapshotRequest {
     pub term: u64,
     pub leader_id: NodeId,
     pub last_included_index: u64,
     pub last_included_term: u64,
-    pub data: Vec<u8>, // 快照数据
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,34 +168,26 @@ pub struct InstallSnapshotReply {
     pub success: bool,
 }
 
-/// Raft 节点间网络通信接口
-use std::future::Future;
-use std::pin::Pin;
-
-pub trait Network {
-    /// 发送 RequestVote RPC
+pub trait Network: Send + Sync {
     fn send_request_vote(
         &self,
         target: NodeId,
-        args: RequestVoteArgs,
-    ) -> Pin<Box<dyn Future<Output = RequestVoteReply> + Send>>;
+        args: RequestVoteRequest,
+    ) -> Pin<Box<dyn Future<Output = RequestVoteResponse> + Send>>;
 
-    /// 发送 AppendEntries RPC
     fn send_append_entries(
         &self,
         target: NodeId,
-        args: AppendEntriesArgs,
-    ) -> Pin<Box<dyn Future<Output = AppendEntriesReply> + Send>>;
+        args: AppendEntriesRequest,
+    ) -> Pin<Box<dyn Future<Output = AppendEntriesResponse> + Send>>;
 
-    /// 发送 InstallSnapshot RPC（可后续扩展）
     fn send_install_snapshot(
         &self,
         target: NodeId,
-        args: InstallSnapshotArgs,
+        args: InstallSnapshotRequest,
     ) -> Pin<Box<dyn Future<Output = InstallSnapshotReply> + Send>>;
 }
 
-/// Raft 持久化存储接口
 #[derive(Debug)]
 pub struct Error(pub String);
 
@@ -123,11 +200,9 @@ pub struct Snapshot {
 }
 
 pub trait Storage: Send + Sync {
-    /* ========== HardState ========== */
     fn save_hard_state(&self, term: u64, voted_for: Option<NodeId>);
     fn load_hard_state(&self) -> (u64, Option<NodeId>);
 
-    /* ========== Log ========== */
     fn append(&self, entries: &[LogEntry]) -> Result<(), Error>;
     fn entries(&self, low: u64, high: u64) -> Result<Vec<LogEntry>, Error>;
     fn truncate_suffix(&self, idx: u64) -> Result<(), Error>;
@@ -135,16 +210,15 @@ pub trait Storage: Send + Sync {
     fn last_index(&self) -> Result<u64, Error>;
     fn term(&self, idx: u64) -> Result<u64, Error>;
 
-    /* ========== Snapshot ========== */
     fn save_snapshot(&self, snap: &Snapshot) -> Result<(), Error>;
     fn load_snapshot(&self) -> Result<Snapshot, Error>;
 
-    /* ========== Cluster Config ========== */
     fn save_cluster_config(&self, conf: &ClusterConfig) -> Result<(), Error>;
     fn load_cluster_config(&self) -> Result<ClusterConfig, Error>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// === 核心状态与逻辑 ===
+#[derive(Debug, PartialEq, Eq)]
 pub enum Role {
     Leader,
     Follower,
@@ -155,31 +229,11 @@ pub enum Role {
 pub struct LogEntry {
     pub term: u64,
     pub index: u64,
-    pub command: Vec<u8>, // 可自定义命令类型
-}
-
-pub struct RaftNode {
-    pub id: NodeId,
-    pub peers: Vec<NodeId>, // 当前配置（通常与 config.new 一致）
-    pub config: ClusterConfig,
-    pub role: Role,
-    pub current_term: u64,
-    pub voted_for: Option<NodeId>,
-    // 日志依赖 Storage trait，不再直接持有 log
-    pub commit_index: u64,
-    pub last_applied: u64,
-    pub next_index: Arc<tokio::sync::RwLock<HashMap<NodeId, u64>>>,
-    pub match_index: Arc<tokio::sync::RwLock<HashMap<NodeId, u64>>>,
-    pub election_timeout: Duration,
-    pub election_timeout_min: u64,
-    pub election_timeout_max: u64,
-    pub last_heartbeat: Instant,
-    pub storage: Arc<dyn Storage>,
-    pub network: Arc<dyn Network + Send + Sync>,
+    pub command: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
-pub struct RequestVoteArgs {
+pub struct RequestVoteRequest {
     pub term: u64,
     pub candidate_id: NodeId,
     pub last_log_index: u64,
@@ -187,13 +241,13 @@ pub struct RequestVoteArgs {
 }
 
 #[derive(Debug, Clone)]
-pub struct RequestVoteReply {
+pub struct RequestVoteResponse {
     pub term: u64,
     pub vote_granted: bool,
 }
 
 #[derive(Debug, Clone)]
-pub struct AppendEntriesArgs {
+pub struct AppendEntriesRequest {
     pub term: u64,
     pub leader_id: NodeId,
     pub prev_log_index: u64,
@@ -203,13 +257,46 @@ pub struct AppendEntriesArgs {
 }
 
 #[derive(Debug, Clone)]
-pub struct AppendEntriesReply {
+pub struct AppendEntriesResponse {
     pub term: u64,
     pub success: bool,
     pub conflict_index: Option<u64>,
 }
 
-impl RaftNode {
+// === 状态机（可变状态，无 Clone）===
+pub struct RaftState {
+    // 节点标识与配置
+    id: NodeId,
+    peers: Vec<NodeId>,
+    config: ClusterConfig,
+
+    // 核心状态
+    role: Role,
+    current_term: u64,
+    voted_for: Option<NodeId>,
+
+    // 日志与提交状态
+    commit_index: u64,
+    last_applied: u64,
+
+    // Leader 专用状态
+    next_index: HashMap<NodeId, u64>,
+    match_index: HashMap<NodeId, u64>,
+
+    // 定时器配置
+    election_timeout: Duration,
+    election_timeout_min: u64,
+    election_timeout_max: u64,
+    last_heartbeat: Instant,
+
+    // 外部依赖
+    storage: Arc<dyn Storage>,
+    network: Arc<dyn Network + Send + Sync>,
+    callbacks: Arc<dyn RaftCallbacks>, // 回调实例
+}
+
+impl RaftState {
+    /// 初始化状态
     pub fn new(
         id: NodeId,
         peers: Vec<NodeId>,
@@ -217,6 +304,7 @@ impl RaftNode {
         network: Arc<dyn Network + Send + Sync>,
         election_timeout_min: u64,
         election_timeout_max: u64,
+        callbacks: Arc<dyn RaftCallbacks>,
     ) -> Self {
         let (current_term, voted_for) = storage.load_hard_state();
         let loaded_config = match storage.load_cluster_config() {
@@ -225,370 +313,529 @@ impl RaftNode {
         };
         let timeout = election_timeout_min
             + rand::random::<u64>() % (election_timeout_max - election_timeout_min + 1);
-        RaftNode {
+
+        RaftState {
             id,
             peers,
             config: loaded_config,
             role: Role::Follower,
             current_term,
             voted_for,
-            // log 由 Storage trait 管理
             commit_index: 0,
             last_applied: 0,
-            next_index: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            match_index: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            next_index: HashMap::new(),
+            match_index: HashMap::new(),
             election_timeout: Duration::from_millis(timeout),
             election_timeout_min,
             election_timeout_max,
             last_heartbeat: Instant::now(),
             storage,
             network,
+            callbacks,
         }
     }
 
-    // 选举相关
-    pub async fn start_election(&mut self) {
-        // 递增 term，切换 candidate，重置 election timeout，发送 RequestVote
+    /// 处理事件（直接修改自身状态，通过回调执行动作）
+    pub async fn handle_event(&mut self, event: Event) {
+        match event {
+            Event::ElectionTimeout => self.handle_election_timeout().await,
+            Event::RequestVote(args) => self.handle_request_vote(args).await,
+            Event::AppendEntries(args) => self.handle_append_entries(args).await,
+            Event::RequestVoteReply(peer, reply) => {
+                self.handle_request_vote_reply(peer, reply).await
+            }
+            Event::AppendEntriesReply(peer, reply) => {
+                self.handle_append_entries_reply(peer, reply).await
+            }
+            Event::HeartbeatTimeout => self.handle_heartbeat_timeout().await,
+            Event::ClientPropose(cmd) => self.handle_client_propose(cmd).await,
+            _ => {}
+        }
+    }
+
+    /// 处理选举超时事件
+    async fn handle_election_timeout(&mut self) {
+        // 递增任期，切换为 Candidate
         self.current_term += 1;
         self.role = Role::Candidate;
         self.voted_for = Some(self.id.clone());
-        let election_timeout = self.election_timeout_min
-            + rand::random::<u64>() % (self.election_timeout_max - self.election_timeout_min + 1);
-        self.election_timeout = Duration::from_millis(election_timeout);
-        self.last_heartbeat = Instant::now();
-        // 持久化 term 和 voted_for
-        self.storage
-            .save_hard_state(self.current_term, self.voted_for.clone());
 
-        // 统一投票集合（joint时为old+new，否则为voters）
-        let effective: std::collections::HashSet<NodeId> = match self.config.joint.as_ref() {
+        // 调用回调：持久化 hard state
+        self.callbacks
+            .save_hard_state(self.current_term, self.voted_for.clone())
+            .await;
+
+        // 重置选举定时器（通过回调）
+        let new_timeout = self.election_timeout_min
+            + rand::random::<u64>() % (self.election_timeout_max - self.election_timeout_min + 1);
+        self.election_timeout = Duration::from_millis(new_timeout);
+        self.callbacks
+            .set_election_timer(self.election_timeout)
+            .await;
+
+        // 向所有有效节点发送投票请求（通过回调）
+        let effective_voters: HashSet<NodeId> = match self.config.joint.as_ref() {
             Some(j) => j.old.union(&j.new).cloned().collect(),
             None => self.config.voters.clone(),
         };
-        let last_index = self.storage.last_index().unwrap_or(0);
-        let last_term = self.storage.term(last_index).unwrap_or(0);
-        let args = RequestVoteArgs {
+        let last_log_index = self.storage.last_index().unwrap_or(0);
+        let last_log_term = self.storage.term(last_log_index).unwrap_or(0);
+        let vote_args = RequestVoteRequest {
             term: self.current_term,
             candidate_id: self.id.clone(),
-            last_log_index: last_index,
-            last_log_term: last_term,
+            last_log_index,
+            last_log_term,
         };
-
-        use tokio::time::{Duration as TokioDuration, timeout};
-        let rpc_timeout = TokioDuration::from_millis(300);
-        let mut max_term = self.current_term;
-        use std::collections::HashMap;
-        let mut results: HashMap<NodeId, Result<RequestVoteReply, tokio::time::error::Elapsed>> =
-            HashMap::new();
-        // 自身投票直接插入
-        results.insert(
-            self.id.clone(),
-            Ok(RequestVoteReply {
-                term: self.current_term,
-                vote_granted: true,
-            }),
-        );
-        let mut futs = Vec::new();
-        for peer in &effective {
-            if *peer == self.id {
-                continue;
-            }
-            let net = self.network.as_ref();
-            let args = args.clone();
-            futs.push((
-                peer.clone(),
-                timeout(rpc_timeout, net.send_request_vote(peer.clone(), args)),
-            ));
-        }
-        let joined = futures::future::join_all(
-            futs.into_iter()
-                .map(|(peer, fut)| async move { (peer, fut.await) }),
-        )
-        .await;
-        for (peer, reply) in joined {
-            results.insert(peer, reply);
-        }
-        // 统计票数
-        for reply in results.values() {
-            if let Ok(r) = reply {
-                if r.term > max_term {
-                    max_term = r.term;
-                }
+        for peer in &effective_voters {
+            if *peer != self.id {
+                let target = peer.clone();
+                let args = vote_args.clone();
+                self.callbacks.send_request_vote_request(target, args).await;
             }
         }
 
-        // 如果收到更高 term，降级为 follower
-        if max_term > self.current_term {
-            self.current_term = max_term;
-            self.role = Role::Follower;
-            self.voted_for = None;
-            self.storage
-                .save_hard_state(self.current_term, self.voted_for.clone());
+        // 状态变更通知
+        self.callbacks.state_changed(Role::Candidate).await;
+    }
+
+    /// 处理心跳超时事件
+    async fn handle_heartbeat_timeout(&mut self) {
+        if self.role != Role::Leader {
             return;
         }
 
-        // 判断是否赢得选举（联合共识需新旧配置均过半）
-        let win = if let Some(joint) = self.config.joint.as_ref() {
-            let votes_old = results
-                .iter()
-                .filter(|(id, r)| {
-                    r.as_ref().map_or(false, |v| v.vote_granted) && joint.old.contains(&**id)
-                })
-                .count();
-            let votes_new = results
-                .iter()
-                .filter(|(id, r)| {
-                    r.as_ref().map_or(false, |v| v.vote_granted) && joint.new.contains(&**id)
-                })
-                .count();
-            votes_old >= (joint.old.len() / 2 + 1) && votes_new >= (joint.new.len() / 2 + 1)
-        } else {
-            let votes = results
-                .iter()
-                .filter(|(_, r)| r.as_ref().map_or(false, |v| v.vote_granted))
-                .count();
-            votes > effective.len() / 2
-        };
-        if win {
-            self.role = Role::Leader;
-            // 初始化 next_index/match_index
-            let last_index = self.storage.last_index().unwrap_or(0);
-            let mut next_index_map = self.next_index.write().await;
-            let mut match_index_map = self.match_index.write().await;
-            for peer in &self.peers {
-                next_index_map.insert(peer.clone(), last_index + 1);
-                match_index_map.insert(peer.clone(), 0);
-            }
-            // 可立即广播空心跳
-            self.broadcast_append_entries();
-        } else {
-            // 分裂投票，重新设置 election_timeout，等待下一轮
-            let timeout = self.election_timeout_min
-                + rand::random::<u64>()
-                    % (self.election_timeout_max - self.election_timeout_min + 1);
-            self.election_timeout = Duration::from_millis(timeout);
-            // 保持 Candidate 状态，等待下一轮
-        }
-    }
-
-    /// 向所有 Follower 并发安全地广播 AppendEntries RPC（日志同步+心跳）
-    pub fn broadcast_append_entries(&self) {
-        use tokio::time::{Duration as TokioDuration, timeout};
-        let rpc_timeout = TokioDuration::from_millis(300);
         let current_term = self.current_term;
         let leader_id = self.id.clone();
         let leader_commit = self.commit_index;
-        let peers = self.peers.clone();
-        let network = self.network.clone();
-        let next_index = Arc::clone(&self.next_index);
-        let match_index = Arc::clone(&self.match_index);
+        let last_log_index = self.storage.last_index().unwrap_or(0);
+        let max_batch_size = 100;
 
-        // Clone all log data needed for the spawned task
-        let last_log_index = match self.storage.last_index() {
-            Ok(idx) => idx,
-            Err(_) => return,
+        // 向所有有效节点发送 AppendEntries（通过回调）
+        let effective_peers: Vec<NodeId> = match self.config.joint.as_ref() {
+            Some(j) => j.old.union(&j.new).cloned().collect(),
+            None => self.peers.clone(),
         };
-
-        // To avoid borrowing self, clone the storage into an Arc
-        let storage = self.storage.clone();
-
-        for peer in peers {
+        for peer in effective_peers {
             if peer == self.id {
                 continue;
             }
-            let current_term = current_term;
-            let leader_id = leader_id.clone();
-            let leader_commit = leader_commit;
-            let peer = peer.clone();
-            let network = network.clone();
-            let next_index = Arc::clone(&next_index);
-            let match_index = Arc::clone(&match_index);
-            let last_log_index = last_log_index;
-            let storage = storage.clone();
 
-            tokio::spawn(async move {
-                // 1. 读 next_index
-                let next_idx = {
-                    let next_idx_map = next_index.read().await;
-                    *next_idx_map.get(&peer).unwrap_or(&1).max(&1)
-                };
-                // 2. 计算 prev_log_index/term
-                let prev_log_index = next_idx.saturating_sub(1);
-                let prev_log_term = match storage.term(prev_log_index) {
-                    Ok(term) => term,
-                    Err(_) => 0,
-                };
-                // 3. 获取 entries
-                let entries = match storage.entries(next_idx, last_log_index + 1) {
-                    Ok(entries) => entries,
-                    Err(_) => vec![],
-                };
-                // 4. 构造 RPC 参数
-                let args = AppendEntriesArgs {
-                    term: current_term,
-                    leader_id: leader_id.clone(),
-                    prev_log_index,
-                    prev_log_term,
-                    entries: entries.clone(),
-                    leader_commit,
-                };
-                // 5. 发送 RPC
-                let result =
-                    timeout(rpc_timeout, network.send_append_entries(peer.clone(), args)).await;
-                match result {
-                    Ok(reply) => {
-                        // 任期冲突，Leader 需退位
-                        if reply.term > current_term {
-                            tracing::warn!(
-                                "Follower {} term {} > leader term {}, should step down",
-                                peer,
-                                reply.term,
-                                current_term
-                            );
-                            // 生产环境应触发降级逻辑
-                            return;
-                        }
-                        if reply.success {
-                            // 日志同步成功，推进 match_index/next_index
-                            let new_match_idx = prev_log_index + entries.len() as u64;
-                            let new_next_idx = new_match_idx + 1;
-                            let mut match_idx_map = match_index.write().await;
-                            match_idx_map.insert(peer.clone(), new_match_idx);
-                            let mut next_idx_map = next_index.write().await;
-                            next_idx_map.insert(peer.clone(), new_next_idx);
-                            tracing::debug!(
-                                "Follower {} append success: match_index={}, next_index={}",
-                                peer,
-                                new_match_idx,
-                                new_next_idx
-                            );
-                        } else {
-                            // 日志冲突，快速回退 next_index
-                            let new_next_idx = reply
-                                .conflict_index
-                                .map(|conflict_idx| {
-                                    if conflict_idx < next_idx {
-                                        conflict_idx
-                                    } else {
-                                        next_idx.saturating_sub(1)
-                                    }
-                                })
-                                .unwrap_or_else(|| next_idx.saturating_sub(1));
-                            let mut next_idx_map = next_index.write().await;
-                            next_idx_map.insert(peer.clone(), new_next_idx);
-                            tracing::debug!(
-                                "Follower {} append failed: next_index rollback to {}",
-                                peer,
-                                new_next_idx
-                            );
-                        }
-                    }
-                    Err(_) => {
-                        tracing::warn!("AppendEntries to follower {} timeout", peer);
-                        // 超时不立即回退，等待下次重试
-                    }
-                }
-            });
+            // 获取该节点的 next_index
+            let next_idx = *self.next_index.get(&peer).unwrap_or(&1).max(&1);
+            let prev_log_index = next_idx.saturating_sub(1);
+            let prev_log_term = self.storage.term(prev_log_index).unwrap_or(0);
+
+            // 获取待发送日志
+            let entries = match self.storage.entries(next_idx, last_log_index + 1) {
+                Ok(entries) => entries.into_iter().take(max_batch_size).collect(),
+                Err(_) => vec![],
+            };
+
+            // 调用回调发送 AppendEntries
+            let args = AppendEntriesRequest {
+                term: current_term,
+                leader_id: leader_id.clone(),
+                prev_log_index,
+                prev_log_term,
+                entries,
+                leader_commit,
+            };
+            self.callbacks.send_append_entries_request(peer, args).await;
         }
+
+        // 重置心跳定时器（通过回调）
+        self.callbacks
+            .set_heartbeat_timer(Duration::from_millis(100))
+            .await;
     }
 
-    /// 发送 InstallSnapshot RPC 到所有 follower
-    pub fn broadcast_install_snapshot(&self, snapshot: InstallSnapshotArgs) {
-        for peer in &self.peers {
-            let _reply = self
-                .network
-                .send_install_snapshot(peer.clone(), snapshot.clone());
-            // 可根据 reply.success 处理快照同步
-        }
-    }
+    /// 处理 RequestVote 请求
+    async fn handle_request_vote(&mut self, args: RequestVoteRequest) {
+        let mut vote_granted = false;
 
-    pub fn handle_request_vote(&mut self, args: RequestVoteArgs) -> RequestVoteReply {
-        // 1. 若 term 更大，无条件降级并更新
+        // 1. 若对方 term 更高，更新自身状态
         if args.term > self.current_term {
             self.current_term = args.term;
             self.role = Role::Follower;
             self.voted_for = None;
+            // 调用回调持久化
+            self.callbacks
+                .save_hard_state(self.current_term, self.voted_for.clone())
+                .await;
+            self.callbacks.state_changed(Role::Follower).await;
         }
 
         // 2. 日志最新性检查
-        let last_idx = self.storage.last_index().unwrap_or(0);
-        let last_term = self.storage.term(last_idx).unwrap_or(0);
-        let log_ok = args.last_log_term > last_term
-            || (args.last_log_term == last_term && args.last_log_index >= last_idx);
+        let last_log_idx = self.storage.last_index().unwrap_or(0);
+        let last_log_term = self.storage.term(last_log_idx).unwrap_or(0);
+        let log_ok = args.last_log_term > last_log_term
+            || (args.last_log_term == last_log_term && args.last_log_index >= last_log_idx);
 
-        // 3. 投票规则
-        let mut vote_granted = false;
+        // 3. 满足条件则投票
         if args.term == self.current_term
             && (self.voted_for.is_none() || self.voted_for == Some(args.candidate_id.clone()))
             && log_ok
         {
             self.voted_for = Some(args.candidate_id.clone());
             vote_granted = true;
+            self.callbacks
+                .save_hard_state(self.current_term, self.voted_for.clone())
+                .await;
         }
 
-        // 4. 只在投票成功或 term 变化时写盘
-        if vote_granted || args.term > self.current_term {
-            self.storage
-                .save_hard_state(self.current_term, self.voted_for.clone());
-        }
-
-        RequestVoteReply {
+        // 4. 调用回调发送投票结果
+        let resp = RequestVoteResponse {
             term: self.current_term,
             vote_granted,
-        }
+        };
+        self.callbacks
+            .send_request_vote_response(args.candidate_id, resp)
+            .await;
     }
 
-    // 日志复制相关
-    pub fn handle_append_entries(&mut self, args: AppendEntriesArgs) -> AppendEntriesReply {
-        // 1. term 太小直接拒绝
+    /// 处理 AppendEntries 请求
+    async fn handle_append_entries(&mut self, args: AppendEntriesRequest) {
+        // 1. 若对方 term 更小，拒绝
         if args.term < self.current_term {
-            return AppendEntriesReply {
+            let response = AppendEntriesResponse {
                 term: self.current_term,
                 success: false,
                 conflict_index: Some(self.storage.last_index().unwrap_or(0) + 1),
             };
+            self.callbacks
+                .send_append_entries_response(args.leader_id, response)
+                .await;
+            return;
         }
 
-        // 2. 更新 leader 心跳和状态
-        self.last_heartbeat = Instant::now();
+        // 2. 更新自身状态为 Follower，重置心跳时间
         self.current_term = args.term;
         self.role = Role::Follower;
+        self.last_heartbeat = Instant::now();
+        self.callbacks.state_changed(Role::Follower).await;
+        self.callbacks
+            .set_election_timer(self.election_timeout)
+            .await;
 
         // 3. 日志连续性检查
         let last_idx = self.storage.last_index().unwrap_or(0);
         if args.prev_log_index > last_idx {
-            return AppendEntriesReply {
+            let resp = AppendEntriesResponse {
                 term: self.current_term,
                 success: false,
                 conflict_index: Some(last_idx + 1),
             };
+            self.callbacks
+                .send_append_entries_response(args.leader_id, resp)
+                .await;
+            return;
         }
 
-        // 4. prev_term 匹配检查
+        // 4. 前序日志 term 匹配检查
         let prev_term = self.storage.term(args.prev_log_index).unwrap_or(0);
         if prev_term != args.prev_log_term {
-            return AppendEntriesReply {
+            let resp = AppendEntriesResponse {
                 term: self.current_term,
                 success: false,
                 conflict_index: Some(args.prev_log_index),
             };
+            self.callbacks
+                .send_append_entries_response(args.leader_id, resp)
+                .await;
+            return;
         }
 
-        // 5. 截断 + 追加
+        // 5. 截断冲突日志并追加新日志
         let _ = self.storage.truncate_suffix(args.prev_log_index + 1);
-        let _ = self.storage.append(&args.entries);
+        if !args.entries.is_empty() {
+            let _ = self.storage.append(&args.entries);
+            self.callbacks.save_log_entries(args.entries.clone()).await;
+        }
 
         // 6. 更新 commit_index
-        let new_last = self.storage.last_index().unwrap_or(0);
-        self.commit_index = std::cmp::min(args.leader_commit, new_last);
+        let new_last_idx = self.storage.last_index().unwrap_or(0);
+        self.commit_index = std::cmp::min(args.leader_commit, new_last_idx);
 
-        AppendEntriesReply {
+        // 7. 发送成功响应
+        let resp = AppendEntriesResponse {
             term: self.current_term,
             success: true,
             conflict_index: None,
+        };
+        self.callbacks
+            .send_append_entries_response(args.leader_id, resp)
+            .await;
+    }
+
+    /// 处理 RequestVote 响应
+    async fn handle_request_vote_reply(&mut self, peer: NodeId, reply: RequestVoteResponse) {
+        if self.role != Role::Candidate {
+            return;
+        }
+
+        // 若对方 term 更高，降级为 Follower
+        if reply.term > self.current_term {
+            self.current_term = reply.term;
+            self.role = Role::Follower;
+            self.voted_for = None;
+            self.callbacks
+                .save_hard_state(self.current_term, self.voted_for.clone())
+                .await;
+            self.callbacks.state_changed(Role::Follower).await;
+            return;
+        }
+
+        // 统计选票（实际实现需维护投票计数）
+        // ...
+
+        // 检查是否赢得选举
+        if self.check_election_win() {
+            self.role = Role::Leader;
+            // 初始化 next_index 和 match_index
+            let last_idx = self.storage.last_index().unwrap_or(0);
+            for peer in &self.peers {
+                self.next_index.insert(peer.clone(), last_idx + 1);
+                self.match_index.insert(peer.clone(), 0);
+            }
+            self.callbacks.state_changed(Role::Leader).await;
+            self.callbacks
+                .set_heartbeat_timer(Duration::from_millis(100))
+                .await;
         }
     }
 
-    // 快照、持久化、异常处理等可后续补充
-    // ...existing code...
+    /// 处理 AppendEntries 响应
+    async fn handle_append_entries_reply(&mut self, peer: NodeId, reply: AppendEntriesResponse) {
+        if self.role != Role::Leader {
+            return;
+        }
+
+        // 若对方 term 更高，降级为 Follower
+        if reply.term > self.current_term {
+            self.current_term = reply.term;
+            self.role = Role::Follower;
+            self.voted_for = None;
+            self.callbacks
+                .save_hard_state(self.current_term, self.voted_for.clone())
+                .await;
+            self.callbacks.state_changed(Role::Follower).await;
+            return;
+        }
+
+        if reply.success {
+            // 同步成功：更新 match_index 和 next_index
+            let prev_log_index = self
+                .next_index
+                .get(&peer)
+                .cloned()
+                .unwrap_or(1)
+                .saturating_sub(1);
+            let entries_len = self
+                .storage
+                .entries(
+                    prev_log_index + 1,
+                    self.storage.last_index().unwrap_or(0) + 1,
+                )
+                .unwrap_or_default()
+                .len() as u64;
+            let new_match_idx = prev_log_index + entries_len;
+            let new_next_idx = new_match_idx + 1;
+
+            self.match_index.insert(peer.clone(), new_match_idx);
+            self.next_index.insert(peer.clone(), new_next_idx);
+        } else {
+            // 同步失败：回退 next_index
+            let current_next = self.next_index.get(&peer).cloned().unwrap_or(1);
+            let new_next_idx = reply
+                .conflict_index
+                .map(|conflict_idx| {
+                    if conflict_idx < current_next {
+                        conflict_idx
+                    } else {
+                        current_next.saturating_sub(1)
+                    }
+                })
+                .unwrap_or_else(|| current_next.saturating_sub(1));
+            self.next_index.insert(peer.clone(), new_next_idx);
+        }
+    }
+
+    /// 处理客户端提交命令
+    async fn handle_client_propose(&mut self, cmd: Vec<u8>) {
+        if self.role != Role::Leader {
+            // 非 Leader，通过回调响应客户端错误
+            self.callbacks
+                .client_response(Err(Error("not leader".into())))
+                .await;
+            return;
+        }
+
+        // 生成新日志条目
+        let last_idx = self.storage.last_index().unwrap_or(0);
+        let new_entry = LogEntry {
+            term: self.current_term,
+            index: last_idx + 1,
+            command: cmd,
+        };
+
+        // 追加到日志并调用回调持久化
+        let _ = self.storage.append(&[new_entry.clone()]);
+        self.callbacks.save_log_entries(vec![new_entry]).await;
+
+        // 触发日志同步
+        self.trigger_append_entries().await;
+    }
+
+    // === 辅助方法 ===
+    /// 检查是否赢得选举
+    fn check_election_win(&self) -> bool {
+        // 简化实现：实际需统计有效选票是否满足 quorum
+        false
+    }
+
+    /// 触发一次日志同步
+    async fn trigger_append_entries(&mut self) {
+        self.handle_heartbeat_timeout().await;
+    }
+}
+
+// === 外部驱动层（实现回调接口）===
+pub struct RaftDriver {
+    state: RaftState,
+    // 其他外部依赖（如定时器管理器、网络适配器等）
+    // ...
+}
+
+impl RaftDriver {
+    pub async fn run(&mut self) {
+        loop {
+            // 1. 等待外部事件（定时器、网络消息、客户端请求等）
+            let event = self.receive_event().await;
+
+            // 2. 调用状态机处理事件（状态机内部通过回调执行动作）
+            self.state.handle_event(event).await;
+        }
+    }
+
+    async fn receive_event(&self) -> Event {
+        // 实际实现：从网络、定时器、客户端接收事件
+        // 示例：等待选举超时
+        Event::ElectionTimeout
+    }
+}
+
+// === 回调接口的默认实现（示例）===
+#[derive(Clone)]
+pub struct DefaultCallbacks {
+    network: Arc<dyn Network + Send + Sync>,
+    storage: Arc<dyn Storage>,
+    // 其他依赖（如定时器管理器、客户端响应通道等）
+    // ...
+}
+
+impl DefaultCallbacks {
+    pub fn new(network: Arc<dyn Network + Send + Sync>, storage: Arc<dyn Storage>) -> Self {
+        DefaultCallbacks { network, storage }
+    }
+}
+
+impl RaftCallbacks for DefaultCallbacks {
+    fn send_request_vote_request(
+        &self,
+        target: NodeId,
+        args: RequestVoteRequest,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let network = self.network.clone();
+        Box::pin(async move {
+            // 发送RPC后，将响应转为Event并注入状态机（实际需通过驱动层）
+            let _ = network.send_request_vote(target, args).await;
+        })
+    }
+
+    fn send_append_entries_request(
+        &self,
+        target: NodeId,
+        args: AppendEntriesRequest,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let network = self.network.clone();
+        Box::pin(async move {
+            let _ = network.send_append_entries(target, args).await;
+        })
+    }
+
+    fn send_install_snapshot_request(
+        &self,
+        target: NodeId,
+        args: InstallSnapshotRequest,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let network = self.network.clone();
+        Box::pin(async move {
+            let _ = network.send_install_snapshot(target, args).await;
+        })
+    }
+
+    fn save_hard_state(
+        &self,
+        term: u64,
+        voted_for: Option<NodeId>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let storage = self.storage.clone();
+        Box::pin(async move {
+            storage.save_hard_state(term, voted_for);
+        })
+    }
+
+    fn save_log_entries(&self, entries: Vec<LogEntry>) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let storage = self.storage.clone();
+        Box::pin(async move {
+            let _ = storage.append(&entries);
+        })
+    }
+
+    // 其他回调方法的实现...
+    fn save_snapshot(&self, _snap: Snapshot) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async {})
+    }
+
+    fn save_cluster_config(
+        &self,
+        _conf: ClusterConfig,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async {})
+    }
+
+    fn set_election_timer(&self, _dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async {})
+    }
+
+    fn set_heartbeat_timer(&self, _dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async {})
+    }
+
+    fn client_response(
+        &self,
+        _result: Result<u64, Error>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async {})
+    }
+
+    fn state_changed(&self, _role: Role) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async {})
+    }
+
+    fn send_request_vote_response(
+        &self,
+        target: NodeId,
+        args: RequestVoteResponse,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async {})
+    }
+
+    fn send_append_entries_response(
+        &self,
+        target: NodeId,
+        args: AppendEntriesResponse,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async {})
+    }
 }
