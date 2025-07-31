@@ -64,7 +64,9 @@ impl ClusterConfig {
     }
 }
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
 pub struct InstallSnapshotArgs {
@@ -120,25 +122,25 @@ pub struct Snapshot {
     pub config: ClusterConfig,
 }
 
-pub trait Storage {
+pub trait Storage: Send + Sync {
     /* ========== HardState ========== */
-    fn save_hard_state(&mut self, term: u64, voted_for: Option<NodeId>);
+    fn save_hard_state(&self, term: u64, voted_for: Option<NodeId>);
     fn load_hard_state(&self) -> (u64, Option<NodeId>);
 
     /* ========== Log ========== */
-    fn append(&mut self, entries: &[LogEntry]) -> Result<(), Error>;
+    fn append(&self, entries: &[LogEntry]) -> Result<(), Error>;
     fn entries(&self, low: u64, high: u64) -> Result<Vec<LogEntry>, Error>;
-    fn truncate_suffix(&mut self, idx: u64) -> Result<(), Error>;
-    fn truncate_prefix(&mut self, idx: u64) -> Result<(), Error>;
+    fn truncate_suffix(&self, idx: u64) -> Result<(), Error>;
+    fn truncate_prefix(&self, idx: u64) -> Result<(), Error>;
     fn last_index(&self) -> Result<u64, Error>;
     fn term(&self, idx: u64) -> Result<u64, Error>;
 
     /* ========== Snapshot ========== */
-    fn save_snapshot(&mut self, snap: &Snapshot) -> Result<(), Error>;
+    fn save_snapshot(&self, snap: &Snapshot) -> Result<(), Error>;
     fn load_snapshot(&self) -> Result<Snapshot, Error>;
 
     /* ========== Cluster Config ========== */
-    fn save_cluster_config(&mut self, conf: &ClusterConfig) -> Result<(), Error>;
+    fn save_cluster_config(&self, conf: &ClusterConfig) -> Result<(), Error>;
     fn load_cluster_config(&self) -> Result<ClusterConfig, Error>;
 }
 
@@ -166,14 +168,14 @@ pub struct RaftNode {
     // 日志依赖 Storage trait，不再直接持有 log
     pub commit_index: u64,
     pub last_applied: u64,
-    pub next_index: HashMap<NodeId, u64>,
-    pub match_index: HashMap<NodeId, u64>,
+    pub next_index: Arc<tokio::sync::RwLock<HashMap<NodeId, u64>>>,
+    pub match_index: Arc<tokio::sync::RwLock<HashMap<NodeId, u64>>>,
     pub election_timeout: Duration,
     pub election_timeout_min: u64,
     pub election_timeout_max: u64,
     pub last_heartbeat: Instant,
-    pub storage: Box<dyn Storage>,
-    pub network: Box<dyn Network + Send + Sync>,
+    pub storage: Arc<dyn Storage>,
+    pub network: Arc<dyn Network + Send + Sync>,
 }
 
 #[derive(Debug, Clone)]
@@ -211,9 +213,8 @@ impl RaftNode {
     pub fn new(
         id: NodeId,
         peers: Vec<NodeId>,
-        config: ClusterConfig,
-        storage: Box<dyn Storage>,
-        network: Box<dyn Network + Send + Sync>,
+        storage: Arc<dyn Storage>,
+        network: Arc<dyn Network + Send + Sync>,
         election_timeout_min: u64,
         election_timeout_max: u64,
     ) -> Self {
@@ -234,8 +235,8 @@ impl RaftNode {
             // log 由 Storage trait 管理
             commit_index: 0,
             last_applied: 0,
-            next_index: HashMap::new(),
-            match_index: HashMap::new(),
+            next_index: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            match_index: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             election_timeout: Duration::from_millis(timeout),
             election_timeout_min,
             election_timeout_max,
@@ -352,12 +353,14 @@ impl RaftNode {
             self.role = Role::Leader;
             // 初始化 next_index/match_index
             let last_index = self.storage.last_index().unwrap_or(0);
+            let mut next_index_map = self.next_index.write().await;
+            let mut match_index_map = self.match_index.write().await;
             for peer in &self.peers {
-                self.next_index.insert(peer.clone(), last_index + 1);
-                self.match_index.insert(peer.clone(), 0);
+                next_index_map.insert(peer.clone(), last_index + 1);
+                match_index_map.insert(peer.clone(), 0);
             }
             // 可立即广播空心跳
-            self.broadcast_append_entries(vec![], self.commit_index);
+            self.broadcast_append_entries();
         } else {
             // 分裂投票，重新设置 election_timeout，等待下一轮
             let timeout = self.election_timeout_min
@@ -368,21 +371,124 @@ impl RaftNode {
         }
     }
 
-    /// 发送 AppendEntries RPC 到所有 follower
-    pub fn broadcast_append_entries(&self, entries: Vec<LogEntry>, leader_commit: u64) {
-        let prev_log_index = self.storage.last_index().unwrap_or(0);
-        let prev_log_term = self.storage.term(prev_log_index).unwrap_or(0);
-        let args = AppendEntriesArgs {
-            term: self.current_term,
-            leader_id: self.id.clone(),
-            prev_log_index,
-            prev_log_term,
-            entries,
-            leader_commit,
+    /// 向所有 Follower 并发安全地广播 AppendEntries RPC（日志同步+心跳）
+    pub fn broadcast_append_entries(&self) {
+        use tokio::time::{Duration as TokioDuration, timeout};
+        let rpc_timeout = TokioDuration::from_millis(300);
+        let current_term = self.current_term;
+        let leader_id = self.id.clone();
+        let leader_commit = self.commit_index;
+        let peers = self.peers.clone();
+        let network = self.network.clone();
+        let next_index = Arc::clone(&self.next_index);
+        let match_index = Arc::clone(&self.match_index);
+
+        // Clone all log data needed for the spawned task
+        let last_log_index = match self.storage.last_index() {
+            Ok(idx) => idx,
+            Err(_) => return,
         };
-        for peer in &self.peers {
-            let _reply = self.network.send_append_entries(peer.clone(), args.clone());
-            // 可根据 reply.success 处理日志复制
+
+        // To avoid borrowing self, clone the storage into an Arc
+        let storage = self.storage.clone();
+
+        for peer in peers {
+            if peer == self.id {
+                continue;
+            }
+            let current_term = current_term;
+            let leader_id = leader_id.clone();
+            let leader_commit = leader_commit;
+            let peer = peer.clone();
+            let network = network.clone();
+            let next_index = Arc::clone(&next_index);
+            let match_index = Arc::clone(&match_index);
+            let last_log_index = last_log_index;
+            let storage = storage.clone();
+
+            tokio::spawn(async move {
+                // 1. 读 next_index
+                let next_idx = {
+                    let next_idx_map = next_index.read().await;
+                    *next_idx_map.get(&peer).unwrap_or(&1).max(&1)
+                };
+                // 2. 计算 prev_log_index/term
+                let prev_log_index = next_idx.saturating_sub(1);
+                let prev_log_term = match storage.term(prev_log_index) {
+                    Ok(term) => term,
+                    Err(_) => 0,
+                };
+                // 3. 获取 entries
+                let entries = match storage.entries(next_idx, last_log_index + 1) {
+                    Ok(entries) => entries,
+                    Err(_) => vec![],
+                };
+                // 4. 构造 RPC 参数
+                let args = AppendEntriesArgs {
+                    term: current_term,
+                    leader_id: leader_id.clone(),
+                    prev_log_index,
+                    prev_log_term,
+                    entries: entries.clone(),
+                    leader_commit,
+                };
+                // 5. 发送 RPC
+                let result =
+                    timeout(rpc_timeout, network.send_append_entries(peer.clone(), args)).await;
+                match result {
+                    Ok(reply) => {
+                        // 任期冲突，Leader 需退位
+                        if reply.term > current_term {
+                            tracing::warn!(
+                                "Follower {} term {} > leader term {}, should step down",
+                                peer,
+                                reply.term,
+                                current_term
+                            );
+                            // 生产环境应触发降级逻辑
+                            return;
+                        }
+                        if reply.success {
+                            // 日志同步成功，推进 match_index/next_index
+                            let new_match_idx = prev_log_index + entries.len() as u64;
+                            let new_next_idx = new_match_idx + 1;
+                            let mut match_idx_map = match_index.write().await;
+                            match_idx_map.insert(peer.clone(), new_match_idx);
+                            let mut next_idx_map = next_index.write().await;
+                            next_idx_map.insert(peer.clone(), new_next_idx);
+                            tracing::debug!(
+                                "Follower {} append success: match_index={}, next_index={}",
+                                peer,
+                                new_match_idx,
+                                new_next_idx
+                            );
+                        } else {
+                            // 日志冲突，快速回退 next_index
+                            let new_next_idx = reply
+                                .conflict_index
+                                .map(|conflict_idx| {
+                                    if conflict_idx < next_idx {
+                                        conflict_idx
+                                    } else {
+                                        next_idx.saturating_sub(1)
+                                    }
+                                })
+                                .unwrap_or_else(|| next_idx.saturating_sub(1));
+                            let mut next_idx_map = next_index.write().await;
+                            next_idx_map.insert(peer.clone(), new_next_idx);
+                            tracing::debug!(
+                                "Follower {} append failed: next_index rollback to {}",
+                                peer,
+                                new_next_idx
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!("AppendEntries to follower {} timeout", peer);
+                        // 超时不立即回退，等待下次重试
+                    }
+                }
+            });
         }
     }
 
