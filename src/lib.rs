@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // 导出新模块
+pub mod callback_wrap;
 pub mod mock_network;
 pub mod mock_storage;
-pub mod callback_wrap;
 pub mod mutl_raft_driver;
 
 // 类型定义
@@ -1864,4 +1864,3 @@ impl RaftState {
         }
     }
 }
-
