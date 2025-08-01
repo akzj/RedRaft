@@ -1,7 +1,9 @@
+use crate::mutl_raft_driver::Network;
+
 use super::RequestId;
 use super::{
     AppendEntriesRequest, AppendEntriesResponse, Error, InstallSnapshotRequest,
-    InstallSnapshotResponse, Network, NodeId, RequestVoteRequest, RequestVoteResponse,
+    InstallSnapshotResponse, NodeId, RequestVoteRequest, RequestVoteResponse,
 };
 use async_trait::async_trait;
 use rand::Rng;
@@ -248,7 +250,13 @@ impl Network for MockNetwork {
         // 模拟丢包
         let drop_rate = *self.drop_rate.read().unwrap();
         if rand::random::<f64>() < drop_rate {
-            return AppendEntriesResponse {term:0,success:false,conflict_index:None,request_id:args.request_id, conflict_term: None }
+            return AppendEntriesResponse {
+                term: 0,
+                success: false,
+                conflict_index: None,
+                request_id: args.request_id,
+                conflict_term: None,
+            };
         }
 
         if let Some(handler) = handler {
@@ -256,7 +264,13 @@ impl Network for MockNetwork {
         }
 
         // 目标节点不存在或无处理器
-        AppendEntriesResponse {term:0,success:false,conflict_index:None,request_id:args.request_id, conflict_term: None }
+        AppendEntriesResponse {
+            term: 0,
+            success: false,
+            conflict_index: None,
+            request_id: args.request_id,
+            conflict_term: None,
+        }
     }
 
     async fn send_install_snapshot(

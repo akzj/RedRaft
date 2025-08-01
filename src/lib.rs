@@ -7,8 +7,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-// 导出新模块
-pub mod callback_wrap;
 pub mod mock_network;
 pub mod mock_storage;
 pub mod mutl_raft_driver;
@@ -17,6 +15,7 @@ pub mod mutl_raft_driver;
 pub type NodeId = String;
 pub type Command = Vec<u8>;
 
+type TimerId = u64; // 定时器ID类型
 // 请求ID类型（用于过滤超时响应）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RequestId(u64);
@@ -52,6 +51,13 @@ pub enum Event {
     AppendEntriesReply(NodeId, AppendEntriesResponse),
     InstallSnapshotReply(NodeId, InstallSnapshotResponse),
 
+    // 领导人转移相关事件
+    LeaderTransfer {
+        target: NodeId,
+        request_id: RequestId,
+    },
+    LeaderTransferTimeout,
+
     // 客户端事件
     ClientPropose {
         cmd: Command,
@@ -69,36 +75,42 @@ pub trait RaftCallbacks: Send + Sync {
     // 发送 RPC 回调
     fn send_request_vote_request(
         &self,
+        from: NodeId,
         target: NodeId,
         args: RequestVoteRequest,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
     fn send_request_vote_response(
         &self,
+        from: NodeId,
         target: NodeId,
         args: RequestVoteResponse,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
     fn send_append_entries_request(
         &self,
+        from: NodeId,
         target: NodeId,
         args: AppendEntriesRequest,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
     fn send_append_entries_response(
         &self,
+        from: NodeId,
         target: NodeId,
         args: AppendEntriesResponse,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
     fn send_install_snapshot_request(
         &self,
+        from: NodeId,
         target: NodeId,
         args: InstallSnapshotRequest,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
     fn send_install_snapshot_reply(
         &self,
+        from: NodeId,
         target: NodeId,
         args: InstallSnapshotResponse,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -106,74 +118,98 @@ pub trait RaftCallbacks: Send + Sync {
     // 持久化回调（原Storage功能）
     fn save_hard_state(
         &self,
+        from: NodeId,
         term: u64,
         voted_for: Option<NodeId>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
     fn load_hard_state(
         &self,
+        from: NodeId,
     ) -> Pin<Box<dyn Future<Output = Result<(u64, Option<NodeId>), Error>> + Send>>;
 
     fn append_log_entries(
         &self,
+        from: NodeId,
         entries: &[LogEntry],
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 
     fn get_log_entries(
         &self,
+        from: NodeId,
         low: u64,
         high: u64,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<LogEntry>, Error>> + Send>>;
 
     fn truncate_log_suffix(
         &self,
+        from: NodeId,
         idx: u64,
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 
     fn truncate_log_prefix(
         &self,
+        from: NodeId,
         idx: u64,
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 
-    fn get_last_log_index(&self) -> Pin<Box<dyn Future<Output = Result<u64, Error>> + Send>>;
+    fn get_last_log_index(
+        &self,
+        from: NodeId,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, Error>> + Send>>;
 
-    fn get_log_term(&self, idx: u64) -> Pin<Box<dyn Future<Output = Result<u64, Error>> + Send>>;
+    fn get_log_term(
+        &self,
+        from: NodeId,
+        idx: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, Error>> + Send>>;
 
     fn save_snapshot(
         &self,
+        from: NodeId,
         snap: Snapshot,
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 
-    fn load_snapshot(&self) -> Pin<Box<dyn Future<Output = Result<Snapshot, Error>> + Send>>;
+    fn load_snapshot(
+        &self,
+        from: NodeId,
+    ) -> Pin<Box<dyn Future<Output = Result<Snapshot, Error>> + Send>>;
 
     fn save_cluster_config(
         &self,
+        from: NodeId,
         conf: ClusterConfig,
     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 
     fn load_cluster_config(
         &self,
+        from: NodeId,
     ) -> Pin<Box<dyn Future<Output = Result<ClusterConfig, Error>> + Send>>;
 
+    fn set_leader_transfer_timer(&self, from: NodeId, dur: Duration) -> TimerId;
+
     // 定时器回调
-    fn set_election_timer(&self, dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
-    fn set_heartbeat_timer(&self, dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
-    fn set_apply_timer(&self, dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
-    fn set_config_change_timer(&self, dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn reset_timer(&self, from: NodeId, timer_id: TimerId);
+    fn set_election_timer(&self, from: NodeId, dur: Duration) -> TimerId;
+    fn set_heartbeat_timer(&self, from: NodeId, dur: Duration) -> TimerId;
+    fn set_apply_timer(&self, from: NodeId, dur: Duration) -> TimerId;
+    fn set_config_change_timer(&self, from: NodeId, dur: Duration) -> TimerId;
 
     // 客户端响应回调
     fn client_response(
         &self,
+        from: NodeId,
         request_id: RequestId,
         result: Result<u64, Error>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
     // 状态变更通知回调
-    fn state_changed(&self, role: Role) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn state_changed(&self, from: NodeId, role: Role) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
     // 日志应用到状态机的回调
     fn apply_command(
         &self,
+        from: NodeId,
         index: u64,
         term: u64,
         cmd: Command,
@@ -182,6 +218,7 @@ pub trait RaftCallbacks: Send + Sync {
     // 处理快照数据（由业务层实现）
     fn process_snapshot(
         &self,
+        from: NodeId,
         index: u64,
         term: u64,
         data: Vec<u8>,
@@ -192,6 +229,7 @@ pub trait RaftCallbacks: Send + Sync {
 // === 集群配置 ===
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterConfig {
+    pub epoch: u64, // 配置版本号
     pub voters: HashSet<NodeId>,
     pub joint: Option<JointConfig>,
 }
@@ -205,19 +243,22 @@ pub struct JointConfig {
 impl ClusterConfig {
     pub fn empty() -> Self {
         Self {
-            voters: HashSet::new(),
             joint: None,
+            epoch: 0,
+            voters: HashSet::new(),
         }
     }
 
     pub fn simple(voters: HashSet<NodeId>) -> Self {
         Self {
             voters,
+            epoch: 0,
             joint: None,
         }
     }
 
     pub fn enter_joint(&mut self, old: HashSet<NodeId>, new: HashSet<NodeId>) {
+        self.epoch += 1;
         debug_assert!(self.joint.is_none(), "already in joint");
         self.joint = Some(JointConfig {
             old: old.clone(),
@@ -230,7 +271,8 @@ impl ClusterConfig {
         if let Some(j) = self.joint.take() {
             self.voters = j.new.clone();
             Self {
-                voters: j.new,
+                epoch: self.epoch,
+                voters: j.new.clone(),
                 joint: None,
             }
         } else {
@@ -304,27 +346,6 @@ pub struct InstallSnapshotResponse {
     pub term: u64,
     pub request_id: RequestId,
     pub state: InstallSnapshotState,
-}
-
-#[async_trait::async_trait]
-pub trait Network: Send + Sync {
-    async fn send_request_vote(
-        &self,
-        target: NodeId,
-        args: RequestVoteRequest,
-    ) -> RequestVoteResponse;
-
-    async fn send_append_entries(
-        &self,
-        target: NodeId,
-        args: AppendEntriesRequest,
-    ) -> AppendEntriesResponse;
-
-    async fn send_install_snapshot(
-        &self,
-        target: NodeId,
-        args: InstallSnapshotRequest,
-    ) -> InstallSnapshotResponse;
 }
 
 #[derive(Debug, Clone)]
@@ -455,27 +476,47 @@ pub struct RaftState {
     follower_snapshot_states: HashMap<NodeId, InstallSnapshotState>,
     follower_last_snapshot_index: HashMap<NodeId, u64>,
     snapshot_probe_schedules: Vec<SnapshotProbeSchedule>,
+
+    // 领导人转移相关状态
+    leader_transfer_target: Option<NodeId>,
+    leader_transfer_request_id: Option<RequestId>,
+    leader_transfer_timeout: Duration,
+    leader_transfer_start_time: Option<Instant>,
+
+    election_timer: Option<TimerId>,        // 选举定时器ID
+    leader_transfer_timer: Option<TimerId>, // 领导人转移定时器ID
+
+    // 其他状态（可扩展）
+    options: RaftStateOptions,
+}
+
+#[derive(Debug, Clone)]
+pub struct RaftStateOptions {
+    id: NodeId,
+    peers: Vec<NodeId>,
+    election_timeout_min: u64,
+    election_timeout_max: u64,
+    heartbeat_interval: u64,
+    apply_interval: u64,
+    config_change_timeout: Duration,
+    leader_transfer_timeout: Duration,
+    apply_batch_size: u64, // 每次应用到状态机的日志条数
 }
 
 impl RaftState {
     /// 初始化状态
-    pub async fn new(
-        id: NodeId,
-        peers: Vec<NodeId>,
-        election_timeout_min: u64,
-        election_timeout_max: u64,
-        heartbeat_interval: u64,
-        apply_interval: u64,
-        config_change_timeout: Duration,
-        callbacks: Arc<dyn RaftCallbacks>,
-    ) -> Self {
+    pub async fn new(options: RaftStateOptions, callbacks: Arc<dyn RaftCallbacks>) -> Self {
         // 从回调加载持久化状态
-        let (current_term, voted_for) = callbacks.load_hard_state().await.unwrap_or((0, None));
-        let loaded_config = match callbacks.load_cluster_config().await {
+        let (current_term, voted_for) = callbacks
+            .load_hard_state(options.id.clone())
+            .await
+            .unwrap_or((0, None));
+        let loaded_config = match callbacks.load_cluster_config(options.id.clone()).await {
             Ok(conf) => conf,
             Err(_) => ClusterConfig::empty(),
         };
-        let snap = match callbacks.load_snapshot().await {
+
+        let snap = match callbacks.load_snapshot(options.id.clone()).await {
             Ok(s) => s,
             Err(_) => Snapshot {
                 index: 0,
@@ -484,12 +525,18 @@ impl RaftState {
                 config: loaded_config.clone(),
             },
         };
-        let timeout = election_timeout_min
-            + rand::random::<u64>() % (election_timeout_max - election_timeout_min + 1);
+        let timeout = options.election_timeout_min
+            + rand::random::<u64>()
+                % (options.election_timeout_max - options.election_timeout_min + 1);
 
         RaftState {
-            id,
-            peers,
+            options: options.clone(),
+            leader_transfer_request_id: None,
+            leader_transfer_start_time: None,
+            leader_transfer_target: None,
+            leader_transfer_timeout: options.leader_transfer_timeout,
+            id: options.id,
+            peers: options.peers,
             config: loaded_config,
             role: Role::Follower,
             current_term,
@@ -504,14 +551,14 @@ impl RaftState {
             recent_client_requests: HashSet::new(),
             config_change_in_progress: false,
             config_change_start_time: None,
-            config_change_timeout,
+            config_change_timeout: options.config_change_timeout,
             election_timeout: Duration::from_millis(timeout),
-            election_timeout_min,
-            election_timeout_max,
-            heartbeat_interval: Duration::from_millis(heartbeat_interval),
-            apply_interval: Duration::from_millis(apply_interval),
+            election_timeout_min: options.election_timeout_min,
+            election_timeout_max: options.election_timeout_max,
+            heartbeat_interval: Duration::from_millis(options.heartbeat_interval),
+            apply_interval: Duration::from_millis(options.apply_interval),
             last_heartbeat: Instant::now(),
-            callbacks,
+            callbacks: callbacks,
             election_votes: HashMap::new(),
             election_effective_voters: HashSet::new(),
             election_joint_config: None,
@@ -521,6 +568,8 @@ impl RaftState {
             follower_snapshot_states: HashMap::new(),
             follower_last_snapshot_index: HashMap::new(),
             snapshot_probe_schedules: Vec::new(),
+            election_timer: None,
+            leader_transfer_timer: None,
         }
     }
 
@@ -550,6 +599,13 @@ impl RaftState {
                 new_voters,
                 request_id,
             } => self.handle_change_config(new_voters, request_id).await,
+
+            Event::LeaderTransfer { target, request_id } => {
+                self.handle_leader_transfer(target, request_id).await;
+            }
+            Event::LeaderTransferTimeout => {
+                self.handle_leader_transfer_timeout().await;
+            }
         }
     }
 
@@ -564,7 +620,7 @@ impl RaftState {
         self.role = Role::Candidate;
         self.voted_for = Some(self.id.clone());
         self.callbacks
-            .save_hard_state(self.current_term, self.voted_for.clone())
+            .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
             .await;
 
         // 生成新选举ID并初始化跟踪状态
@@ -580,9 +636,10 @@ impl RaftState {
         let new_timeout = self.election_timeout_min
             + rand::random::<u64>() % (self.election_timeout_max - self.election_timeout_min + 1);
         self.election_timeout = Duration::from_millis(new_timeout);
-        self.callbacks
-            .set_election_timer(self.election_timeout)
-            .await;
+        self.election_timer = Some(
+            self.callbacks
+                .set_election_timer(self.id.clone(), self.election_timeout),
+        );
 
         // 发送投票请求
         let last_log_index = self.get_last_log_index().await;
@@ -599,11 +656,15 @@ impl RaftState {
             if *peer != self.id {
                 let target = peer.clone();
                 let args = req.clone();
-                self.callbacks.send_request_vote_request(target, args).await;
+                self.callbacks
+                    .send_request_vote_request(self.id.clone(), target, args)
+                    .await;
             }
         }
 
-        self.callbacks.state_changed(Role::Candidate).await;
+        self.callbacks
+            .state_changed(self.id.clone(), Role::Candidate)
+            .await;
     }
 
     async fn handle_request_vote(&mut self, args: RequestVoteRequest) {
@@ -615,9 +676,11 @@ impl RaftState {
             self.role = Role::Follower;
             self.voted_for = None;
             self.callbacks
-                .save_hard_state(self.current_term, self.voted_for.clone())
+                .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
                 .await;
-            self.callbacks.state_changed(Role::Follower).await;
+            self.callbacks
+                .state_changed(self.id.clone(), Role::Follower)
+                .await;
         }
 
         // 日志最新性检查 - 优化版本
@@ -633,7 +696,7 @@ impl RaftState {
             self.voted_for = Some(args.candidate_id.clone());
             vote_granted = true;
             self.callbacks
-                .save_hard_state(self.current_term, self.voted_for.clone())
+                .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
                 .await;
         }
 
@@ -644,55 +707,17 @@ impl RaftState {
             request_id: args.request_id,
         };
         self.callbacks
-            .send_request_vote_response(args.candidate_id, resp)
+            .send_request_vote_response(self.id.clone(), args.candidate_id, resp)
             .await;
     }
 
     // 优化的日志最新性检查
     async fn is_log_up_to_date(&self, candidate_last_index: u64, candidate_last_term: u64) -> bool {
-        let self_last_index = self.get_last_log_index().await;
         let self_last_term = self.get_last_log_term().await;
+        let self_last_index = self.get_last_log_index().await;
 
-        // 候选人的最后任期更大，则日志更新
-        if candidate_last_term > self_last_term {
-            return true;
-        }
-
-        // 任期相同，比较日志长度
-        if candidate_last_term == self_last_term {
-            return candidate_last_index >= self_last_index;
-        }
-
-        // 候选人任期更小，但可能包含更多有效日志
-        // 这种情况需要更细致的检查
-        if candidate_last_term < self_last_term {
-            // 检查候选人是否包含了当前节点所有的关键日志
-            let mut current_index = self_last_index;
-
-            // 向上追溯直到找到与候选人最后任期相同的日志
-            while current_index > 0 {
-                let term = if current_index <= self.last_snapshot_index {
-                    self.last_snapshot_term
-                } else {
-                    match self.callbacks.get_log_term(current_index).await {
-                        Ok(term) => term,
-                        Err(_) => break,
-                    }
-                };
-
-                if term == candidate_last_term {
-                    // 找到相同任期，比较索引
-                    return candidate_last_index >= current_index;
-                } else if term < candidate_last_term {
-                    // 遇到比候选人任期还小的任期，说明候选人日志更新
-                    return true;
-                }
-
-                current_index -= 1;
-            }
-        }
-
-        false
+        candidate_last_term > self_last_term
+            || (candidate_last_term == self_last_term && candidate_last_index >= self_last_index)
     }
 
     async fn handle_request_vote_reply(&mut self, peer: NodeId, reply: RequestVoteResponse) {
@@ -714,9 +739,11 @@ impl RaftState {
             self.election_votes.clear();
             self.current_election_id = None;
             self.callbacks
-                .save_hard_state(self.current_term, self.voted_for.clone())
+                .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
                 .await;
-            self.callbacks.state_changed(Role::Follower).await;
+            self.callbacks
+                .state_changed(self.id.clone(), Role::Follower)
+                .await;
             return;
         }
 
@@ -781,14 +808,19 @@ impl RaftState {
         }
 
         // 启动心跳和日志应用定时器
+        let _ = self
+            .callbacks
+            .set_heartbeat_timer(self.id.clone(), self.heartbeat_interval);
+
         self.callbacks
-            .set_heartbeat_timer(self.heartbeat_interval)
+            .state_changed(self.id.clone(), Role::Leader)
             .await;
-        self.callbacks.set_apply_timer(self.apply_interval).await;
-        self.callbacks.state_changed(Role::Leader).await;
 
         // 立即发送心跳
         self.broadcast_append_entries().await;
+
+        // 启动日志应用定时器
+        self.adjust_apply_interval();
     }
 
     async fn reset_election(&mut self) {
@@ -796,9 +828,10 @@ impl RaftState {
         let new_timeout = self.election_timeout_min
             + rand::random::<u64>() % (self.election_timeout_max - self.election_timeout_min + 1);
         self.election_timeout = Duration::from_millis(new_timeout);
-        self.callbacks
-            .set_election_timer(self.election_timeout)
-            .await;
+        self.election_timer = Some(
+            self.callbacks
+                .set_election_timer(self.id.clone(), self.election_timeout),
+        );
     }
 
     // === 日志同步相关逻辑 ===
@@ -808,8 +841,7 @@ impl RaftState {
         }
         self.broadcast_append_entries().await;
         self.callbacks
-            .set_heartbeat_timer(self.heartbeat_interval)
-            .await;
+            .set_heartbeat_timer(self.id.clone(), self.heartbeat_interval);
     }
 
     async fn broadcast_append_entries(&mut self) {
@@ -861,14 +893,14 @@ impl RaftState {
                 self.last_snapshot_term
             } else {
                 self.callbacks
-                    .get_log_term(prev_log_index)
+                    .get_log_term(self.id.clone(), prev_log_index)
                     .await
                     .unwrap_or(0)
             };
 
             let entries = match self
                 .callbacks
-                .get_log_entries(next_idx, last_log_index + 1)
+                .get_log_entries(self.id.clone(), next_idx, last_log_index + 1)
                 .await
             {
                 Ok(entries) => entries.into_iter().take(max_batch_size).collect(),
@@ -885,7 +917,9 @@ impl RaftState {
                 request_id: RequestId::new(),
             };
 
-            self.callbacks.send_append_entries_request(peer, req).await;
+            self.callbacks
+                .send_append_entries_request(self.id.clone(), peer, req)
+                .await;
         }
     }
 
@@ -895,7 +929,10 @@ impl RaftState {
             let conflict_term = if args.prev_log_index <= self.last_snapshot_index {
                 Some(self.last_snapshot_term)
             } else {
-                self.callbacks.get_log_term(args.prev_log_index).await.ok()
+                self.callbacks
+                    .get_log_term(self.id.clone(), args.prev_log_index)
+                    .await
+                    .ok()
             };
 
             let resp = AppendEntriesResponse {
@@ -906,7 +943,7 @@ impl RaftState {
                 request_id: args.request_id,
             };
             self.callbacks
-                .send_append_entries_response(args.leader_id, resp)
+                .send_append_entries_response(self.id.clone(), args.leader_id, resp)
                 .await;
             return;
         }
@@ -915,10 +952,20 @@ impl RaftState {
         self.role = Role::Follower;
         self.current_term = args.term;
         self.last_heartbeat = Instant::now();
+
+        if self.election_timer.is_some() {
+            self.callbacks
+                .reset_timer(self.id.clone(), self.election_timer.unwrap());
+        }
+
+        self.election_timer = Some(
+            self.callbacks
+                .set_election_timer(self.id.clone(), self.election_timeout),
+        );
+
         self.callbacks
-            .set_election_timer(self.election_timeout)
+            .state_changed(self.id.clone(), Role::Follower)
             .await;
-        self.callbacks.state_changed(Role::Follower).await;
 
         // 日志连续性检查
         let prev_log_ok = if args.prev_log_index == 0 {
@@ -929,7 +976,7 @@ impl RaftState {
         } else {
             // 检查日志任期是否匹配
             self.callbacks
-                .get_log_term(args.prev_log_index)
+                .get_log_term(self.id.clone(), args.prev_log_index)
                 .await
                 .unwrap_or(0)
                 == args.prev_log_term
@@ -945,7 +992,10 @@ impl RaftState {
             let conflict_term = if args.prev_log_index <= self.last_snapshot_index {
                 Some(self.last_snapshot_term)
             } else {
-                self.callbacks.get_log_term(args.prev_log_index).await.ok()
+                self.callbacks
+                    .get_log_term(self.id.clone(), args.prev_log_index)
+                    .await
+                    .ok()
             };
 
             let resp = AppendEntriesResponse {
@@ -956,7 +1006,7 @@ impl RaftState {
                 request_id: args.request_id,
             };
             self.callbacks
-                .send_append_entries_response(args.leader_id, resp)
+                .send_append_entries_response(self.id.clone(), args.leader_id, resp)
                 .await;
             return;
         }
@@ -965,7 +1015,7 @@ impl RaftState {
         if args.prev_log_index < self.get_last_log_index().await {
             let _ = self
                 .callbacks
-                .truncate_log_suffix(args.prev_log_index + 1)
+                .truncate_log_suffix(self.id.clone(), args.prev_log_index + 1)
                 .await;
         }
 
@@ -982,7 +1032,7 @@ impl RaftState {
                         request_id: args.request_id,
                     };
                     self.callbacks
-                        .send_append_entries_response(args.leader_id, resp)
+                        .send_append_entries_response(self.id.clone(), args.leader_id, resp)
                         .await;
                     return;
                 }
@@ -1000,7 +1050,7 @@ impl RaftState {
                                 request_id: args.request_id,
                             };
                             self.callbacks
-                                .send_append_entries_response(args.leader_id, resp)
+                                .send_append_entries_response(self.id.clone(), args.leader_id, resp)
                                 .await;
                             return;
                         }
@@ -1008,7 +1058,10 @@ impl RaftState {
                 }
             }
 
-            let _ = self.callbacks.append_log_entries(&args.entries).await;
+            let _ = self
+                .callbacks
+                .append_log_entries(self.id.clone(), &args.entries)
+                .await;
 
             // 处理配置变更日志
             self.process_config_entries(&args.entries).await;
@@ -1028,8 +1081,10 @@ impl RaftState {
             request_id: args.request_id,
         };
         self.callbacks
-            .send_append_entries_response(args.leader_id, resp)
+            .send_append_entries_response(self.id.clone(), args.leader_id, resp)
             .await;
+
+        self.apply_committed_logs().await;
     }
 
     async fn handle_append_entries_reply(&mut self, peer: NodeId, reply: AppendEntriesResponse) {
@@ -1043,9 +1098,11 @@ impl RaftState {
             self.role = Role::Follower;
             self.voted_for = None;
             self.callbacks
-                .save_hard_state(self.current_term, self.voted_for.clone())
+                .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
                 .await;
-            self.callbacks.state_changed(Role::Follower).await;
+            self.callbacks
+                .state_changed(self.id.clone(), Role::Follower)
+                .await;
             return;
         }
 
@@ -1054,7 +1111,11 @@ impl RaftState {
             let req_next_idx = self.next_index.get(&peer).copied().unwrap_or(1);
             let entries_len = self
                 .callbacks
-                .get_log_entries(req_next_idx, self.get_last_log_index().await + 1)
+                .get_log_entries(
+                    self.id.clone(),
+                    req_next_idx,
+                    self.get_last_log_index().await + 1,
+                )
                 .await
                 .unwrap_or_default()
                 .len() as u64;
@@ -1078,7 +1139,7 @@ impl RaftState {
                     let term = if idx <= self.last_snapshot_index {
                         self.last_snapshot_term
                     } else {
-                        match self.callbacks.get_log_term(idx).await {
+                        match self.callbacks.get_log_term(self.id.clone(), idx).await {
                             Ok(t) => t,
                             Err(_) => break,
                         }
@@ -1097,11 +1158,71 @@ impl RaftState {
 
             self.next_index.insert(peer.clone(), new_next.max(1));
         }
+
+        // 检查领导权转移状态
+        if let Some(transfer_target) = &self.leader_transfer_target {
+            if &peer == transfer_target && reply.term == self.current_term {
+                self.process_leader_transfer_target_reply(peer, reply).await;
+            }
+        }
+    }
+
+    /// 处理目标节点的日志响应
+    async fn process_leader_transfer_target_reply(
+        &mut self,
+        peer: NodeId,
+        reply: AppendEntriesResponse,
+    ) {
+        if reply.success {
+            // 检查目标节点日志是否最新
+            let target_match_index = self.match_index.get(&peer).copied().unwrap_or(0);
+            let last_log_index = self.get_last_log_index().await;
+
+            if target_match_index >= last_log_index {
+                // 目标节点日志最新，可以转移领导权
+                self.transfer_leadership_to(peer).await;
+                return;
+            }
+        }
+
+        // 目标节点日志不够新，需要发送更多日志
+        self.send_heartbeat_to(peer).await;
+    }
+
+    /// 转移领导权给目标节点
+    async fn transfer_leadership_to(&mut self, target: NodeId) {
+        // 发送超时投票请求，让目标节点立即开始选举
+        let req = RequestVoteRequest {
+            term: self.current_term + 1, // 使用更高任期触发选举
+            candidate_id: target.clone(),
+            last_log_index: self.get_last_log_index().await,
+            last_log_term: self.get_last_log_term().await,
+            request_id: RequestId::new(),
+        };
+
+        self.callbacks
+            .send_request_vote_request(self.id.clone(), target.clone(), req)
+            .await;
+
+        // 完成转移，响应客户端
+        if let Some(request_id) = self.leader_transfer_request_id.take() {
+            self.callbacks
+                .client_response(
+                    self.id.clone(),
+                    request_id,
+                    Ok(0), // 成功代码
+                )
+                .await;
+        }
+
+        // 清理转移状态
+        self.leader_transfer_target = None;
+        self.leader_transfer_start_time = None;
     }
 
     // === 快照相关逻辑 ===
     async fn send_snapshot_to(&mut self, target: NodeId) {
-        let snap = match self.callbacks.load_snapshot().await {
+        let snap = match self.callbacks.load_snapshot(self.id.clone()).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!("加载快照失败: {}", e.0);
@@ -1135,7 +1256,7 @@ impl RaftState {
         self.schedule_snapshot_probe(target.clone(), Duration::from_secs(10), 30);
 
         self.callbacks
-            .send_install_snapshot_request(target, req)
+            .send_install_snapshot_request(self.id.clone(), target, req)
             .await;
     }
 
@@ -1156,7 +1277,11 @@ impl RaftState {
         let log_term = if snap.index <= self.last_snapshot_index {
             self.last_snapshot_term
         } else {
-            match self.callbacks.get_log_term(snap.index).await {
+            match self
+                .callbacks
+                .get_log_term(self.id.clone(), snap.index)
+                .await
+            {
                 Ok(term) => term,
                 Err(_) => return false,
             }
@@ -1184,7 +1309,7 @@ impl RaftState {
         };
 
         self.callbacks
-            .send_install_snapshot_request(target, req)
+            .send_install_snapshot_request(self.id.clone(), target, req)
             .await;
     }
 
@@ -1197,7 +1322,7 @@ impl RaftState {
                 state: InstallSnapshotState::Failed("Term too low".into()),
             };
             self.callbacks
-                .send_install_snapshot_reply(args.leader_id, resp)
+                .send_install_snapshot_reply(self.id.clone(), args.leader_id, resp)
                 .await;
             return;
         }
@@ -1206,9 +1331,16 @@ impl RaftState {
         self.role = Role::Follower;
         self.current_term = args.term;
         self.last_heartbeat = Instant::now();
-        self.callbacks
-            .set_election_timer(self.election_timeout)
-            .await;
+
+        if self.election_timer.is_some() {
+            self.callbacks
+                .reset_timer(self.id.clone(), self.election_timer.unwrap());
+        }
+
+        self.election_timer = Some(
+            self.callbacks
+                .set_election_timer(self.id.clone(), self.election_timeout),
+        );
 
         // 处理空探测消息
         if args.is_probe {
@@ -1231,7 +1363,7 @@ impl RaftState {
                 state: current_state,
             };
             self.callbacks
-                .send_install_snapshot_reply(args.leader_id, resp)
+                .send_install_snapshot_reply(self.id.clone(), args.leader_id, resp)
                 .await;
             return;
         }
@@ -1244,7 +1376,7 @@ impl RaftState {
                 state: InstallSnapshotState::Success,
             };
             self.callbacks
-                .send_install_snapshot_reply(args.leader_id, resp)
+                .send_install_snapshot_reply(self.id.clone(), args.leader_id, resp)
                 .await;
             return;
         }
@@ -1259,7 +1391,7 @@ impl RaftState {
                 ),
             };
             self.callbacks
-                .send_install_snapshot_reply(args.leader_id, resp)
+                .send_install_snapshot_reply(self.id.clone(), args.leader_id, resp)
                 .await;
             return;
         }
@@ -1274,13 +1406,14 @@ impl RaftState {
             state: InstallSnapshotState::Installing,
         };
         self.callbacks
-            .send_install_snapshot_reply(args.leader_id, resp)
+            .send_install_snapshot_reply(self.id.clone(), args.leader_id, resp)
             .await;
 
         // 将快照数据交给业务层处理（异步）
         // 注意：这里不阻塞Raft状态机，实际处理由业务层完成
         self.callbacks
             .process_snapshot(
+                self.id.clone(),
                 args.last_included_index,
                 args.last_included_term,
                 args.data,
@@ -1330,7 +1463,7 @@ impl RaftState {
             let expected_term = if index <= self.last_snapshot_index {
                 self.last_snapshot_term
             } else {
-                match self.callbacks.get_log_term(index).await {
+                match self.callbacks.get_log_term(self.id.clone(), index).await {
                     Ok(t) => t,
                     Err(_) => {
                         tracing::error!("无法验证快照任期，安装失败");
@@ -1371,9 +1504,11 @@ impl RaftState {
             self.role = Role::Follower;
             self.voted_for = None;
             self.callbacks
-                .save_hard_state(self.current_term, self.voted_for.clone())
+                .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
                 .await;
-            self.callbacks.state_changed(Role::Follower).await;
+            self.callbacks
+                .state_changed(self.id.clone(), Role::Follower)
+                .await;
             // 清除该节点的探测计划
             self.remove_snapshot_probe(&peer);
             return;
@@ -1480,7 +1615,7 @@ impl RaftState {
     async fn handle_client_propose(&mut self, cmd: Command, request_id: RequestId) {
         if self.role != Role::Leader {
             self.callbacks
-                .client_response(request_id, Err(Error("not leader".into())))
+                .client_response(self.id.clone(), request_id, Err(Error("not leader".into())))
                 .await;
             return;
         }
@@ -1491,7 +1626,9 @@ impl RaftState {
             if let Some(&index) = self.client_requests.get(&request_id) {
                 // 如果已经提交，直接返回结果
                 if index <= self.commit_index {
-                    self.callbacks.client_response(request_id, Ok(index)).await;
+                    self.callbacks
+                        .client_response(self.id.clone(), request_id, Ok(index))
+                        .await;
                     return;
                 }
                 // 否则等待已存在的日志提交
@@ -1513,7 +1650,11 @@ impl RaftState {
         if new_entry.index != last_idx + 1 {
             tracing::error!("日志索引不连续，拒绝客户端请求");
             self.callbacks
-                .client_response(request_id, Err(Error("log index discontinuous".into())))
+                .client_response(
+                    self.id.clone(),
+                    request_id,
+                    Err(Error("log index discontinuous".into())),
+                )
                 .await;
             return;
         }
@@ -1521,11 +1662,15 @@ impl RaftState {
         // 追加日志
         let result = self
             .callbacks
-            .append_log_entries(&[new_entry.clone()])
+            .append_log_entries(self.id.clone(), &[new_entry.clone()])
             .await;
         if result.is_err() {
             self.callbacks
-                .client_response(request_id, Err(Error("failed to append log".into())))
+                .client_response(
+                    self.id.clone(),
+                    request_id,
+                    Err(Error("failed to append log".into())),
+                )
                 .await;
             return;
         }
@@ -1551,8 +1696,17 @@ impl RaftState {
         }
 
         let start = self.last_applied + 1;
-        let end = self.commit_index;
-        let entries = match self.callbacks.get_log_entries(start, end + 1).await {
+
+        let end = std::cmp::min(
+            self.commit_index,
+            self.last_applied + self.options.apply_batch_size,
+        );
+
+        let entries = match self
+            .callbacks
+            .get_log_entries(self.id.clone(), start, end + 1)
+            .await
+        {
             Ok(entries) => entries,
             Err(e) => {
                 tracing::error!("读取日志失败: {}", e.0);
@@ -1568,7 +1722,7 @@ impl RaftState {
             }
 
             self.callbacks
-                .apply_command(entry.index, entry.term, entry.command)
+                .apply_command(self.id.clone(), entry.index, entry.term, entry.command)
                 .await;
             self.last_applied = entry.index;
 
@@ -1577,7 +1731,21 @@ impl RaftState {
         }
 
         // 继续定时应用
-        self.callbacks.set_apply_timer(self.apply_interval).await;
+        self.adjust_apply_interval();
+    }
+
+    fn adjust_apply_interval(&mut self) {
+        // 根据负载动态调整应用间隔
+        let current_load = self.commit_index - self.last_applied;
+
+        self.apply_interval = if current_load > 1000 {
+            Duration::from_micros(100) // 高负载时更频繁
+        } else {
+            Duration::from_millis(10) // 低负载时减少频率
+        };
+
+        self.callbacks
+            .set_apply_timer(self.id.clone(), self.apply_interval);
     }
 
     async fn check_client_response(&mut self, log_index: u64) {
@@ -1585,7 +1753,9 @@ impl RaftState {
         let mut completed = vec![];
         for (req_id, idx) in &self.client_requests {
             if *idx == log_index {
-                self.callbacks.client_response(*req_id, Ok(log_index)).await;
+                self.callbacks
+                    .client_response(self.id.clone(), *req_id, Ok(log_index))
+                    .await;
                 completed.push(*req_id);
             }
         }
@@ -1599,7 +1769,7 @@ impl RaftState {
     async fn handle_change_config(&mut self, new_voters: HashSet<NodeId>, request_id: RequestId) {
         if self.role != Role::Leader {
             self.callbacks
-                .client_response(request_id, Err(Error("not leader".into())))
+                .client_response(self.id.clone(), request_id, Err(Error("not leader".into())))
                 .await;
             return;
         }
@@ -1607,7 +1777,11 @@ impl RaftState {
         // 检查是否已有配置变更在进行中
         if self.config_change_in_progress {
             self.callbacks
-                .client_response(request_id, Err(Error("config change in progress".into())))
+                .client_response(
+                    self.id.clone(),
+                    request_id,
+                    Err(Error("config change in progress".into())),
+                )
                 .await;
             return;
         }
@@ -1616,7 +1790,11 @@ impl RaftState {
         let new_config = ClusterConfig::simple(new_voters.clone());
         if !new_config.is_valid() {
             self.callbacks
-                .client_response(request_id, Err(Error("invalid cluster config".into())))
+                .client_response(
+                    self.id.clone(),
+                    request_id,
+                    Err(Error("invalid cluster config".into())),
+                )
                 .await;
             return;
         }
@@ -1640,11 +1818,15 @@ impl RaftState {
         // 追加配置变更日志
         let result = self
             .callbacks
-            .append_log_entries(&[new_entry.clone()])
+            .append_log_entries(self.id.clone(), &[new_entry.clone()])
             .await;
         if result.is_err() {
             self.callbacks
-                .client_response(request_id, Err(Error("failed to append config log".into())))
+                .client_response(
+                    self.id.clone(),
+                    request_id,
+                    Err(Error("failed to append config log".into())),
+                )
                 .await;
             return;
         }
@@ -1656,8 +1838,7 @@ impl RaftState {
 
         // 设置配置变更超时定时器
         self.callbacks
-            .set_config_change_timer(self.config_change_timeout)
-            .await;
+            .set_config_change_timer(self.id.clone(), self.config_change_timeout);
 
         // 立即同步日志
         self.broadcast_append_entries().await;
@@ -1680,8 +1861,7 @@ impl RaftState {
         if start_time.elapsed() < self.config_change_timeout {
             // 未超时，重新设置定时器
             self.callbacks
-                .set_config_change_timer(self.config_change_timeout)
-                .await;
+                .set_config_change_timer(self.id.clone(), self.config_change_timeout);
             return;
         }
 
@@ -1703,7 +1883,7 @@ impl RaftState {
         // 追加回滚配置日志
         let _ = self
             .callbacks
-            .append_log_entries(&[new_entry.clone()])
+            .append_log_entries(self.id.clone(), &[new_entry.clone()])
             .await;
 
         // 重置配置变更状态
@@ -1728,7 +1908,7 @@ impl RaftState {
                     self.config = new_config;
                     let _ = self
                         .callbacks
-                        .save_cluster_config(self.config.clone())
+                        .save_cluster_config(self.id.clone(), self.config.clone())
                         .await;
 
                     // 如果是联合配置且已提交，尝试退出联合状态
@@ -1750,7 +1930,10 @@ impl RaftState {
         if all_replicated {
             // 退出联合配置
             let new_config = self.config.leave_joint();
-            let _ = self.callbacks.save_cluster_config(new_config).await;
+            let _ = self
+                .callbacks
+                .save_cluster_config(self.id.clone(), new_config)
+                .await;
 
             // 如果是Leader且处于配置变更中，标记为完成
             if self.role == Role::Leader {
@@ -1777,21 +1960,129 @@ impl RaftState {
 
     async fn get_last_log_index(&self) -> u64 {
         self.callbacks
-            .get_last_log_index()
+            .get_last_log_index(self.id.clone())
             .await
             .unwrap_or(0)
             .max(self.last_snapshot_index)
     }
 
     async fn get_last_log_term(&self) -> u64 {
-        let last_log_idx = self.callbacks.get_last_log_index().await.unwrap_or(0);
+        let last_log_idx = self
+            .callbacks
+            .get_last_log_index(self.id.clone())
+            .await
+            .unwrap_or(0);
         if last_log_idx == 0 {
             self.last_snapshot_term
         } else {
             self.callbacks
-                .get_log_term(last_log_idx)
+                .get_log_term(self.id.clone(), last_log_idx)
                 .await
                 .unwrap_or(self.last_snapshot_term)
+        }
+    }
+
+    /// 处理领导权转移请求
+    pub async fn handle_leader_transfer(&mut self, target: NodeId, request_id: RequestId) {
+        if self.role != Role::Leader {
+            self.callbacks
+                .client_response(self.id.clone(), request_id, Err(Error("not leader".into())))
+                .await;
+            return;
+        }
+
+        if self.leader_transfer_target.is_some() {
+            self.callbacks
+                .client_response(
+                    self.id.clone(),
+                    request_id,
+                    Err(Error("leader transfer already in progress".into())),
+                )
+                .await;
+            return;
+        }
+
+        if !self.config.contains(&target) {
+            self.callbacks
+                .client_response(
+                    self.id.clone(),
+                    request_id,
+                    Err(Error("target node not in cluster".into())),
+                )
+                .await;
+            return;
+        }
+
+        if target == self.id {
+            self.callbacks
+                .client_response(
+                    self.id.clone(),
+                    request_id,
+                    Err(Error("cannot transfer to self".into())),
+                )
+                .await;
+            return;
+        }
+
+        // 记录转移状态
+        self.leader_transfer_target = Some(target.clone());
+        self.leader_transfer_request_id = Some(request_id);
+        self.leader_transfer_start_time = Some(Instant::now());
+
+        // 立即发送心跳重置目标节点选举计时器
+        self.send_heartbeat_to(target).await;
+
+        // 设置超时定时器
+        self.leader_transfer_timer = Some(
+            self.callbacks
+                .set_leader_transfer_timer(self.id.clone(), self.leader_transfer_timeout),
+        );
+    }
+
+    /// 发送心跳到特定节点
+    async fn send_heartbeat_to(&mut self, target: NodeId) {
+        let prev_log_index = self.next_index[&target] - 1;
+        let prev_log_term = if prev_log_index == 0 {
+            0
+        } else if prev_log_index <= self.last_snapshot_index {
+            self.last_snapshot_term
+        } else {
+            self.callbacks
+                .get_log_term(self.id.clone(), prev_log_index)
+                .await
+                .unwrap_or(0)
+        };
+
+        let req = AppendEntriesRequest {
+            term: self.current_term,
+            leader_id: self.id.clone(),
+            prev_log_index,
+            prev_log_term,
+            entries: vec![], // 空日志表示心跳
+            leader_commit: self.commit_index,
+            request_id: RequestId::new(),
+        };
+
+        self.callbacks
+            .send_append_entries_request(self.id.clone(), target, req)
+            .await;
+    }
+
+    /// 处理领导权转移超时
+    async fn handle_leader_transfer_timeout(&mut self) {
+        if let (Some(target), Some(request_id)) = (
+            self.leader_transfer_target.take(),
+            self.leader_transfer_request_id.take(),
+        ) {
+            self.leader_transfer_start_time = None;
+
+            self.callbacks
+                .client_response(
+                    self.id.clone(),
+                    request_id,
+                    Err(Error("leader transfer timeout".into())),
+                )
+                .await;
         }
     }
 
@@ -1806,7 +2097,12 @@ impl RaftState {
             let candidate = match_indices[quorum - 1];
             // 确保候选索引的任期与当前任期相同（Raft约束）
             if candidate > self.commit_index
-                && self.callbacks.get_log_term(candidate).await.unwrap_or(0) == self.current_term
+                && self
+                    .callbacks
+                    .get_log_term(self.id.clone(), candidate)
+                    .await
+                    .unwrap_or(0)
+                    == self.current_term
             {
                 self.commit_index = candidate;
             } else if candidate > self.commit_index {
@@ -1814,7 +2110,13 @@ impl RaftState {
                 // 如果有，则可以提交所有之前的日志
                 let mut has_committed_current_term = false;
                 for i in self.commit_index..=candidate {
-                    if self.callbacks.get_log_term(i).await.unwrap_or(0) == self.current_term {
+                    if self
+                        .callbacks
+                        .get_log_term(self.id.clone(), i)
+                        .await
+                        .unwrap_or(0)
+                        == self.current_term
+                    {
                         has_committed_current_term = true;
                         break;
                     }
@@ -1839,7 +2141,11 @@ impl RaftState {
         // 查找最早的当前任期日志
         let mut earliest_current_term_index = None;
         for i in 1..=last_log_index {
-            let term = self.callbacks.get_log_term(i).await.unwrap_or(0);
+            let term = self
+                .callbacks
+                .get_log_term(self.id.clone(), i)
+                .await
+                .unwrap_or(0);
             if term == current_term {
                 earliest_current_term_index = Some(i);
                 break;

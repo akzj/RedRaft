@@ -13,22 +13,12 @@ pub enum RaftNodeStatus {
 }
 
 // Raft事件类型（示例）
-#[derive(Debug)]
-pub enum RaftEvent {
-    NetworkMessage { from: NodeId, data: Vec<u8> },
-    TimerExpired { timer_id: u64 },
-    LocalCommand { command: Vec<u8> },
-}
-
-impl Into<Event> for RaftEvent {
-    fn into(self) -> Event {
-        todo!("Convert RaftEvent to Event")
-    }
-}
-
 use std::sync::atomic::AtomicU8;
 
-use crate::{Event, NodeId, RaftState};
+use crate::{
+    AppendEntriesRequest, AppendEntriesResponse, Event, InstallSnapshotRequest,
+    InstallSnapshotResponse, NodeId, RaftState, RequestVoteRequest, RequestVoteResponse,
+};
 
 // 原子RaftGroupStatus包装器
 pub struct AtomicRaftNodeStatus(AtomicU8);
@@ -78,11 +68,32 @@ impl AtomicRaftNodeStatus {
     }
 }
 
+#[async_trait::async_trait]
+pub trait Network: Send + Sync {
+    async fn send_request_vote(
+        &self,
+        target: NodeId,
+        args: RequestVoteRequest,
+    ) -> RequestVoteResponse;
+
+    async fn send_append_entries(
+        &self,
+        target: NodeId,
+        args: AppendEntriesRequest,
+    ) -> AppendEntriesResponse;
+
+    async fn send_install_snapshot(
+        &self,
+        target: NodeId,
+        args: InstallSnapshotRequest,
+    ) -> InstallSnapshotResponse;
+}
+
 #[derive(Debug)]
 struct TimerEvent {
     node_id: NodeId,
+    event: Event,
     trigger_time: Instant,
-    event: RaftEvent,
 }
 
 // Implement ordering for TimerEvent so it can be used in BinaryHeap (min-heap by trigger_time)
@@ -110,10 +121,10 @@ impl Ord for TimerEvent {
 
 // Raft组核心数据（状态+通道+业务状态）
 struct RaftGroupCore {
-    status: AtomicRaftNodeStatus,         // 原子状态管理
-    tx: mpsc::Sender<RaftEvent>,          // 事件发送端
-    rx: Mutex<mpsc::Receiver<RaftEvent>>, // 事件接收端
-    state: Mutex<RaftState>,              // Raft业务状态（如日志、任期等）
+    status: AtomicRaftNodeStatus,     // 原子状态管理
+    tx: mpsc::Sender<Event>,          // 事件发送端
+    rx: Mutex<mpsc::Receiver<Event>>, // 事件接收端
+    state: Mutex<RaftState>,          // Raft业务状态（如日志、任期等）
 }
 
 // Multi-Raft驱动核心
@@ -180,7 +191,7 @@ impl MultiRaftDriver {
     }
 
     // 向指定Raft组发送事件
-    pub async fn send_event(&self, group_id: NodeId, event: RaftEvent) -> bool {
+    pub async fn send_event(&self, group_id: NodeId, event: Event) -> bool {
         let groups = self.groups.lock().unwrap();
         let Some(core) = groups.get(&group_id) else {
             return false; // 组不存在
