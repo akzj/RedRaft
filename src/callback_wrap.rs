@@ -1,3 +1,4 @@
+use super::*;
 
 // === 回调接口的默认实现（示例）===
 #[derive(Clone)]
@@ -189,5 +190,19 @@ impl RaftCallbacks for DefaultCallbacks {
         _cmd: Command,
     ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         Box::pin(async {})
+    }
+
+    fn set_config_change_timer(&self, dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        todo!()
+    }
+
+    fn process_snapshot(
+        &self,
+        index: u64,
+        term: u64,
+        data: Vec<u8>,
+        request_id: RequestId,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        todo!()
     }
 }

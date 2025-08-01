@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 // 导出新模块
 pub mod mock_network;
 pub mod mock_storage;
+pub mod callback_wrap;
+pub mod mutl_raft_driver;
 
 // 类型定义
 pub type NodeId = String;
@@ -1863,27 +1865,3 @@ impl RaftState {
     }
 }
 
-// === 外部驱动层 ===
-pub struct RaftDriver {
-    state: RaftState,
-}
-
-impl RaftDriver {
-    pub async fn new(state: RaftState) -> Self {
-        Self { state }
-    }
-
-    pub async fn run(&mut self) {
-        loop {
-            // 实际实现应从事件源（网络/定时器/客户端）接收事件
-            let event = self.receive_event().await;
-            self.state.handle_event(event).await;
-        }
-    }
-
-    async fn receive_event(&self) -> Event {
-        // 示例：等待定时器事件（实际应实现真实事件接收）
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        Event::ElectionTimeout
-    }
-}
