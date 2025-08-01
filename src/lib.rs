@@ -35,9 +35,10 @@ impl fmt::Display for RequestId {
 #[derive(Debug)]
 pub enum Event {
     // 定时器事件
-    ElectionTimeout,  // 选举超时（Follower/Candidate 触发）
-    HeartbeatTimeout, // 心跳超时（Leader 触发日志同步）
-    ApplyLogs,        // 定期将已提交日志应用到状态机
+    ElectionTimeout,     // 选举超时（Follower/Candidate 触发）
+    HeartbeatTimeout,    // 心跳超时（Leader 触发日志同步）
+    ApplyLogs,           // 定期将已提交日志应用到状态机
+    ConfigChangeTimeout, // 配置变更超时
 
     // RPC 请求事件（来自其他节点）
     RequestVote(RequestVoteRequest),
@@ -53,6 +54,11 @@ pub enum Event {
     ClientPropose {
         cmd: Command,
         request_id: RequestId, // 客户端请求ID，用于关联响应
+    },
+    // 配置变更事件
+    ChangeConfig {
+        new_voters: HashSet<NodeId>,
+        request_id: RequestId,
     },
 }
 
@@ -151,6 +157,7 @@ pub trait RaftCallbacks: Send + Sync {
     fn set_election_timer(&self, dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
     fn set_heartbeat_timer(&self, dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
     fn set_apply_timer(&self, dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn set_config_change_timer(&self, dur: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
     // 客户端响应回调
     fn client_response(
@@ -251,6 +258,23 @@ impl ClusterConfig {
             true
         }
     }
+
+    // 验证配置是否合法
+    pub fn is_valid(&self) -> bool {
+        // 确保配置不会导致无法形成多数派
+        if self.voters.is_empty() {
+            return false;
+        }
+
+        // 对于联合配置，确保新旧配置都能形成多数派
+        if let Some(joint) = &self.joint {
+            if joint.old.is_empty() || joint.new.is_empty() {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 // === 网络接口 ===
@@ -335,7 +359,8 @@ pub struct LogEntry {
     pub term: u64,
     pub index: u64,
     pub command: Command,
-    pub is_config: bool, // 标记是否为配置变更日志
+    pub is_config: bool,                      // 标记是否为配置变更日志
+    pub client_request_id: Option<RequestId>, // 关联的客户端请求ID，用于去重
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,6 +395,7 @@ pub struct AppendEntriesResponse {
     pub term: u64,
     pub success: bool,
     pub conflict_index: Option<u64>,
+    pub conflict_term: Option<u64>, // 用于更高效的日志冲突处理
     pub request_id: RequestId,
 }
 
@@ -395,6 +421,12 @@ pub struct RaftState {
     next_index: HashMap<NodeId, u64>,
     match_index: HashMap<NodeId, u64>,
     client_requests: HashMap<RequestId, u64>, // 客户端请求ID -> 日志索引
+    recent_client_requests: HashSet<RequestId>, // 最近的客户端请求ID，用于去重
+
+    // 配置变更相关状态
+    config_change_in_progress: bool,
+    config_change_start_time: Option<Instant>,
+    config_change_timeout: Duration,
 
     // 定时器配置
     election_timeout: Duration,
@@ -434,6 +466,7 @@ impl RaftState {
         election_timeout_max: u64,
         heartbeat_interval: u64,
         apply_interval: u64,
+        config_change_timeout: Duration,
         callbacks: Arc<dyn RaftCallbacks>,
     ) -> Self {
         // 从回调加载持久化状态
@@ -468,6 +501,10 @@ impl RaftState {
             next_index: HashMap::new(),
             match_index: HashMap::new(),
             client_requests: HashMap::new(),
+            recent_client_requests: HashSet::new(),
+            config_change_in_progress: false,
+            config_change_start_time: None,
+            config_change_timeout,
             election_timeout: Duration::from_millis(timeout),
             election_timeout_min,
             election_timeout_max,
@@ -509,6 +546,11 @@ impl RaftState {
                 self.handle_install_snapshot_reply(peer, reply).await
             }
             Event::ApplyLogs => self.apply_committed_logs().await,
+            Event::ConfigChangeTimeout => self.handle_config_change_timeout().await,
+            Event::ChangeConfig {
+                new_voters,
+                request_id,
+            } => self.handle_change_config(new_voters, request_id).await,
         }
     }
 
@@ -579,11 +621,10 @@ impl RaftState {
             self.callbacks.state_changed(Role::Follower).await;
         }
 
-        // 日志最新性检查
-        let last_log_index = self.get_last_log_index().await;
-        let last_log_term = self.get_last_log_term().await;
-        let log_ok = args.last_log_term > last_log_term
-            || (args.last_log_term == last_log_term && args.last_log_index >= last_log_index);
+        // 日志最新性检查 - 优化版本
+        let log_ok = self
+            .is_log_up_to_date(args.last_log_index, args.last_log_term)
+            .await;
 
         // 投票条件：同任期、未投票或投给同一人、日志最新
         if args.term == self.current_term
@@ -606,6 +647,53 @@ impl RaftState {
         self.callbacks
             .send_request_vote_response(args.candidate_id, resp)
             .await;
+    }
+
+    // 优化的日志最新性检查
+    async fn is_log_up_to_date(&self, candidate_last_index: u64, candidate_last_term: u64) -> bool {
+        let self_last_index = self.get_last_log_index().await;
+        let self_last_term = self.get_last_log_term().await;
+
+        // 候选人的最后任期更大，则日志更新
+        if candidate_last_term > self_last_term {
+            return true;
+        }
+
+        // 任期相同，比较日志长度
+        if candidate_last_term == self_last_term {
+            return candidate_last_index >= self_last_index;
+        }
+
+        // 候选人任期更小，但可能包含更多有效日志
+        // 这种情况需要更细致的检查
+        if candidate_last_term < self_last_term {
+            // 检查候选人是否包含了当前节点所有的关键日志
+            let mut current_index = self_last_index;
+
+            // 向上追溯直到找到与候选人最后任期相同的日志
+            while current_index > 0 {
+                let term = if current_index <= self.last_snapshot_index {
+                    self.last_snapshot_term
+                } else {
+                    match self.callbacks.get_log_term(current_index).await {
+                        Ok(term) => term,
+                        Err(_) => break,
+                    }
+                };
+
+                if term == candidate_last_term {
+                    // 找到相同任期，比较索引
+                    return candidate_last_index >= current_index;
+                } else if term < candidate_last_term {
+                    // 遇到比候选人任期还小的任期，说明候选人日志更新
+                    return true;
+                }
+
+                current_index -= 1;
+            }
+        }
+
+        false
     }
 
     async fn handle_request_vote_reply(&mut self, peer: NodeId, reply: RequestVoteResponse) {
@@ -805,10 +893,17 @@ impl RaftState {
     async fn handle_append_entries(&mut self, args: AppendEntriesRequest) {
         // 处理更低任期的请求
         if args.term < self.current_term {
+            let conflict_term = if args.prev_log_index <= self.last_snapshot_index {
+                self.last_snapshot_term
+            } else {
+                self.callbacks.get_log_term(args.prev_log_index).await.ok()
+            };
+
             let resp = AppendEntriesResponse {
                 term: self.current_term,
                 success: false,
                 conflict_index: Some(self.get_last_log_index().await + 1),
+                conflict_term,
                 request_id: args.request_id,
             };
             self.callbacks
@@ -847,10 +942,18 @@ impl RaftState {
             } else {
                 args.prev_log_index
             };
+
+            let conflict_term = if args.prev_log_index <= self.last_snapshot_index {
+                self.last_snapshot_term
+            } else {
+                self.callbacks.get_log_term(args.prev_log_index).await.ok()
+            };
+
             let resp = AppendEntriesResponse {
                 term: self.current_term,
                 success: false,
                 conflict_index: Some(conflict_idx),
+                conflict_term,
                 request_id: args.request_id,
             };
             self.callbacks
@@ -866,7 +969,46 @@ impl RaftState {
                 .truncate_log_suffix(args.prev_log_index + 1)
                 .await;
         }
+
+        // 验证并追加新日志
         if !args.entries.is_empty() {
+            // 验证日志条目连续性和有效性
+            if let Some(first_entry) = args.entries.first() {
+                if first_entry.index != args.prev_log_index + 1 {
+                    let resp = AppendEntriesResponse {
+                        term: self.current_term,
+                        success: false,
+                        conflict_index: Some(args.prev_log_index + 1),
+                        conflict_term: None,
+                        request_id: args.request_id,
+                    };
+                    self.callbacks
+                        .send_append_entries_response(args.leader_id, resp)
+                        .await;
+                    return;
+                }
+
+                // 检查是否有重复的客户端请求
+                for entry in &args.entries {
+                    if let Some(req_id) = entry.client_request_id {
+                        // 已提交的日志不能被修改
+                        if entry.index <= self.commit_index {
+                            let resp = AppendEntriesResponse {
+                                term: self.current_term,
+                                success: false,
+                                conflict_index: Some(entry.index),
+                                conflict_term: Some(entry.term),
+                                request_id: args.request_id,
+                            };
+                            self.callbacks
+                                .send_append_entries_response(args.leader_id, resp)
+                                .await;
+                            return;
+                        }
+                    }
+                }
+            }
+
             let _ = self.callbacks.append_log_entries(&args.entries).await;
 
             // 处理配置变更日志
@@ -883,6 +1025,7 @@ impl RaftState {
             term: self.current_term,
             success: true,
             conflict_index: None,
+            conflict_term: None,
             request_id: args.request_id,
         };
         self.callbacks
@@ -925,9 +1068,34 @@ impl RaftState {
             // 尝试更新commit_index
             self.update_commit_index().await;
         } else {
-            // 日志冲突，回退next_index
+            // 日志冲突，更高效的回退策略
             let current_next = self.next_index.get(&peer).copied().unwrap_or(1);
-            let new_next = reply.conflict_index.unwrap_or(current_next - 1);
+            let new_next = if let (Some(conflict_term), Some(conflict_index)) =
+                (reply.conflict_term, reply.conflict_index)
+            {
+                // 查找冲突任期的最后一个日志索引
+                let mut idx = conflict_index - 1;
+                while idx > 0 {
+                    let term = if idx <= self.last_snapshot_index {
+                        self.last_snapshot_term
+                    } else {
+                        match self.callbacks.get_log_term(idx).await {
+                            Ok(t) => t,
+                            Err(_) => break,
+                        }
+                    };
+
+                    if term < conflict_term {
+                        break;
+                    }
+
+                    idx -= 1;
+                }
+                idx + 1
+            } else {
+                reply.conflict_index.unwrap_or(current_next - 1)
+            };
+
             self.next_index.insert(peer.clone(), new_next.max(1));
         }
     }
@@ -941,6 +1109,12 @@ impl RaftState {
                 return;
             }
         };
+
+        // 验证快照与当前日志的一致性
+        if !self.verify_snapshot_consistency(&snap).await {
+            tracing::error!("快照与当前日志不一致，无法发送");
+            return;
+        }
 
         let req = InstallSnapshotRequest {
             term: self.current_term,
@@ -964,6 +1138,32 @@ impl RaftState {
         self.callbacks
             .send_install_snapshot_request(target, req)
             .await;
+    }
+
+    // 验证快照与当前日志的一致性
+    async fn verify_snapshot_consistency(&self, snap: &Snapshot) -> bool {
+        // 检查快照的最后一条日志是否与当前日志匹配
+        if snap.index == 0 {
+            return true; // 空快照总是有效的
+        }
+
+        // 检查快照索引是否小于等于最后一条日志索引
+        let last_log_index = self.get_last_log_index().await;
+        if snap.index > last_log_index {
+            return false;
+        }
+
+        // 检查快照的任期是否与对应日志的任期匹配
+        let log_term = if snap.index <= self.last_snapshot_index {
+            self.last_snapshot_term
+        } else {
+            match self.callbacks.get_log_term(snap.index).await {
+                Ok(term) => term,
+                Err(_) => return false,
+            }
+        };
+
+        snap.term == log_term
     }
 
     // 发送探测消息检查快照安装状态（Leader端）
@@ -1050,6 +1250,21 @@ impl RaftState {
             return;
         }
 
+        // 验证快照配置与当前配置的兼容性
+        if !self.verify_snapshot_config_compatibility(&args).await {
+            let resp = InstallSnapshotResponse {
+                term: self.current_term,
+                request_id: args.request_id,
+                state: InstallSnapshotState::Failed(
+                    "Snapshot config incompatible with current config".into(),
+                ),
+            };
+            self.callbacks
+                .send_install_snapshot_reply(args.leader_id, resp)
+                .await;
+            return;
+        }
+
         // 记录当前正在处理的快照请求
         self.current_snapshot_request_id = Some(args.request_id);
 
@@ -1075,6 +1290,27 @@ impl RaftState {
             .await;
     }
 
+    // 验证快照配置与当前配置的兼容性
+    async fn verify_snapshot_config_compatibility(&self, req: &InstallSnapshotRequest) -> bool {
+        // 检查快照配置是否与当前配置兼容
+        // 简单检查：快照中的配置应该是当前配置的祖先或相同
+        // 实际实现可能需要更复杂的检查逻辑
+
+        // 对于空配置，总是兼容的
+        if self.config.voters.is_empty() {
+            return true;
+        }
+
+        // 检查快照中的配置是否是当前配置的子集或相同
+        let snap_config = match bincode::deserialize::<ClusterConfig>(&req.data) {
+            Ok(conf) => conf,
+            Err(_) => return false,
+        };
+
+        // 基本兼容性检查
+        snap_config.voters.iter().all(|id| self.config.contains(id))
+    }
+
     // 业务层完成快照处理后调用此方法更新状态（Follower端）
     pub async fn complete_snapshot_installation(
         &mut self,
@@ -1091,6 +1327,26 @@ impl RaftState {
 
         // 更新快照状态
         if success {
+            // 验证快照索引对应的日志任期是否正确
+            let expected_term = if index <= self.last_snapshot_index {
+                self.last_snapshot_term
+            } else {
+                match self.callbacks.get_log_term(index).await {
+                    Ok(t) => t,
+                    Err(_) => {
+                        tracing::error!("无法验证快照任期，安装失败");
+                        self.current_snapshot_request_id = None;
+                        return;
+                    }
+                }
+            };
+
+            if term != expected_term {
+                tracing::error!("快照任期不匹配，安装失败");
+                self.current_snapshot_request_id = None;
+                return;
+            }
+
             self.last_snapshot_index = index;
             self.last_snapshot_term = term;
             self.commit_index = self.commit_index.max(index);
@@ -1230,23 +1486,60 @@ impl RaftState {
             return;
         }
 
+        // 检查是否是重复请求
+        if self.recent_client_requests.contains(&request_id) {
+            // 查找已存在的日志索引
+            if let Some(&index) = self.client_requests.get(&request_id) {
+                // 如果已经提交，直接返回结果
+                if index <= self.commit_index {
+                    self.callbacks.client_response(request_id, Ok(index)).await;
+                    return;
+                }
+                // 否则等待已存在的日志提交
+                return;
+            }
+        }
+
         // 生成日志条目
         let last_idx = self.get_last_log_index().await;
         let new_entry = LogEntry {
             term: self.current_term,
             index: last_idx + 1,
             command: cmd,
-            is_config: false, // 普通命令
+            is_config: false,                    // 普通命令
+            client_request_id: Some(request_id), // 关联客户端请求ID
         };
 
+        // 验证日志索引连续性
+        if new_entry.index != last_idx + 1 {
+            tracing::error!("日志索引不连续，拒绝客户端请求");
+            self.callbacks
+                .client_response(request_id, Err(Error("log index discontinuous".into())))
+                .await;
+            return;
+        }
+
         // 追加日志
-        let _ = self
+        let result = self
             .callbacks
             .append_log_entries(&[new_entry.clone()])
             .await;
+        if result.is_err() {
+            self.callbacks
+                .client_response(request_id, Err(Error("failed to append log".into())))
+                .await;
+            return;
+        }
 
         // 记录客户端请求与日志索引的映射
         self.client_requests.insert(request_id, last_idx + 1);
+        self.recent_client_requests.insert(request_id);
+
+        // 限制recent_client_requests的大小，防止内存泄漏
+        if self.recent_client_requests.len() > 1000 {
+            let oldest = *self.recent_client_requests.iter().next().unwrap();
+            self.recent_client_requests.remove(&oldest);
+        }
 
         // 立即同步日志
         self.broadcast_append_entries().await;
@@ -1270,6 +1563,11 @@ impl RaftState {
 
         // 逐个应用日志
         for entry in entries {
+            // 验证日志尚未被应用且已提交
+            if entry.index <= self.last_applied || entry.index > self.commit_index {
+                continue;
+            }
+
             self.callbacks
                 .apply_command(entry.index, entry.term, entry.command)
                 .await;
@@ -1299,11 +1597,135 @@ impl RaftState {
     }
 
     // === 集群配置变更 ===
+    async fn handle_change_config(&mut self, new_voters: HashSet<NodeId>, request_id: RequestId) {
+        if self.role != Role::Leader {
+            self.callbacks
+                .client_response(request_id, Err(Error("not leader".into())))
+                .await;
+            return;
+        }
+
+        // 检查是否已有配置变更在进行中
+        if self.config_change_in_progress {
+            self.callbacks
+                .client_response(request_id, Err(Error("config change in progress".into())))
+                .await;
+            return;
+        }
+
+        // 验证新配置的合法性
+        let new_config = ClusterConfig::simple(new_voters.clone());
+        if !new_config.is_valid() {
+            self.callbacks
+                .client_response(request_id, Err(Error("invalid cluster config".into())))
+                .await;
+            return;
+        }
+
+        // 创建联合配置
+        let old_voters = self.config.voters.clone();
+        let mut joint_config = self.config.clone();
+        joint_config.enter_joint(old_voters, new_voters);
+
+        // 生成配置变更日志
+        let last_idx = self.get_last_log_index().await;
+        let config_data = bincode::serialize(&joint_config).unwrap();
+        let new_entry = LogEntry {
+            term: self.current_term,
+            index: last_idx + 1,
+            command: config_data,
+            is_config: true,
+            client_request_id: Some(request_id),
+        };
+
+        // 追加配置变更日志
+        let result = self
+            .callbacks
+            .append_log_entries(&[new_entry.clone()])
+            .await;
+        if result.is_err() {
+            self.callbacks
+                .client_response(request_id, Err(Error("failed to append config log".into())))
+                .await;
+            return;
+        }
+
+        // 记录配置变更状态
+        self.config_change_in_progress = true;
+        self.config_change_start_time = Some(Instant::now());
+        self.client_requests.insert(request_id, last_idx + 1);
+
+        // 设置配置变更超时定时器
+        self.callbacks
+            .set_config_change_timer(self.config_change_timeout)
+            .await;
+
+        // 立即同步日志
+        self.broadcast_append_entries().await;
+    }
+
+    async fn handle_config_change_timeout(&mut self) {
+        if !self.config_change_in_progress || self.role != Role::Leader {
+            return;
+        }
+
+        // 检查是否超时
+        let start_time = match self.config_change_start_time {
+            Some(t) => t,
+            None => {
+                self.config_change_in_progress = false;
+                return;
+            }
+        };
+
+        if start_time.elapsed() < self.config_change_timeout {
+            // 未超时，重新设置定时器
+            self.callbacks
+                .set_config_change_timer(self.config_change_timeout)
+                .await;
+            return;
+        }
+
+        // 配置变更超时，回滚到旧配置
+        tracing::warn!("config change timed out, rolling back");
+
+        // 生成回滚配置日志
+        let last_idx = self.get_last_log_index().await;
+        let old_config = ClusterConfig::simple(self.config.voters.clone());
+        let config_data = bincode::serialize(&old_config).unwrap();
+        let new_entry = LogEntry {
+            term: self.current_term,
+            index: last_idx + 1,
+            command: config_data,
+            is_config: true,
+            client_request_id: None,
+        };
+
+        // 追加回滚配置日志
+        let _ = self
+            .callbacks
+            .append_log_entries(&[new_entry.clone()])
+            .await;
+
+        // 重置配置变更状态
+        self.config_change_in_progress = false;
+        self.config_change_start_time = None;
+
+        // 立即同步日志
+        self.broadcast_append_entries().await;
+    }
+
     async fn process_config_entries(&mut self, entries: &[LogEntry]) {
         for entry in entries {
             if entry.is_config {
                 // 解析配置变更命令
-                if let Ok(new_config) = bincode::deserialize(&entry.command) {
+                if let Ok(new_config) = bincode::deserialize::<ClusterConfig>(&entry.command) {
+                    // 验证配置是否合法
+                    if !new_config.is_valid() {
+                        tracing::error!("invalid cluster config received, ignoring");
+                        continue;
+                    }
+
                     self.config = new_config;
                     let _ = self
                         .callbacks
@@ -1327,11 +1749,15 @@ impl RaftState {
             .all(|peer| self.match_index.get(peer).copied().unwrap_or(0) >= self.commit_index);
 
         if all_replicated {
-            self.config.leave_joint();
-            let _ = self
-                .callbacks
-                .save_cluster_config(self.config.clone())
-                .await;
+            // 退出联合配置
+            let new_config = self.config.leave_joint();
+            let _ = self.callbacks.save_cluster_config(new_config).await;
+
+            // 如果是Leader且处于配置变更中，标记为完成
+            if self.role == Role::Leader {
+                self.config_change_in_progress = false;
+                self.config_change_start_time = None;
+            }
         }
     }
 
@@ -1384,7 +1810,79 @@ impl RaftState {
                 && self.callbacks.get_log_term(candidate).await.unwrap_or(0) == self.current_term
             {
                 self.commit_index = candidate;
+            } else if candidate > self.commit_index {
+                // 对于旧任期的日志，检查是否已经有当前任期的日志被提交
+                // 如果有，则可以提交所有之前的日志
+                let has_committed_current_term = (self.commit_index..=candidate).any(|i| {
+                    self.callbacks.get_log_term(i).await.unwrap_or(0) == self.current_term
+                });
+
+                if has_committed_current_term {
+                    self.commit_index = candidate;
+                }
             }
         }
+    }
+
+    // 清理无法提交的旧日志
+    async fn cleanup_uncommitted_old_logs(&mut self) {
+        if self.role != Role::Leader {
+            return;
+        }
+
+        let current_term = self.current_term;
+        let last_log_index = self.get_last_log_index().await;
+
+        // 查找最早的当前任期日志
+        let mut earliest_current_term_index = None;
+        for i in 1..=last_log_index {
+            let term = self.callbacks.get_log_term(i).await.unwrap_or(0);
+            if term == current_term {
+                earliest_current_term_index = Some(i);
+                break;
+            }
+        }
+
+        // 如果没有当前任期的日志，不清理
+        let earliest_current_term_index = match earliest_current_term_index {
+            Some(idx) => idx,
+            None => return,
+        };
+
+        // 检查是否有旧任期日志永远无法被提交
+        // 这些日志在最早的当前任期日志之前且未被提交
+        if self.commit_index < earliest_current_term_index {
+            // 可以安全地清理这些日志，因为它们永远不会被提交
+            // 但实际中通常不会删除日志，而是通过快照机制清理
+            tracing::debug!(
+                "Old logs before term {} can be cleaned up via snapshot",
+                current_term
+            );
+        }
+    }
+}
+
+// === 外部驱动层 ===
+pub struct RaftDriver {
+    state: RaftState,
+}
+
+impl RaftDriver {
+    pub async fn new(state: RaftState) -> Self {
+        Self { state }
+    }
+
+    pub async fn run(&mut self) {
+        loop {
+            // 实际实现应从事件源（网络/定时器/客户端）接收事件
+            let event = self.receive_event().await;
+            self.state.handle_event(event).await;
+        }
+    }
+
+    async fn receive_event(&self) -> Event {
+        // 示例：等待定时器事件（实际应实现真实事件接收）
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        Event::ElectionTimeout
     }
 }
