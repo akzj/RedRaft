@@ -437,7 +437,6 @@ pub struct RaftState {
     last_heartbeat: Instant,
 
     // 外部依赖
-    network: Arc<dyn Network + Send + Sync>,
     callbacks: Arc<dyn RaftCallbacks>,
 
     // 选举跟踪（仅 Candidate 状态有效）
@@ -461,7 +460,6 @@ impl RaftState {
     pub async fn new(
         id: NodeId,
         peers: Vec<NodeId>,
-        network: Arc<dyn Network + Send + Sync>,
         election_timeout_min: u64,
         election_timeout_max: u64,
         heartbeat_interval: u64,
@@ -511,7 +509,6 @@ impl RaftState {
             heartbeat_interval: Duration::from_millis(heartbeat_interval),
             apply_interval: Duration::from_millis(apply_interval),
             last_heartbeat: Instant::now(),
-            network,
             callbacks,
             election_votes: HashMap::new(),
             election_effective_voters: HashSet::new(),
@@ -894,7 +891,7 @@ impl RaftState {
         // 处理更低任期的请求
         if args.term < self.current_term {
             let conflict_term = if args.prev_log_index <= self.last_snapshot_index {
-                self.last_snapshot_term
+                Some(self.last_snapshot_term)
             } else {
                 self.callbacks.get_log_term(args.prev_log_index).await.ok()
             };
@@ -944,7 +941,7 @@ impl RaftState {
             };
 
             let conflict_term = if args.prev_log_index <= self.last_snapshot_index {
-                self.last_snapshot_term
+                Some(self.last_snapshot_term)
             } else {
                 self.callbacks.get_log_term(args.prev_log_index).await.ok()
             };
@@ -1813,9 +1810,13 @@ impl RaftState {
             } else if candidate > self.commit_index {
                 // 对于旧任期的日志，检查是否已经有当前任期的日志被提交
                 // 如果有，则可以提交所有之前的日志
-                let has_committed_current_term = (self.commit_index..=candidate).any(|i| {
-                    self.callbacks.get_log_term(i).await.unwrap_or(0) == self.current_term
-                });
+                let mut has_committed_current_term = false;
+                for i in self.commit_index..=candidate {
+                    if self.callbacks.get_log_term(i).await.unwrap_or(0) == self.current_term {
+                        has_committed_current_term = true;
+                        break;
+                    }
+                }
 
                 if has_committed_current_term {
                     self.commit_index = candidate;

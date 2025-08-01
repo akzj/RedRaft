@@ -243,7 +243,7 @@ impl Storage for MockStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ClusterConfig;
+    use crate::{ClusterConfig, RequestId};
 
     #[test]
     fn test_append_and_term() {
@@ -254,12 +254,14 @@ mod tests {
                 term: 1,
                 command: vec![1],
                 is_config: false,
+                client_request_id: Some(RequestId::new()),
             },
             LogEntry {
                 index: 2,
                 term: 1,
                 command: vec![2],
                 is_config: false,
+                client_request_id: Some(RequestId::new()),
             },
         ];
 
@@ -275,6 +277,7 @@ mod tests {
             term: 2,
             command: vec![3],
             is_config: false,
+            client_request_id: Some(RequestId::new()),
         }];
         assert!(storage.append(&new_entries).is_ok());
         assert_eq!(storage.term(2).unwrap(), 2); // 验证覆盖成功
@@ -291,12 +294,14 @@ mod tests {
                 term: 1,
                 command: vec![1],
                 is_config: false,
+                client_request_id: Some(RequestId::new()),
             },
             LogEntry {
                 index: 2,
                 term: 1,
                 command: vec![2],
                 is_config: false,
+                client_request_id: Some(RequestId::new()),
             },
         ];
         storage.append(&entries).unwrap();
@@ -321,6 +326,7 @@ mod tests {
             term: 2,
             command: vec![3],
             is_config: false,
+            client_request_id: Some(RequestId::new()),
         }];
         storage.append(&new_entries).unwrap();
         assert_eq!(storage.last_index().unwrap(), 3);
@@ -335,18 +341,21 @@ mod tests {
                 term: 1,
                 command: vec![],
                 is_config: false,
+                client_request_id: Some(RequestId::new()),
             },
             LogEntry {
                 index: 2,
                 term: 1,
                 command: vec![],
                 is_config: false,
+                client_request_id: Some(RequestId::new()),
             },
             LogEntry {
                 index: 3,
                 term: 1,
                 command: vec![],
                 is_config: false,
+                client_request_id: Some(RequestId::new()),
             },
         ];
         storage.append(&entries).unwrap();
