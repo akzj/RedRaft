@@ -91,7 +91,7 @@ impl ErrorHandler for ClientError {
             ClientError::Timeout => ErrorSeverity::Recoverable,
             ClientError::Conflict(_) => ErrorSeverity::Ignorable,
             ClientError::Internal(_) => ErrorSeverity::Recoverable,
-            ClientError::BedRequest(_) => ErrorSeverity::Recoverable,
+            ClientError::BadRequest(_) => ErrorSeverity::Recoverable,
         }
     }
 
@@ -103,7 +103,7 @@ impl ErrorHandler for ClientError {
             ClientError::Timeout => "Client timeout".to_string(),
             ClientError::Conflict(msg) => format!("Request conflict: {}", msg),
             ClientError::Internal(e) => format!("Internal error: {}", e),
-            ClientError::BedRequest(e) => format!("Bad request: {}", e),
+            ClientError::BadRequest(e) => format!("Bad request: {}", e),
         }
     }
 }
@@ -437,7 +437,7 @@ pub enum ClientError {
     Internal(anyhow::Error),
 
     #[error("")]
-    BedRequest(anyhow::Error),
+    BadRequest(anyhow::Error),
 }
 
 /// 状态变更相关错误
@@ -609,12 +609,12 @@ pub trait RaftCallbacks: Send + Sync {
     async fn load_cluster_config(&self, from: NodeId) -> StorageResult<ClusterConfig>;
 
     // 定时器回调
-    fn set_leader_transfer_timer(&self, from: NodeId, dur: Duration) -> TimerResult<TimerId>;
-    fn reset_timer(&self, from: NodeId, timer_id: TimerId) -> TimerResult<()>;
-    fn set_election_timer(&self, from: NodeId, dur: Duration) -> TimerResult<TimerId>;
-    fn set_heartbeat_timer(&self, from: NodeId, dur: Duration) -> TimerResult<TimerId>;
-    fn set_apply_timer(&self, from: NodeId, dur: Duration) -> TimerResult<TimerId>;
-    fn set_config_change_timer(&self, from: NodeId, dur: Duration) -> TimerResult<TimerId>;
+    fn del_timer(&self, from: NodeId, timer_id: TimerId) -> ();
+    fn set_leader_transfer_timer(&self, from: NodeId, dur: Duration) -> TimerId;
+    fn set_election_timer(&self, from: NodeId, dur: Duration) -> TimerId;
+    fn set_heartbeat_timer(&self, from: NodeId, dur: Duration) -> TimerId;
+    fn set_apply_timer(&self, from: NodeId, dur: Duration) -> TimerId;
+    fn set_config_change_timer(&self, from: NodeId, dur: Duration) -> TimerId;
 
     // 客户端响应回调
     async fn client_response(
@@ -1331,25 +1331,13 @@ impl RaftState {
     // 启动心跳和日志应用定时器
     async fn reset_heartbeat_timer(&mut self) {
         if let Some(timer_id) = self.heartbeat_interval_timer_id {
-            let _ = self
-                .error_handler
-                .handle_void(
-                    self.callbacks.reset_timer(self.id.clone(), timer_id),
-                    "reset_timer",
-                    None,
-                )
-                .await;
+            self.callbacks.del_timer(self.id.clone(), timer_id);
         }
 
-        self.heartbeat_interval_timer_id = self
-            .error_handler
-            .handle(
-                self.callbacks
-                    .set_heartbeat_timer(self.id.clone(), self.heartbeat_interval),
-                "set_heartbeat_timer",
-                None,
-            )
-            .await;
+        self.heartbeat_interval_timer_id = Some(
+            self.callbacks
+                .set_heartbeat_timer(self.id.clone(), self.heartbeat_interval),
+        );
     }
 
     async fn become_leader(&mut self) {
@@ -1397,24 +1385,13 @@ impl RaftState {
         self.election_timeout = Duration::from_millis(new_timeout);
 
         if let Some(timer_id) = self.election_timer {
-            self.error_handler
-                .handle_void(
-                    self.callbacks.reset_timer(self.id.clone(), timer_id),
-                    "reset_timer",
-                    None,
-                )
-                .await;
+            self.callbacks.del_timer(self.id.clone(), timer_id);
         }
 
-        self.election_timer = self
-            .error_handler
-            .handle(
-                self.callbacks
-                    .set_election_timer(self.id.clone(), self.election_timeout),
-                "set_election_timer",
-                None,
-            )
-            .await;
+        self.election_timer = Some(
+            self.callbacks
+                .set_election_timer(self.id.clone(), self.election_timeout),
+        );
     }
 
     // === 日志同步相关逻辑 ===
@@ -1829,19 +1806,18 @@ impl RaftState {
 
         // 若当前处于联合配置，更新确认状态
         if self.config.joint.is_some() && response.success {
-            self.new_config_ack_nodes.insert(peer.clone());
             self.check_joint_exit_condition().await;
         }
 
         // 处理领导权转移
         if let Some(transfer_reply) = reply_for_transfer {
-            self.process_leader_transfer_target_reply(peer, transfer_reply)
+            self.process_leader_transfer_target_response(peer, transfer_reply)
                 .await;
         }
     }
 
     /// 处理目标节点的日志响应
-    async fn process_leader_transfer_target_reply(
+    async fn process_leader_transfer_target_response(
         &mut self,
         peer: NodeId,
         reply: AppendEntriesResponse,
@@ -2542,19 +2518,12 @@ impl RaftState {
         };
 
         if let Some(timer) = self.apply_interval_timer {
-            self.error_handler
-                .handle_void(
-                    self.callbacks.reset_timer(self.id.clone(), timer),
-                    "reset_timer",
-                    None,
-                )
-                .await;
+            self.callbacks.del_timer(self.id.clone(), timer);
         }
 
         self.apply_interval_timer = Some(
             self.callbacks
-                .set_apply_timer(self.id.clone(), self.apply_interval)
-                .unwrap(),
+                .set_apply_timer(self.id.clone(), self.apply_interval),
         );
     }
 
@@ -2705,15 +2674,10 @@ impl RaftState {
         self.client_requests.insert(request_id, last_idx + 1);
 
         // 设置配置变更超时定时器
-        self.config_change_timer = self
-            .error_handler
-            .handle(
-                self.callbacks
-                    .set_config_change_timer(self.id.clone(), self.config_change_timeout),
-                "set_config_change_timer",
-                None,
-            )
-            .await;
+        self.config_change_timer = Some(
+            self.callbacks
+                .set_config_change_timer(self.id.clone(), self.config_change_timeout),
+        );
 
         // 立即同步日志
         self.broadcast_append_entries().await;
@@ -2735,15 +2699,11 @@ impl RaftState {
 
         if start_time.elapsed() < self.config_change_timeout {
             // 未超时，重新设置定时器
-            self.config_change_timer = self
-                .error_handler
-                .handle(
-                    self.callbacks
-                        .set_config_change_timer(self.id.clone(), self.config_change_timeout),
-                    "set_config_change_timer",
-                    None,
-                )
-                .await;
+            self.config_change_timer = Some(
+                self.callbacks
+                    .set_config_change_timer(self.id.clone(), self.config_change_timeout),
+            );
+
             return;
         }
 
@@ -2999,15 +2959,10 @@ impl RaftState {
 
         // 设置超时定时器
 
-        self.leader_transfer_timer = self
-            .error_handler
-            .handle(
-                self.callbacks
-                    .set_leader_transfer_timer(self.id.clone(), self.leader_transfer_timeout),
-                "set_leader_transfer_timer",
-                None,
-            )
-            .await;
+        self.leader_transfer_timer = Some(
+            self.callbacks
+                .set_leader_transfer_timer(self.id.clone(), self.leader_transfer_timeout),
+        );
     }
 
     /// 发送心跳到特定节点
@@ -3185,16 +3140,20 @@ impl RaftState {
         let candidate = match self.config.quorum() {
             QuorumRequirement::Joint { old, new } => {
                 // 联合配置需要同时满足两个quorum
-                let old_majority = self.find_majority_index(
-                    &match_indices,
-                    &self.config.joint.as_ref().unwrap().old,
-                    old,
-                );
-                let new_majority = self.find_majority_index(
-                    &match_indices,
-                    &self.config.joint.as_ref().unwrap().new,
-                    new,
-                );
+                let old_majority = self
+                    .find_majority_index(
+                        &match_indices,
+                        &self.config.joint.as_ref().unwrap().old,
+                        old,
+                    )
+                    .await;
+                let new_majority = self
+                    .find_majority_index(
+                        &match_indices,
+                        &self.config.joint.as_ref().unwrap().new,
+                        new,
+                    )
+                    .await;
 
                 // 取两个配置的交集最小值
                 match (old_majority, new_majority) {
@@ -3245,7 +3204,7 @@ impl RaftState {
     }
 
     // 辅助方法：在指定配置中找到多数派索引
-    fn find_majority_index(
+    async fn find_majority_index(
         &self,
         _sorted_indices: &[u64],
         voters: &HashSet<NodeId>,
@@ -3256,7 +3215,7 @@ impl RaftState {
         // 收集该配置中所有节点的match index
         for voter in voters {
             if voter == &self.id {
-                voter_indices.push(self.get_last_log_index_sync()); // Leader自身
+                voter_indices.push(self.get_last_log_index_sync().await); // Leader自身
             } else {
                 voter_indices.push(self.match_index.get(voter).copied().unwrap_or(0));
             }
@@ -3271,10 +3230,14 @@ impl RaftState {
         }
     }
 
-    // 同步版本的get_last_log_index，用于辅助方法
-    fn get_last_log_index_sync(&self) -> u64 {
-        // 这里应该有一个同步的方式获取最后日志索引
-        // 暂时返回一个合理的值，实际实现中需要缓存这个值
-        self.last_snapshot_index // 简化实现
+    async fn get_last_log_index_sync(&self) -> u64 {
+        // 返回快照索引和日志索引的最大值
+        let last_idx = self.get_last_log_index().await;
+        self.last_snapshot_index.max(
+            // match_index 只在 Leader 端有意义，这里用于 Leader 自身
+            // 但 Leader 自身的日志索引应由存储层维护
+            // 这里假设 last_applied >= last_snapshot_index
+            last_idx,
+        )
     }
 }
