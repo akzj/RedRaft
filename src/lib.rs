@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use core::error;
 use log::{debug, error, info, warn};
 use lru_cache::LruCache;
 use serde::{Deserialize, Serialize};
@@ -579,7 +580,7 @@ pub trait RaftCallbacks: Send + Sync {
         voted_for: Option<NodeId>,
     ) -> StorageResult<()>;
 
-    async fn load_hard_state(&self, from: NodeId) -> StorageResult<(u64, Option<NodeId>)>;
+    async fn load_hard_state(&self, from: NodeId) -> StorageResult<Option<(u64, Option<NodeId>)>>;
 
     async fn append_log_entries(&self, from: NodeId, entries: &[LogEntry]) -> StorageResult<()>;
 
@@ -600,7 +601,7 @@ pub trait RaftCallbacks: Send + Sync {
 
     async fn save_snapshot(&self, from: NodeId, snap: Snapshot) -> StorageResult<()>;
 
-    async fn load_snapshot(&self, from: NodeId) -> StorageResult<Snapshot>;
+    async fn load_snapshot(&self, from: NodeId) -> StorageResult<Option<Snapshot>>;
 
     async fn create_snapshot(&self, from: NodeId) -> StorageResult<(u64, u64)>;
 
@@ -911,7 +912,7 @@ pub struct RaftState {
     next_index: HashMap<NodeId, u64>,
     match_index: HashMap<NodeId, u64>,
     client_requests: HashMap<RequestId, u64>, // 客户端请求ID -> 日志索引
-    recent_client_requests: lru_cache::LruCache<RequestId, u64>, // 最近的客户端请求ID，用于去重
+    recent_client_requests: lru_cache::LruCache<RequestId, u64>, // 最近的客户端请求ID，用于去重,会自动清理
 
     // 配置变更相关状态
     config_change_in_progress: bool,
@@ -983,23 +984,46 @@ impl RaftState {
     /// 初始化状态
     pub async fn new(options: RaftStateOptions, callbacks: Arc<dyn RaftCallbacks>) -> Self {
         // 从回调加载持久化状态
-        let (current_term, voted_for) = callbacks
-            .load_hard_state(options.id.clone())
-            .await
-            .unwrap_or((0, None));
+        let (current_term, voted_for) = match callbacks.load_hard_state(options.id.clone()).await {
+            Ok(Some((term, voted_for))) => (term, voted_for),
+            Ok(None) => (0, None), // 如果没有持久化状态，则初始化为0
+            Err(err) => {
+                // 加载失败时也初始化为0
+                error!("Failed to load hard state: {}", err);
+                (0, None)
+            }
+        };
+
         let loaded_config = match callbacks.load_cluster_config(options.id.clone()).await {
             Ok(conf) => conf,
-            Err(_) => ClusterConfig::empty(),
+            Err(err) => {
+                error!("Failed to load cluster config: {}", err);
+                // 如果加载失败，使用默认空配置
+                ClusterConfig::empty()
+            }
         };
 
         let snap = match callbacks.load_snapshot(options.id.clone()).await {
-            Ok(s) => s,
-            Err(_) => Snapshot {
-                index: 0,
-                term: 0,
-                data: vec![],
-                config: loaded_config.clone(),
-            },
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                error!("No snapshot found");
+                Snapshot {
+                    index: 0,
+                    term: 0,
+                    data: vec![],
+                    config: loaded_config.clone(),
+                }
+            }
+            Err(err) => {
+                error!("Failed to load snapshot: {}", err);
+                // 如果加载失败，使用默认快照
+                Snapshot {
+                    index: 0,
+                    term: 0,
+                    data: vec![],
+                    config: loaded_config.clone(),
+                }
+            }
         };
         let timeout = options.election_timeout_min
             + rand::random::<u64>()
@@ -1887,9 +1911,13 @@ impl RaftState {
     // === 快照相关逻辑 ===
     async fn send_snapshot_to(&mut self, target: NodeId) {
         let snap = match self.callbacks.load_snapshot(self.id.clone()).await {
-            Ok(s) => s,
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                error!("没有可用的快照，无法发送");
+                return;
+            }
             Err(e) => {
-                tracing::error!("加载快照失败: {}", e);
+                error!("加载快照失败: {}", e);
                 return;
             }
         };
@@ -3053,7 +3081,11 @@ impl RaftState {
 
         // 5. 读取快照数据（业务层应已持久化）
         let snap = match self.callbacks.load_snapshot(self.id.clone()).await {
-            Ok(s) => s,
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                error!("No snapshot found after creation");
+                return;
+            }
             Err(e) => {
                 error!("Failed to load snapshot after creation: {}", e);
                 return;
@@ -3137,7 +3169,7 @@ impl RaftState {
         match_indices.sort_unstable_by(|a, b| b.cmp(a));
 
         // 计算候选提交索引
-        let candidate = match self.config.quorum() {
+        let candidate_index = match self.config.quorum() {
             QuorumRequirement::Joint { old, new } => {
                 // 联合配置需要同时满足两个quorum
                 let old_majority = self
@@ -3171,19 +3203,28 @@ impl RaftState {
         };
 
         // 任期检查
-        if candidate > self.commit_index {
-            let candidate_term = self
-                .callbacks
-                .get_log_term(self.id.clone(), candidate)
+        if candidate_index > self.commit_index {
+            let candidate_term = match self
+                .error_handler
+                .handle(
+                    self.callbacks
+                        .get_log_term(self.id.clone(), candidate_index)
+                        .await,
+                    "get_log_term",
+                    None,
+                )
                 .await
-                .unwrap_or(0);
+            {
+                Some(term) => term,
+                None => return,
+            };
 
             if candidate_term == self.current_term {
-                self.commit_index = candidate;
+                self.commit_index = candidate_index;
             } else {
                 // 检查是否有当前任期的日志被提交
                 let mut has_current_term = false;
-                for i in (self.commit_index + 1)..=candidate {
+                for i in (self.commit_index + 1)..=candidate_index {
                     if self
                         .callbacks
                         .get_log_term(self.id.clone(), i)
@@ -3197,7 +3238,7 @@ impl RaftState {
                 }
 
                 if has_current_term {
-                    self.commit_index = candidate;
+                    self.commit_index = candidate_index;
                 }
             }
         }
