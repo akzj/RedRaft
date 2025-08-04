@@ -1,12 +1,10 @@
 use crate::mutl_raft_driver::Network;
 
-use super::RequestId;
 use super::{
-    AppendEntriesRequest, AppendEntriesResponse, Error, InstallSnapshotRequest,
+    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest,
     InstallSnapshotResponse, NodeId, RequestVoteRequest, RequestVoteResponse,
 };
 use async_trait::async_trait;
-use rand::Rng;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
