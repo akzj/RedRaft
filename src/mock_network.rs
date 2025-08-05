@@ -2,7 +2,7 @@ use crate::mutl_raft_driver::Network;
 
 use super::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest,
-    InstallSnapshotResponse, NodeId, RequestVoteRequest, RequestVoteResponse,
+    InstallSnapshotResponse, RaftId, RequestVoteRequest, RequestVoteResponse,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -15,12 +15,12 @@ use std::time::Duration;
 /// 模拟网络节点，用于测试
 #[derive(Clone)]
 pub struct MockNetworkNode {
-    id: NodeId,
+    id: RaftId,
     network: Arc<MockNetwork>,
 }
 
 impl MockNetworkNode {
-    pub fn new(id: NodeId, network: Arc<MockNetwork>) -> Self {
+    pub fn new(id: RaftId, network: Arc<MockNetwork>) -> Self {
         Self { id, network }
     }
 
@@ -63,7 +63,7 @@ impl MockNetworkNode {
 
 /// 模拟网络实现
 pub struct MockNetwork {
-    nodes: Arc<RwLock<HashMap<NodeId, MockNetworkNodeInner>>>,
+    nodes: Arc<RwLock<HashMap<RaftId, MockNetworkNodeInner>>>,
     latency: RwLock<Duration>, // 使用RwLock实现内部可变性
     drop_rate: RwLock<f64>,    // 使用RwLock实现内部可变性
 }
@@ -106,7 +106,7 @@ impl MockNetwork {
     }
 
     /// 创建新的网络节点
-    pub fn create_node(&self, id: NodeId) -> MockNetworkNode {
+    pub fn create_node(&self, id: RaftId) -> MockNetworkNode {
         let mut nodes = self.nodes.write().unwrap();
         nodes.entry(id.clone()).or_insert(MockNetworkNodeInner {
             request_vote_handler: None,
@@ -117,7 +117,7 @@ impl MockNetwork {
     }
 
     /// 注册请求处理器
-    pub fn register_request_vote_handler<F>(&self, node_id: NodeId, handler: Arc<F>)
+    pub fn register_request_vote_handler<F>(&self, node_id: RaftId, handler: Arc<F>)
     where
         F: Fn(RequestVoteRequest) -> Pin<Box<dyn Future<Output = RequestVoteResponse> + Send>>
             + Send
@@ -129,7 +129,7 @@ impl MockNetwork {
         }
     }
 
-    pub fn register_append_entries_handler<F>(&self, node_id: NodeId, handler: Arc<F>)
+    pub fn register_append_entries_handler<F>(&self, node_id: RaftId, handler: Arc<F>)
     where
         F: Fn(AppendEntriesRequest) -> Pin<Box<dyn Future<Output = AppendEntriesResponse> + Send>>
             + Send
@@ -141,7 +141,7 @@ impl MockNetwork {
         }
     }
 
-    pub fn register_install_snapshot_handler<F>(&self, node_id: NodeId, handler: Arc<F>)
+    pub fn register_install_snapshot_handler<F>(&self, node_id: RaftId, handler: Arc<F>)
     where
         F: Fn(
                 InstallSnapshotRequest,
@@ -169,7 +169,7 @@ impl MockNetwork {
     }
 
     /// 检查节点是否存在
-    fn has_node(&self, node_id: &NodeId) -> bool {
+    fn has_node(&self, node_id: &RaftId) -> bool {
         self.nodes.read().unwrap().contains_key(node_id)
     }
 }
@@ -189,7 +189,7 @@ impl Clone for MockNetwork {
 impl Network for MockNetwork {
     async fn send_request_vote(
         &self,
-        target: NodeId,
+        target: RaftId,
         args: RequestVoteRequest,
     ) -> RequestVoteResponse {
         // 查找目标节点和处理器
@@ -229,7 +229,7 @@ impl Network for MockNetwork {
 
     async fn send_append_entries(
         &self,
-        target: NodeId,
+        target: RaftId,
         args: AppendEntriesRequest,
     ) -> AppendEntriesResponse {
         // 查找目标节点和处理器
@@ -273,7 +273,7 @@ impl Network for MockNetwork {
 
     async fn send_install_snapshot(
         &self,
-        target: NodeId,
+        target: RaftId,
         args: InstallSnapshotRequest,
     ) -> InstallSnapshotResponse {
         let handler = {

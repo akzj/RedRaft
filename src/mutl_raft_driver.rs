@@ -17,7 +17,7 @@ use std::sync::atomic::AtomicU8;
 
 use crate::{
     AppendEntriesRequest, AppendEntriesResponse, Event, InstallSnapshotRequest,
-    InstallSnapshotResponse, NodeId, RaftState, RequestVoteRequest, RequestVoteResponse,
+    InstallSnapshotResponse, RaftId, RaftState, RequestVoteRequest, RequestVoteResponse,
 };
 
 // 原子RaftGroupStatus包装器
@@ -72,26 +72,26 @@ impl AtomicRaftNodeStatus {
 pub trait Network: Send + Sync {
     async fn send_request_vote(
         &self,
-        target: NodeId,
+        target: RaftId,
         args: RequestVoteRequest,
     ) -> RequestVoteResponse;
 
     async fn send_append_entries(
         &self,
-        target: NodeId,
+        target: RaftId,
         args: AppendEntriesRequest,
     ) -> AppendEntriesResponse;
 
     async fn send_install_snapshot(
         &self,
-        target: NodeId,
+        target: RaftId,
         args: InstallSnapshotRequest,
     ) -> InstallSnapshotResponse;
 }
 
 #[derive(Debug)]
 struct TimerEvent {
-    node_id: NodeId,
+    node_id: RaftId,
     event: Event,
     trigger_time: Instant,
 }
@@ -129,18 +129,18 @@ struct RaftGroupCore {
 
 // Multi-Raft驱动核心
 pub struct MultiRaftDriver {
-    groups: Arc<Mutex<HashMap<NodeId, Arc<RaftGroupCore>>>>, // 所有Raft组
-    active_map: Arc<Mutex<HashSet<NodeId>>>,                 // 待处理组集合
+    groups: Arc<Mutex<HashMap<RaftId, Arc<RaftGroupCore>>>>, // 所有Raft组
+    active_map: Arc<Mutex<HashSet<RaftId>>>,                 // 待处理组集合
     notify: Arc<Notify>,                                     // Worker唤醒信号
     stop: AtomicBool,                                        // 停止标志
-    network_tx: mpsc::Sender<(NodeId, Vec<u8>)>,             // 网络发送通道
+    network_tx: mpsc::Sender<(RaftId, Vec<u8>)>,             // 网络发送通道
     // 定时器堆（全局管理所有组的定时器）
     timer_heap: Arc<Mutex<BinaryHeap<TimerEvent>>>,
 }
 
 impl MultiRaftDriver {
     // 创建新的MultiRaftDriver
-    pub fn new(network_tx: mpsc::Sender<(NodeId, Vec<u8>)>) -> Self {
+    pub fn new(network_tx: mpsc::Sender<(RaftId, Vec<u8>)>) -> Self {
         Self {
             network_tx,
             timer_heap: Arc::new(Mutex::new(BinaryHeap::new())),
@@ -152,7 +152,7 @@ impl MultiRaftDriver {
     }
 
     // 添加新的Raft组
-    pub fn add_raft_group(&self, group_id: NodeId, state: RaftState) {
+    pub fn add_raft_group(&self, group_id: RaftId, state: RaftState) {
         let (tx, rx) = mpsc::channel(100); // 事件通道（缓冲区大小100）
         let core = RaftGroupCore {
             status: AtomicRaftNodeStatus::new(RaftNodeStatus::Idle),
@@ -191,7 +191,7 @@ impl MultiRaftDriver {
     }
 
     // 向指定Raft组发送事件
-    pub async fn send_event(&self, group_id: NodeId, event: Event) -> bool {
+    pub async fn send_event(&self, group_id: RaftId, event: Event) -> bool {
         let groups = self.groups.lock().unwrap();
         let Some(core) = groups.get(&group_id) else {
             return false; // 组不存在
@@ -273,7 +273,7 @@ impl MultiRaftDriver {
     }
 
     // 处理单个Raft组的所有事件
-    async fn process_single_group(&self, node_id: NodeId) {
+    async fn process_single_group(&self, node_id: RaftId) {
         // 获取组核心数据
         let core = {
             let groups = self.groups.lock().unwrap(); // 非mut锁
