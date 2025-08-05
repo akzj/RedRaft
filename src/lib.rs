@@ -1,7 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, error, info, warn};
-use lru_cache::LruCache;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display};
@@ -614,7 +613,7 @@ pub trait RaftCallbacks: Send + Sync {
 
     async fn truncate_log_prefix(&self, from: RaftId, idx: u64) -> StorageResult<()>;
 
-    async fn get_last_log_index(&self, from: RaftId) -> StorageResult<u64>;
+    async fn get_last_log_index(&self, from: RaftId) -> StorageResult<(u64, u64)>;
 
     async fn get_log_term(&self, from: RaftId, idx: u64) -> StorageResult<u64>;
 
@@ -915,6 +914,7 @@ pub struct AppendEntriesResponse {
     pub conflict_index: Option<u64>,
     pub conflict_term: Option<u64>, // 用于更高效的日志冲突处理
     pub request_id: RequestId,
+    pub matched_index: u64, // 用于快速同步
 }
 
 // === 状态机（可变状态，无 Clone）===
@@ -935,6 +935,8 @@ pub struct RaftState {
     last_applied: u64,
     last_snapshot_index: u64, // 最后一个快照的索引
     last_snapshot_term: u64,  // 最后一个快照的任期
+    last_log_index: u64,      // 最后一个日志条目的索引
+    last_log_term: u64,       // 最后一个日志条目的任期
 
     // Leader 专用状态
     next_index: HashMap<RaftId, u64>,
@@ -1073,6 +1075,15 @@ impl RaftState {
             + rand::random::<u64>()
                 % (options.election_timeout_max - options.election_timeout_min + 1);
 
+        let (last_log_index, last_log_term) =
+            match callbacks.get_last_log_index(options.id.clone()).await {
+                Ok((index, term)) => (index, term),
+                Err(err) => {
+                    error!("Failed to get last log index: {}", err);
+                    return Err(RaftError::Storage(err).into());
+                }
+            };
+
         Ok(RaftState {
             schedule_snapshot_probe_interval: options.schedule_snapshot_probe_interval,
             schedule_snapshot_probe_retries: options.schedule_snapshot_probe_retries,
@@ -1091,6 +1102,8 @@ impl RaftState {
             voted_for,
             commit_index: snap.index, // 提交索引从快照开始
             last_applied: snap.index,
+            last_log_index,
+            last_log_term,
             last_snapshot_index: snap.index,
             last_snapshot_term: snap.term,
             next_index: HashMap::new(),
@@ -1158,17 +1171,23 @@ impl RaftState {
             Event::Snapshot => self.create_snapshot().await,
         }
     }
-
-    // === 选举相关逻辑 ===
     async fn handle_election_timeout(&mut self) {
         if self.role == Role::Leader {
             return; // Leader 不处理选举超时
         }
 
+        info!(
+            "Node {} starting election for term {}",
+            self.id,
+            self.current_term + 1
+        );
+
         // 切换为 Candidate 并递增任期
         self.current_term += 1;
         self.role = Role::Candidate;
         self.voted_for = Some(self.id.clone());
+
+        // 持久化状态变更
         let _ = self
             .error_handler
             .handle_void(
@@ -1180,6 +1199,9 @@ impl RaftState {
             )
             .await;
 
+        // 如果持久化失败是致命的，error_handler 会处理（如进入只读模式）
+        // 如果不是致命的，我们继续，但最好记录下来
+
         // 重置选举定时器
         self.reset_election().await;
 
@@ -1190,9 +1212,12 @@ impl RaftState {
         self.election_votes.insert(self.id.clone(), true);
         self.election_max_term = self.current_term;
 
-        // 发送投票请求
+        // 获取日志信息用于选举
+        // 注意：如果 get_xxx 失败，会使用默认值 0，这可能影响选举结果
+        // error_handler 会记录相关错误
         let last_log_index = self.get_last_log_index().await;
         let last_log_term = self.get_last_log_term().await;
+
         let req = RequestVoteRequest {
             term: self.current_term,
             candidate_id: self.id.clone(),
@@ -1201,13 +1226,17 @@ impl RaftState {
             request_id: election_id,
         };
 
+        // 发送投票请求
+        // 使用 peers 而不是 voters，因为可能需要通知非 voter 的节点（如果有的话）
+        // 但根据 get_effective_voters 的实现，这里应该是指 voters
         for peer in self.config.get_effective_voters() {
             if *peer != self.id {
                 let target = peer.clone();
                 let args = req.clone();
 
-                let _ = self
-                    .error_handler
+                // handle 会根据错误 severity 记录日志，我们不需要在这里额外处理 None
+                let result = self
+                    .error_handler // <--- 添加这行来处理发送结果（虽然通常忽略）
                     .handle(
                         self.callbacks
                             .send_request_vote_request(self.id.clone(), target.clone(), args)
@@ -1216,10 +1245,16 @@ impl RaftState {
                         Some(&target),
                     )
                     .await;
+                // 可选：添加调试日志来显示发送结果
+                if result.is_none() {
+                    warn!("Failed to send RequestVote to {}, will retry or ignore based on error severity", target);
+                }
             }
         }
 
-        let _ = self
+        // 通知上层应用状态变更
+        // 确保在关键状态（任期、投票）更新和持久化之后调用
+        let _state_change_result = self
             .error_handler
             .handle_void(
                 self.callbacks
@@ -1229,79 +1264,132 @@ impl RaftState {
                 None,
             )
             .await;
+        // handle_void 内部已处理错误，这里通常不需要额外处理
     }
 
-    async fn handle_request_vote(&mut self, args: RequestVoteRequest) {
+    async fn handle_request_vote(&mut self, request: RequestVoteRequest) {
+        // --- 1. 处理更高任期 ---
+        // 如果收到的任期大于当前任期，更新任期并转换为 Follower
+        if request.term > self.current_term {
+            info!(
+                "Node {} stepping down to Follower, updating term from {} to {}",
+                self.id, self.current_term, request.term
+            );
+            self.current_term = request.term;
+            self.role = Role::Follower;
+            self.voted_for = None; // 重置投票状态
+            // 持久化新的任期和投票状态
+            let _ = self
+                .error_handler // 使用统一错误处理
+                .handle_void(
+                    self.callbacks
+                        .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
+                        .await,
+                    "save_hard_state",
+                    None,
+                )
+                .await;
+            // 通知状态变更
+            let _ = self
+                .error_handler
+                .handle_void(
+                    self.callbacks
+                        .state_changed(self.id.clone(), Role::Follower)
+                        .await,
+                    "state_changed",
+                    None,
+                )
+                .await;
+            // 注意：这里没有 return，因为即使任期更新了，我们仍然需要决定是否给这个候选人投票
+            // 这与 AppendEntries 的处理不同，那里通常会直接拒绝旧任期的请求。
+        }
+
+        // --- 2. 决定是否投票 ---
+        // 初始化投票结果为 false
         let mut vote_granted = false;
 
-        // 处理更高任期
-        if args.term > self.current_term {
-            self.current_term = args.term;
-            self.role = Role::Follower;
-            self.voted_for = None;
-            if let Err(err) = self
-                .callbacks
-                .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
-                .await
-            {
-                log::error!("Failed to save hard state: {}", err);
-            }
-            if let Err(err) = self
-                .callbacks
-                .state_changed(self.id.clone(), Role::Follower)
-                .await
-            {
-                log::error!(
-                    "node {}: failed to change state to Follower: {}",
+        // 在决定投票时，必须使用处理完任期后的最终状态 (self.current_term)
+        // 投票条件：
+        // a. 候选人的任期 >= 当前节点的任期 (通常是等于，因为如果大于已经在上面处理了)
+        // b. 当前节点没有投过票，或者已经投给了这个候选人
+        // c. 候选人的日志至少和当前节点的日志一样新
+        if request.term >= self.current_term // 使用 >= 确保即使任期相等也进行检查
+        && (self.voted_for.is_none() || self.voted_for == Some(request.candidate_id.clone()))
+        {
+            // --- 3. 日志最新性检查 ---
+            let log_ok = self
+                .is_log_up_to_date(request.last_log_index, request.last_log_term)
+                .await;
+
+            if log_ok {
+                // 满足所有投票条件，授予投票
+                self.voted_for = Some(request.candidate_id.clone());
+                vote_granted = true;
+                info!(
+                    "Node {} granting vote to {} for term {}",
                     self.id,
-                    err
+                    request.candidate_id,
+                    self.current_term // 使用更新后的任期
+                );
+                // 持久化新的投票状态
+                let _ = self
+                    .error_handler
+                    .handle_void(
+                        self.callbacks
+                            .save_hard_state(
+                                self.id.clone(),
+                                self.current_term,
+                                self.voted_for.clone(),
+                            )
+                            .await,
+                        "save_hard_state",
+                        None,
+                    )
+                    .await;
+                // 注意：这里不需要再次调用 state_changed，因为角色已经在任期更新时确定为 Follower
+            } else {
+                debug!(
+                    "Node {} rejecting vote for {}, logs not up-to-date",
+                    self.id, request.candidate_id
                 );
             }
-        }
-
-        // 日志最新性检查 - 优化版本
-        let log_ok = self
-            .is_log_up_to_date(args.last_log_index, args.last_log_term)
-            .await;
-
-        // 投票条件：同任期、未投票或投给同一人、日志最新
-        if args.term == self.current_term
-            && (self.voted_for.is_none() || self.voted_for == Some(args.candidate_id.clone()))
-            && log_ok
-        {
-            self.voted_for = Some(args.candidate_id.clone());
-            vote_granted = true;
-            if let Err(err) = self
-                .callbacks
-                .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
-                .await
-            {
-                log::error!("node {} Failed to save hard state: {}", self.id, err);
-            }
-        }
-
-        // 发送响应
-        let resp = RequestVoteResponse {
-            term: self.current_term,
-            vote_granted,
-            request_id: args.request_id,
-        };
-        if let Err(err) = self
-            .callbacks
-            .send_request_vote_response(self.id.clone(), args.candidate_id.clone(), resp)
-            .await
-        {
-            log::error!(
-                "node {}: failed to send RequestVoteResponse to {}: {}",
+        } else {
+            // 不满足投票条件 (任期不够新，或已投票给其他人)
+            debug!(
+                "Node {} rejecting vote for {} in term {}, already voted for {:?} or term mismatch (args.term: {}, self.current_term: {})",
                 self.id,
-                args.candidate_id,
-                err
+                request.candidate_id,
+                self.current_term,
+                self.voted_for,
+                request.term,
+                self.current_term
             );
         }
-    }
 
+        // --- 4. 发送响应 ---
+        let resp = RequestVoteResponse {
+            term: self.current_term, // 使用处理完后的最终任期
+            vote_granted,
+            request_id: request.request_id,
+        };
+
+        let _ = self
+            .error_handler
+            .handle(
+                self.callbacks
+                    .send_request_vote_response(self.id.clone(), request.candidate_id.clone(), resp)
+                    .await,
+                "send_request_vote_response",
+                Some(&request.candidate_id), // 添加目标节点信息到错误日志
+            )
+            .await;
+    }
     // 优化的日志最新性检查
-    async fn is_log_up_to_date(&self, candidate_last_index: u64, candidate_last_term: u64) -> bool {
+    async fn is_log_up_to_date(
+        &mut self,
+        candidate_last_index: u64,
+        candidate_last_term: u64,
+    ) -> bool {
         let self_last_term = self.get_last_log_term().await;
         let self_last_index = self.get_last_log_index().await;
 
@@ -1581,48 +1669,104 @@ impl RaftState {
     }
 
     async fn handle_append_entries(&mut self, request: AppendEntriesRequest) {
-        // 处理更低任期的请求
+        debug!(
+            "Node {} received AppendEntries from {} (term {}, prev_log_index {}, entries {}, leader_commit {})",
+            self.id,
+            request.leader_id,
+            request.term,
+            request.prev_log_index,
+            request.entries.len(),
+            request.leader_commit
+        );
+
+        let mut success = false;
+        let mut conflict_index = None;
+        let mut conflict_term = None;
+        let matched_index = self.get_last_log_index().await;
+
+        // --- 1. 处理更低任期的请求 ---
         if request.term < self.current_term {
-            let conflict_term = if request.prev_log_index <= self.last_snapshot_index {
+            warn!(
+                "Node {} rejecting AppendEntries from {} (term {}) - local term is {}",
+                self.id, request.leader_id, request.term, self.current_term
+            );
+            // conflict_term 计算，使用 error_handler
+            conflict_term = if request.prev_log_index <= self.last_snapshot_index {
                 Some(self.last_snapshot_term)
             } else {
-                self.callbacks
-                    .get_log_term(self.id.clone(), request.prev_log_index)
+                self.error_handler
+                    .handle(
+                        self.callbacks
+                            .get_log_term(self.id.clone(), request.prev_log_index)
+                            .await,
+                        "get_log_term",
+                        Some(&request.leader_id), // 添加来源信息到错误日志
+                    )
                     .await
-                    .ok()
+                // .ok() // 如果 handle 返回 None，conflict_term 就是 None
             };
+            // conflict_index 通常设为 follower 的 last_log_index + 1，表示 follower 期望接收的下一个日志索引
+            conflict_index = Some(self.get_last_log_index().await + 1);
 
             let resp = AppendEntriesResponse {
                 term: self.current_term,
                 success: false,
-                conflict_index: Some(self.get_last_log_index().await + 1),
+                conflict_index,
                 conflict_term,
                 request_id: request.request_id,
+                matched_index,
             };
-            if let Err(err) = self
-                .callbacks
-                .send_append_entries_response(self.id.clone(), request.leader_id, resp)
-                .await
-            {
-                log::error!(
-                    "node {}: failed to send AppendEntriesResponse: {}",
-                    self.id,
-                    err
-                );
-            }
+            let _ = self
+                .error_handler // 使用 error_handler 处理发送响应的错误
+                .handle(
+                    self.callbacks
+                        .send_append_entries_response(
+                            self.id.clone(),
+                            request.leader_id.clone(),
+                            resp,
+                        )
+                        .await,
+                    "send_append_entries_response",
+                    Some(&request.leader_id),
+                )
+                .await;
             return;
         }
 
-        // 切换为Follower并重置定时器
+        // --- 2. 切换为Follower并重置状态 ---
+        if self.role != Role::Follower || self.leader_id.as_ref() != Some(&request.leader_id) {
+            info!(
+                "Node {} recognizing {} as leader for term {}",
+                self.id, request.leader_id, request.term
+            );
+        }
         self.role = Role::Follower;
         self.leader_id = Some(request.leader_id.clone());
-        self.current_term = request.term;
+        // 如果收到的任期更高，或者任期相等但需要更新状态
+        if request.term > self.current_term {
+            info!(
+                "Node {} updating term from {} to {}",
+                self.id, self.current_term, request.term
+            );
+            self.current_term = request.term;
+            self.voted_for = None; // 任期更新时重置投票
+            // 持久化任期和投票状态
+            let _ = self
+                .error_handler
+                .handle_void(
+                    self.callbacks
+                        .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
+                        .await,
+                    "save_hard_state",
+                    None,
+                )
+                .await;
+        }
         self.last_heartbeat = Instant::now();
-
         // 重置超时选举定时器
         self.reset_election().await;
 
-        // 日志连续性检查
+        // --- 3. 日志连续性检查 ---
         let prev_log_ok = if request.prev_log_index == 0 {
             true // 从0开始的日志无需检查
         } else if request.prev_log_index <= self.last_snapshot_index {
@@ -1630,150 +1774,266 @@ impl RaftState {
             request.prev_log_term == self.last_snapshot_term
         } else {
             // 检查日志任期是否匹配
-            self.callbacks
-                .get_log_term(self.id.clone(), request.prev_log_index)
-                .await
-                .unwrap_or(0)
-                == request.prev_log_term
+            // 使用 error_handler 处理 get_log_term 错误
+            let local_prev_log_term_result = self
+                .error_handler
+                .handle(
+                    self.callbacks
+                        .get_log_term(self.id.clone(), request.prev_log_index)
+                        .await,
+                    "get_log_term",
+                    Some(&request.leader_id),
+                )
+                .await;
+
+            match local_prev_log_term_result {
+                Some(local_term) => local_term == request.prev_log_term,
+                None => {
+                    // 获取本地日志任期失败，为安全起见，拒绝请求
+                    error!(
+                        "Node {} failed to get local log term for index {} during consistency check, rejecting AppendEntries",
+                        self.id, request.prev_log_index
+                    );
+                    false
+                }
+            }
         };
 
         if !prev_log_ok {
-            let conflict_idx = if request.prev_log_index > self.get_last_log_index().await {
-                self.get_last_log_index().await + 1
+            warn!(
+                "Node {} rejecting AppendEntries from {} - log inconsistency at index {} (leader: {}, local: {:?})",
+                self.id,
+                request.leader_id,
+                request.prev_log_index,
+                request.prev_log_term,
+                if request.prev_log_index <= self.last_snapshot_index {
+                    Some(self.last_snapshot_term)
+                } else {
+                    self.callbacks
+                        .get_log_term(self.id.clone(), request.prev_log_index)
+                        .await
+                        .ok()
+                }
+            );
+            // 计算冲突索引和任期
+            let local_last_log_index = self.get_last_log_index().await;
+            conflict_index = if request.prev_log_index > local_last_log_index {
+                // Leader 想要追加的日志索引超出了 Follower 的日志范围
+                Some(local_last_log_index + 1)
             } else {
-                request.prev_log_index
+                // Leader 想要追加的日志索引在 Follower 日志范围内，但任期不匹配
+                Some(request.prev_log_index)
             };
 
-            let conflict_term = if request.prev_log_index <= self.last_snapshot_index {
+            conflict_term = if request.prev_log_index <= self.last_snapshot_index {
                 Some(self.last_snapshot_term)
             } else {
-                self.callbacks
-                    .get_log_term(self.id.clone(), request.prev_log_index)
+                // 使用 error_handler 处理 get_log_term 错误
+                self.error_handler
+                    .handle(
+                        self.callbacks
+                            .get_log_term(self.id.clone(), request.prev_log_index)
+                            .await,
+                        "get_log_term",
+                        Some(&request.leader_id),
+                    )
                     .await
-                    .ok()
+                // .ok() // 如果 handle 返回 None，conflict_term 就是 None
             };
 
             let resp = AppendEntriesResponse {
-                term: self.current_term,
                 success: false,
-                conflict_index: Some(conflict_idx),
+                conflict_index,
                 conflict_term,
+                matched_index,
+                term: self.current_term,
                 request_id: request.request_id,
             };
-            if let Err(err) = self
-                .callbacks
-                .send_append_entries_response(self.id.clone(), request.leader_id, resp)
-                .await
-            {
-                log::error!(
-                    "node {}: failed to send AppendEntriesResponse: {}",
-                    self.id,
-                    err
-                );
-            }
-            return;
-        }
-
-        // 截断冲突日志并追加新日志
-        if request.prev_log_index < self.get_last_log_index().await {
             let _ = self
-                .callbacks
-                .truncate_log_suffix(self.id.clone(), request.prev_log_index + 1)
+                .error_handler
+                .handle(
+                    self.callbacks
+                        .send_append_entries_response(
+                            self.id.clone(),
+                            request.leader_id.clone(),
+                            resp,
+                        )
+                        .await,
+                    "send_append_entries_response",
+                    Some(&request.leader_id),
+                )
                 .await;
+            return; // 直接返回，不执行后续步骤
         }
 
-        // 验证并追加新日志
-        if !request.entries.is_empty() {
-            // 验证日志条目连续性和有效性
+        success = true; // 假设后续步骤会成功
+        // --- 4. 截断冲突日志并追加新日志 ---
+        // 在截断之前，检查是否试图截断已提交的日志
+        if request.prev_log_index < self.get_last_log_index().await {
+            // 计算要截断的日志起始索引
+            let truncate_from_index = request.prev_log_index + 1;
+
+            // *** 关键检查：不能截断已提交的日志 ***
+            if truncate_from_index <= self.commit_index {
+                warn!(
+                    "Node {} rejecting AppendEntries from {} - attempt to truncate committed logs (truncate_from: {}, commit_index: {})",
+                    self.id, request.leader_id, truncate_from_index, self.commit_index
+                );
+                // 因为日志连续性检查已经通过，但这里又发现要截断已提交日志，
+                // 这表明请求本身有问题或状态异常。最安全的做法是拒绝请求。
+                // 我们可以通过返回一个特定的 conflict_index 来指示 Leader 回退，
+                // 或者简单地返回失败。这里选择返回失败。
+
+                // conflict_index 和 conflict_term 的设置可以更精确，
+                // 但返回失败是明确的。
+                let resp = AppendEntriesResponse {
+                    term: self.current_term,
+                    success: false,
+                    conflict_index: Some(self.commit_index + 1), // 告诉 Leader 从 commit_index + 1 开始发送
+                    conflict_term: None, // 或者可以尝试获取 commit_index 的任期
+                    request_id: request.request_id,
+                    matched_index: self.get_last_log_index().await, // 如果有这个字段
+                };
+                let _ = self
+                    .error_handler
+                    .handle(
+                        self.callbacks
+                            .send_append_entries_response(
+                                self.id.clone(),
+                                request.leader_id.clone(),
+                                resp,
+                            )
+                            .await,
+                        "send_append_entries_response",
+                        Some(&request.leader_id),
+                    )
+                    .await;
+                return; // 直接返回，不执行后续步骤
+            }
+
+            // 如果检查通过，则执行截断
+            debug!(
+                "Node {} truncating log suffix from index {}",
+                self.id, truncate_from_index
+            );
+            let truncate_result = self
+                .error_handler
+                .handle_void(
+                    self.callbacks
+                        .truncate_log_suffix(self.id.clone(), truncate_from_index)
+                        .await,
+                    "truncate_log_suffix",
+                    None,
+                )
+                .await;
+            if !truncate_result {
+                error!("Node {} failed to truncate log suffix", self.id);
+                success = false;
+                // 对于截断失败，通常没有特定的 conflict_index/term，Leader 会根据 next_index 回退
+                // 这里可以不设置 conflict_index/term，或者设置为指示存储错误的值（如果协议支持）
+            }
+        }
+        // --- 5. 验证并追加新日志 ---
+        if success && !request.entries.is_empty() {
+            // 验证日志条目连续性 (索引递增)
             if let Some(first_entry) = request.entries.first() {
                 if first_entry.index != request.prev_log_index + 1 {
-                    let resp = AppendEntriesResponse {
-                        term: self.current_term,
-                        success: false,
-                        conflict_index: Some(request.prev_log_index + 1),
-                        conflict_term: None,
-                        request_id: request.request_id,
-                    };
-                    if let Err(err) = self
-                        .callbacks
-                        .send_append_entries_response(self.id.clone(), request.leader_id, resp)
-                        .await
-                    {
-                        log::error!(
-                            "node {}: failed to send AppendEntriesResponse: {}",
-                            self.id,
-                            err
-                        );
-                    }
-                    return;
-                }
-
-                // 检查是否有重复的客户端请求
-                for entry in &request.entries {
-                    if let Some(_) = entry.client_request_id {
-                        // 已提交的日志不能被修改
-                        if entry.index <= self.commit_index {
-                            let resp = AppendEntriesResponse {
-                                term: self.current_term,
-                                success: false,
-                                conflict_index: Some(entry.index),
-                                conflict_term: Some(entry.term),
-                                request_id: request.request_id,
-                            };
-                            if let Err(err) = self
-                                .callbacks
-                                .send_append_entries_response(
-                                    self.id.clone(),
-                                    request.leader_id,
-                                    resp,
-                                )
-                                .await
-                            {
-                                log::error!(
-                                    "node {}: failed to send AppendEntriesResponse: {}",
-                                    self.id,
-                                    err
-                                );
-                            }
-                            return;
+                    error!(
+                        "Node {} rejecting AppendEntries - log entry index discontinuity: expected {}, got {}",
+                        self.id,
+                        request.prev_log_index + 1,
+                        first_entry.index
+                    );
+                    success = false;
+                    conflict_index = Some(request.prev_log_index + 1);
+                    // conflict_term 对于索引不连续的情况通常不设置或设为 None
+                    conflict_term = None;
+                } else {
+                    // 检查是否有试图覆盖已提交日志的客户端请求 (安全防护)
+                    for entry in &request.entries {
+                        if entry.client_request_id.is_some() && entry.index <= self.commit_index {
+                            error!(
+                                "Node {} rejecting AppendEntries - attempt to overwrite committed log entry {} with client request",
+                                self.id, entry.index
+                            );
+                            success = false;
+                            conflict_index = Some(entry.index);
+                            conflict_term = Some(entry.term); // 提供冲突条目的任期
+                            break; // 一旦发现冲突，立即停止检查并返回
                         }
                     }
                 }
             }
 
-            let _ = self
-                .callbacks
-                .append_log_entries(self.id.clone(), &request.entries)
-                .await;
+            if success {
+                debug!(
+                    "Node {} appending {} log entries starting from index {}",
+                    self.id,
+                    request.entries.len(),
+                    request.prev_log_index + 1
+                );
+                let append_result = self
+                    .error_handler
+                    .handle_void(
+                        self.callbacks
+                            .append_log_entries(self.id.clone(), &request.entries)
+                            .await,
+                        "append_log_entries",
+                        None,
+                    )
+                    .await;
+                if !append_result {
+                    error!("Node {} failed to append log entries", self.id);
+                    success = false;
+                    // 对于 append 失败，通常没有特定的 conflict_index/term，Leader 会根据 next_index 回退
+                    // 这里可以不设置 conflict_index/term，或者设置为指示存储错误的值（如果协议支持）
+                }
+            }
         }
 
-        // 更新提交索引
-        if request.leader_commit > self.commit_index {
-            self.commit_index =
+        // --- 6. 更新提交索引 ---
+        if success && request.leader_commit > self.commit_index {
+            let new_commit_index =
                 std::cmp::min(request.leader_commit, self.get_last_log_index().await);
+            if new_commit_index > self.commit_index {
+                debug!(
+                    "Node {} updating commit index from {} to {}",
+                    self.id, self.commit_index, new_commit_index
+                );
+                self.commit_index = new_commit_index;
+            }
         }
 
-        // 发送成功响应
+        // --- 7. 发送响应 ---
+        // 注意：当前 AppendEntriesResponse 定义中没有 matched_index 字段
         let resp = AppendEntriesResponse {
             term: self.current_term,
-            success: true,
-            conflict_index: None,
-            conflict_term: None,
+            success,
             request_id: request.request_id,
+            conflict_index: if success { None } else { conflict_index }, // 成功时通常不设置 conflict_index
+            conflict_term: if success { None } else { conflict_term }, // 成功时通常不设置 conflict_term
+            matched_index: self.get_last_log_index().await, // 示例：无论成功与否都返回当前最新索引（如果字段存在）
         };
-        if let Err(err) = self
-            .callbacks
-            .send_append_entries_response(self.id.clone(), request.leader_id, resp)
-            .await
-        {
-            log::error!(
-                "node {}: failed to send AppendEntriesResponse: {}",
-                self.id,
-                err
-            );
-        }
+        let _send_result = self
+            .error_handler
+            .handle(
+                self.callbacks
+                    .send_append_entries_response(self.id.clone(), request.leader_id.clone(), resp)
+                    .await,
+                "send_append_entries_response",
+                Some(&request.leader_id),
+            )
+            .await;
+        // 可选：检查 send_result 并在失败时记录
 
-        self.apply_committed_logs().await;
+        // --- 8. 应用已提交的日志 ---
+        if success && self.commit_index > self.last_applied {
+            debug!(
+                "Node {} applying committed logs up to index {}",
+                self.id, self.commit_index
+            );
+            self.apply_committed_logs().await;
+        }
     }
 
     async fn handle_append_entries_response(
@@ -1787,115 +2047,145 @@ impl RaftState {
 
         // 处理更高任期
         if response.term > self.current_term {
+            info!(
+                "Node {} stepping down to Follower, found higher term {} from {} (current term {})",
+                self.id, response.term, peer, self.current_term
+            );
             self.current_term = response.term;
             self.role = Role::Follower;
             self.voted_for = None;
-            if let Err(err) = self
-                .callbacks
-                .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
-                .await
-            {
-                log::error!("node {}: Failed to save hard state: {}", self.id, err);
-            }
-            if let Err(err) = self
-                .callbacks
-                .state_changed(self.id.clone(), Role::Follower)
-                .await
-            {
-                log::error!(
-                    "node {}: Failed to change state to Follower: {}",
-                    self.id,
-                    err
-                );
-            }
+            // 持久化状态
+            let _ = self
+                .error_handler
+                .handle_void(
+                    self.callbacks
+                        .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
+                        .await,
+                    "save_hard_state",
+                    None,
+                )
+                .await;
+            // 通知状态变更
+            let _ = self
+                .error_handler
+                .handle_void(
+                    self.callbacks
+                        .state_changed(self.id.clone(), Role::Follower)
+                        .await,
+                    "state_changed",
+                    None,
+                )
+                .await;
+            // 清理探测计划等其他Leader状态...
             return;
         }
 
-        // 更新复制状态
-        if response.success {
-            let req_next_idx = self.next_index.get(&peer).copied().unwrap_or(1);
-            let entries_len = self
-                .callbacks
-                .get_log_entries(
-                    self.id.clone(),
-                    req_next_idx,
-                    self.get_last_log_index().await + 1,
-                )
-                .await
-                .unwrap_or_default()
-                .len() as u64;
-            let new_match_idx = req_next_idx + entries_len - 1;
-            let new_next_idx = new_match_idx + 1;
+        // 更新复制状态 - 仅处理来自当前任期的响应
+        if response.term == self.current_term {
+            // <--- 添加任期检查
+            if response.success {
+                let match_index = response.matched_index;
+                let new_next_idx = match_index + 1;
+                self.match_index.insert(peer.clone(), match_index);
+                self.next_index.insert(peer.clone(), new_next_idx);
 
-            self.match_index.insert(peer.clone(), new_match_idx);
-            self.next_index.insert(peer.clone(), new_next_idx);
+                debug!(
+                    "Node {} updated replication state for {}: next_index={}, match_index={}",
+                    self.id, peer, new_next_idx, match_index
+                );
 
-            // 尝试更新commit_index
-            self.update_commit_index().await;
-        } else {
-            // 日志冲突，更高效的回退策略
-            let current_next = self.next_index.get(&peer).copied().unwrap_or(1);
-            let new_next = if let (Some(conflict_term), Some(conflict_index)) =
-                (response.conflict_term, response.conflict_index)
-            {
-                // 查找冲突任期的最后一个日志索引
-                let mut idx = conflict_index - 1;
-                while idx > 0 {
-                    let term = if idx <= self.last_snapshot_index {
-                        self.last_snapshot_term
-                    } else {
-                        match self.callbacks.get_log_term(self.id.clone(), idx).await {
-                            Ok(t) => t,
-                            Err(e) => {
-                                log::error!(
-                                    "node {}: failed to get log term for index {}: {}",
-                                    self.id,
-                                    idx,
-                                    e
+                // 尝试更新 commit_index
+                self.update_commit_index().await;
+            } else {
+                // --- 日志冲突 ---
+                debug!(
+                    "Node {} received log conflict from {}: index={:?}, term={:?}",
+                    self.id, peer, response.conflict_index, response.conflict_term
+                );
+                // 日志冲突，更高效的回退策略
+                let current_next = self.next_index.get(&peer).copied().unwrap_or(1);
+                let new_next = if let (Some(conflict_term), Some(conflict_index)) =
+                    (response.conflict_term, response.conflict_index)
+                {
+                    // 查找冲突任期的最后一个日志索引
+                    let mut idx = conflict_index;
+                    // 从 conflict_index 向前查找，直到找到任期小于 conflict_term 的日志条目
+                    // 或者到达快照点或索引0
+                    while idx > self.last_snapshot_index && idx > 0 {
+                        // 使用 error_handler 处理 get_log_term
+                        let term_result = self
+                            .error_handler
+                            .handle(
+                                self.callbacks.get_log_term(self.id.clone(), idx).await,
+                                "get_log_term",
+                                Some(&peer),
+                            )
+                            .await;
+
+                        match term_result {
+                            Some(term) => {
+                                if term < conflict_term {
+                                    break; // 找到任期小于冲突任期的条目，停止
+                                } else {
+                                    debug!(
+                                        // 降级为 debug
+                                        "Term {} at index {} matches conflict_term {}",
+                                        term, idx, conflict_term
+                                    );
+                                }
+                            }
+                            None => {
+                                // get_log_term 失败，无法精确回退，保守地将 next_index 设为 conflict_index
+                                warn!(
+                                    "Failed to get log term for index {} during conflict resolution, falling back to conflict_index",
+                                    idx
                                 );
+                                idx = conflict_index;
                                 break;
                             }
                         }
-                    };
-
-                    if term < conflict_term {
-                        break;
-                    } else {
-                        info!(
-                            "Term {} at index {} matches conflict_term {}",
-                            term, idx, conflict_term
-                        );
+                        idx = idx.saturating_sub(1); // 防止溢出
                     }
-
-                    idx -= 1;
-                }
-                idx + 1
-            } else {
-                response.conflict_index.unwrap_or(current_next - 1)
-            };
-            self.next_index.insert(peer.clone(), new_next.max(1));
-        }
-
-        // 检查领导权转移状态
-        let reply_for_transfer = if let Some(transfer_target) = &self.leader_transfer_target {
-            if &peer == transfer_target && response.term == self.current_term {
-                Some(response.clone())
-            } else {
-                None
+                    // idx 现在指向任期小于 conflict_term 的条目，或者快照点，或者0
+                    // 下一次发送从 idx + 1 开始
+                    idx + 1
+                } else {
+                    // 如果 Follower 没有提供足够的冲突信息，保守回退
+                    response
+                        .conflict_index
+                        .unwrap_or(current_next.saturating_sub(1))
+                        .max(1)
+                };
+                self.next_index.insert(peer.clone(), new_next.max(1)); // 确保 next_index 至少为1
+                debug!(
+                    "Node {} updated next_index for {} to {}",
+                    self.id, peer, new_next
+                );
             }
-        } else {
-            None
-        };
+        } // end if response.term == self.current_term
 
-        // 若当前处于联合配置，更新确认状态
-        if self.config.joint.is_some() && response.success {
-            self.check_joint_exit_condition().await;
+        // 检查领导权转移状态 (仅处理当前任期的响应)
+        if response.term == self.current_term {
+            // <--- 添加任期检查
+            if let Some(transfer_target) = &self.leader_transfer_target {
+                if &peer == transfer_target {
+                    // 克隆 response 用于异步处理，避免借用冲突
+                    self.process_leader_transfer_target_response(peer.clone(), response.clone())
+                        .await;
+                }
+            }
         }
 
-        // 处理领导权转移
-        if let Some(transfer_reply) = reply_for_transfer {
-            self.process_leader_transfer_target_response(peer, transfer_reply)
-                .await;
+        // 若当前处于联合配置，更新确认状态 (仅处理成功的、当前任期的响应)
+        if response.term == self.current_term && response.success {
+            // <--- 添加任期检查
+            if self.config.joint.is_some() {
+                debug!(
+                    "Checking joint exit condition after successful replication to {}",
+                    peer
+                );
+                self.check_joint_exit_condition().await;
+            }
         }
     }
 
@@ -2522,6 +2812,9 @@ impl RaftState {
             return;
         }
 
+        self.last_log_index = index;
+        self.last_log_term = self.current_term;
+
         // 记录客户端请求与日志索引的映射
         self.client_requests.insert(request_id, index);
         self.client_requests_revert.insert(index, request_id);
@@ -3100,27 +3393,11 @@ impl RaftState {
     }
 
     async fn get_last_log_index(&self) -> u64 {
-        self.callbacks
-            .get_last_log_index(self.id.clone())
-            .await
-            .unwrap_or(0)
-            .max(self.last_snapshot_index)
+        self.last_log_index
     }
 
     async fn get_last_log_term(&self) -> u64 {
-        let last_log_idx = self
-            .callbacks
-            .get_last_log_index(self.id.clone())
-            .await
-            .unwrap_or(0);
-        if last_log_idx == 0 {
-            self.last_snapshot_term
-        } else {
-            self.callbacks
-                .get_log_term(self.id.clone(), last_log_idx)
-                .await
-                .unwrap_or(self.last_snapshot_term)
-        }
+        self.last_log_term
     }
 
     pub fn get_role(&self) -> Role {
@@ -3336,14 +3613,16 @@ impl RaftState {
         }
 
         // 7. 截断日志前缀
-        if let Err(e) = self
-            .callbacks
-            .truncate_log_prefix(self.id.clone(), snap_index + 1)
-            .await
-        {
-            error!("Failed to truncate log prefix after snapshot: {}", e);
-            // 不 return，继续更新状态
-        }
+        let _ = self
+            .error_handler
+            .handle_void(
+                self.callbacks
+                    .truncate_log_prefix(self.id.clone(), snap_index + 1)
+                    .await,
+                "truncate_log_prefix",
+                None,
+            )
+            .await;
 
         // 9. 更新本地状态
         self.last_snapshot_index = snap_index;

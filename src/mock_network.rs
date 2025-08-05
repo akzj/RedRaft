@@ -1,8 +1,8 @@
 use crate::mutl_raft_driver::Network;
 
 use super::{
-    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest,
-    InstallSnapshotResponse, RaftId, RequestVoteRequest, RequestVoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
+    RaftId, RequestVoteRequest, RequestVoteResponse,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -254,6 +254,7 @@ impl Network for MockNetwork {
                 conflict_index: None,
                 request_id: args.request_id,
                 conflict_term: None,
+                matched_index: 0,
             };
         }
 
@@ -268,6 +269,7 @@ impl Network for MockNetwork {
             conflict_index: None,
             request_id: args.request_id,
             conflict_term: None,
+            matched_index: 0,
         }
     }
 
