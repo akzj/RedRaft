@@ -481,14 +481,14 @@ pub enum Event {
     ConfigChangeTimeout, // 配置变更超时
 
     // RPC 请求事件（来自其他节点）
-    RequestVote(RequestVoteRequest),
-    AppendEntries(AppendEntriesRequest),
-    InstallSnapshot(InstallSnapshotRequest),
+    RequestVoteRequest(RequestVoteRequest),
+    AppendEntriesRequest(AppendEntriesRequest),
+    InstallSnapshotRequest(InstallSnapshotRequest),
 
     // RPC 响应事件（其他节点对本节点请求的回复）
     RequestVoteResponse(RaftId, RequestVoteResponse),
     AppendEntriesResponse(RaftId, AppendEntriesResponse),
-    InstallSnapshotReply(RaftId, InstallSnapshotResponse),
+    InstallSnapshotResponse(RaftId, InstallSnapshotResponse),
 
     // 领导人转移相关事件
     LeaderTransfer {
@@ -545,8 +545,8 @@ pub type ClientResult<T> = Result<T, ClientError>;
 pub type ApplyResult<T> = Result<T, ApplyError>;
 pub type SnapshotResult<T> = Result<T, SnapshotError>;
 
-#[async_trait]
-pub trait RaftCallbacks: Send + Sync {
+#[async_trait::async_trait]
+pub trait Network: Send + Sync {
     // 发送 RPC 回调
     async fn send_request_vote_request(
         &self,
@@ -583,14 +583,16 @@ pub trait RaftCallbacks: Send + Sync {
         args: InstallSnapshotRequest,
     ) -> RpcResult<()>;
 
-    async fn send_install_snapshot_reply(
+    async fn send_install_snapshot_response(
         &self,
         from: RaftId,
         target: RaftId,
         args: InstallSnapshotResponse,
     ) -> RpcResult<()>;
+}
 
-    // 持久化回调
+#[async_trait]
+pub trait Storage: Send + Sync {
     async fn save_hard_state(
         &self,
         from: RaftId,
@@ -626,15 +628,19 @@ pub trait RaftCallbacks: Send + Sync {
     async fn save_cluster_config(&self, from: RaftId, conf: ClusterConfig) -> StorageResult<()>;
 
     async fn load_cluster_config(&self, from: RaftId) -> StorageResult<ClusterConfig>;
+}
 
-    // 定时器回调
+pub trait Timer {
     fn del_timer(&self, from: RaftId, timer_id: TimerId) -> ();
     fn set_leader_transfer_timer(&self, from: RaftId, dur: Duration) -> TimerId;
     fn set_election_timer(&self, from: RaftId, dur: Duration) -> TimerId;
     fn set_heartbeat_timer(&self, from: RaftId, dur: Duration) -> TimerId;
     fn set_apply_timer(&self, from: RaftId, dur: Duration) -> TimerId;
     fn set_config_change_timer(&self, from: RaftId, dur: Duration) -> TimerId;
+}
 
+#[async_trait]
+pub trait RaftCallbacks: Network + Storage + Timer + Send + Sync {
     // 客户端响应回调
     async fn client_response(
         &self,
@@ -851,7 +857,7 @@ pub struct InstallSnapshotResponse {
 // #[derive(Debug, Clone)]
 // pub struct Error(pub String);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub index: u64,
     pub term: u64,
@@ -1140,8 +1146,8 @@ impl RaftState {
     pub async fn handle_event(&mut self, event: Event) {
         match event {
             Event::ElectionTimeout => self.handle_election_timeout().await,
-            Event::RequestVote(args) => self.handle_request_vote(args).await,
-            Event::AppendEntries(args) => self.handle_append_entries(args).await,
+            Event::RequestVoteRequest(args) => self.handle_request_vote(args).await,
+            Event::AppendEntriesRequest(args) => self.handle_append_entries(args).await,
             Event::RequestVoteResponse(peer, reply) => {
                 self.handle_request_vote_response(peer, reply).await
             }
@@ -1152,8 +1158,8 @@ impl RaftState {
             Event::ClientPropose { cmd, request_id } => {
                 self.handle_client_propose(cmd, request_id).await
             }
-            Event::InstallSnapshot(args) => self.handle_install_snapshot(args).await,
-            Event::InstallSnapshotReply(peer, reply) => {
+            Event::InstallSnapshotRequest(args) => self.handle_install_snapshot(args).await,
+            Event::InstallSnapshotResponse(peer, reply) => {
                 self.handle_install_snapshot_response(peer, reply).await
             }
             Event::ApplyLogs => self.apply_committed_logs().await,
@@ -1247,7 +1253,10 @@ impl RaftState {
                     .await;
                 // 可选：添加调试日志来显示发送结果
                 if result.is_none() {
-                    warn!("Failed to send RequestVote to {}, will retry or ignore based on error severity", target);
+                    warn!(
+                        "Failed to send RequestVote to {}, will retry or ignore based on error severity",
+                        target
+                    );
                 }
             }
         }
@@ -2391,7 +2400,7 @@ impl RaftState {
             self.error_handler
                 .handle_void(
                     self.callbacks
-                        .send_install_snapshot_reply(
+                        .send_install_snapshot_response(
                             self.id.clone(),
                             request.leader_id.clone(),
                             resp,
@@ -2435,7 +2444,7 @@ impl RaftState {
             self.error_handler
                 .handle_void(
                     self.callbacks
-                        .send_install_snapshot_reply(
+                        .send_install_snapshot_response(
                             self.id.clone(),
                             request.leader_id.clone(),
                             resp,
@@ -2458,7 +2467,7 @@ impl RaftState {
             self.error_handler
                 .handle_void(
                     self.callbacks
-                        .send_install_snapshot_reply(
+                        .send_install_snapshot_response(
                             self.id.clone(),
                             request.leader_id.clone(),
                             resp,
@@ -2483,7 +2492,7 @@ impl RaftState {
             self.error_handler
                 .handle_void(
                     self.callbacks
-                        .send_install_snapshot_reply(
+                        .send_install_snapshot_response(
                             self.id.clone(),
                             request.leader_id.clone(),
                             resp,
@@ -2508,7 +2517,11 @@ impl RaftState {
         self.error_handler
             .handle_void(
                 self.callbacks
-                    .send_install_snapshot_reply(self.id.clone(), request.leader_id.clone(), resp)
+                    .send_install_snapshot_response(
+                        self.id.clone(),
+                        request.leader_id.clone(),
+                        resp,
+                    )
                     .await,
                 "send_install_snapshot_reply",
                 Some(&request.leader_id),
