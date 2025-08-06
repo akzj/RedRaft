@@ -16,8 +16,7 @@ pub enum RaftNodeStatus {
 use std::sync::atomic::AtomicU8;
 
 use crate::{
-    AppendEntriesRequest, AppendEntriesResponse, Event, InstallSnapshotRequest,
-    InstallSnapshotResponse, RaftId, RaftState, RequestVoteRequest, RequestVoteResponse, RpcResult,
+    Event, RaftId, RaftState,
 };
 
 // 原子RaftGroupStatus包装器
@@ -67,7 +66,6 @@ impl AtomicRaftNodeStatus {
         }
     }
 }
-
 
 #[derive(Debug)]
 struct TimerEvent {

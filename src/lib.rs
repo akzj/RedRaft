@@ -2063,6 +2063,7 @@ impl RaftState {
             self.current_term = response.term;
             self.role = Role::Follower;
             self.voted_for = None;
+            self.leader_id = None; // 清除领导者ID
             // 持久化状态
             let _ = self
                 .error_handler
@@ -2111,6 +2112,12 @@ impl RaftState {
                     "Node {} received log conflict from {}: index={:?}, term={:?}",
                     self.id, peer, response.conflict_index, response.conflict_term
                 );
+                
+                // 如果响应包含 matched_index，使用它来更新 match_index
+                if response.matched_index > 0 {
+                    self.match_index.insert(peer.clone(), response.matched_index);
+                }
+                
                 // 日志冲突，更高效的回退策略
                 let current_next = self.next_index.get(&peer).copied().unwrap_or(1);
                 let new_next = if let (Some(conflict_term), Some(conflict_index)) =
@@ -2159,11 +2166,16 @@ impl RaftState {
                     // 下一次发送从 idx + 1 开始
                     idx + 1
                 } else {
-                    // 如果 Follower 没有提供足够的冲突信息，保守回退
-                    response
-                        .conflict_index
-                        .unwrap_or(current_next.saturating_sub(1))
-                        .max(1)
+                    // 如果 Follower 没有提供足够的冲突信息，基于 matched_index 计算 next_index
+                    if response.matched_index > 0 {
+                        response.matched_index + 1
+                    } else {
+                        // 保守回退
+                        response
+                            .conflict_index
+                            .unwrap_or(current_next.saturating_sub(1))
+                            .max(1)
+                    }
                 };
                 self.next_index.insert(peer.clone(), new_next.max(1)); // 确保 next_index 至少为1
                 debug!(
@@ -2584,26 +2596,8 @@ impl RaftState {
 
         // 更新快照状态
         if success {
-            // 验证快照索引对应的日志任期是否正确
-            let expected_term = if index <= self.last_snapshot_index {
-                self.last_snapshot_term
-            } else {
-                match self.callbacks.get_log_term(self.id.clone(), index).await {
-                    Ok(t) => t,
-                    Err(_) => {
-                        error!("无法验证快照任期，安装失败");
-                        self.current_snapshot_request_id = None;
-                        return;
-                    }
-                }
-            };
-
-            if term != expected_term {
-                error!("快照任期不匹配，安装失败");
-                self.current_snapshot_request_id = None;
-                return;
-            }
-
+            // 对于快照安装，我们信任传入的index和term参数
+            // 快照安装意味着用快照替换所有小于等于index的日志条目
             self.last_snapshot_index = index;
             self.last_snapshot_term = term;
             self.commit_index = self.commit_index.max(index);
@@ -2706,16 +2700,18 @@ impl RaftState {
             .iter_mut()
             .find(|s| &s.peer == peer)
         {
-            if schedule.attempts < schedule.max_attempts {
-                schedule.attempts += 1;
-                schedule.next_probe_time = Instant::now() + schedule.interval;
-            } else {
+            schedule.attempts += 1;
+            
+            if schedule.attempts >= schedule.max_attempts {
                 // 达到最大尝试次数，标记为失败
                 self.follower_snapshot_states.insert(
                     peer.clone(),
                     InstallSnapshotState::Failed("Max probe attempts reached".into()),
                 );
                 self.remove_snapshot_probe(peer);
+            } else {
+                // 还没达到最大尝试次数，计划下次探测
+                schedule.next_probe_time = Instant::now() + schedule.interval;
             }
         }
     }
@@ -2737,7 +2733,9 @@ impl RaftState {
 
         // 执行每个到期的探测
         for peer in pending_peers {
-            self.probe_snapshot_status(peer).await;
+            self.probe_snapshot_status(peer.clone()).await;
+            // 更新探测计划状态
+            self.extend_snapshot_probe(&peer);
         }
     }
 
@@ -3786,11 +3784,11 @@ impl RaftState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mock_network::{MockNetworkHub, MockNetworkConfig};
+    use crate::mock_network::{MockNetworkConfig, MockNetworkHub};
     use crate::mock_storage::MockStorage;
     use std::sync::Arc;
     use tokio::sync::Mutex;
-    use tokio::time::Duration;
+    use tokio::time::{Duration, sleep, timeout};
 
     // 测试用的简单回调实现
     struct TestCallbacks {
@@ -3815,46 +3813,105 @@ mod tests {
 
     #[async_trait]
     impl Network for TestCallbacks {
-        async fn send_request_vote_request(&self, from: RaftId, target: RaftId, args: RequestVoteRequest) -> RpcResult<()> {
-            self.network.send_request_vote_request(from, target, args).await
+        async fn send_request_vote_request(
+            &self,
+            from: RaftId,
+            target: RaftId,
+            args: RequestVoteRequest,
+        ) -> RpcResult<()> {
+            self.network
+                .send_request_vote_request(from, target, args)
+                .await
         }
 
-        async fn send_request_vote_response(&self, from: RaftId, target: RaftId, args: RequestVoteResponse) -> RpcResult<()> {
-            self.network.send_request_vote_response(from, target, args).await
+        async fn send_request_vote_response(
+            &self,
+            from: RaftId,
+            target: RaftId,
+            args: RequestVoteResponse,
+        ) -> RpcResult<()> {
+            self.network
+                .send_request_vote_response(from, target, args)
+                .await
         }
 
-        async fn send_append_entries_request(&self, from: RaftId, target: RaftId, args: AppendEntriesRequest) -> RpcResult<()> {
-            self.network.send_append_entries_request(from, target, args).await
+        async fn send_append_entries_request(
+            &self,
+            from: RaftId,
+            target: RaftId,
+            args: AppendEntriesRequest,
+        ) -> RpcResult<()> {
+            self.network
+                .send_append_entries_request(from, target, args)
+                .await
         }
 
-        async fn send_append_entries_response(&self, from: RaftId, target: RaftId, args: AppendEntriesResponse) -> RpcResult<()> {
-            self.network.send_append_entries_response(from, target, args).await
+        async fn send_append_entries_response(
+            &self,
+            from: RaftId,
+            target: RaftId,
+            args: AppendEntriesResponse,
+        ) -> RpcResult<()> {
+            self.network
+                .send_append_entries_response(from, target, args)
+                .await
         }
 
-        async fn send_install_snapshot_request(&self, from: RaftId, target: RaftId, args: InstallSnapshotRequest) -> RpcResult<()> {
-            self.network.send_install_snapshot_request(from, target, args).await
+        async fn send_install_snapshot_request(
+            &self,
+            from: RaftId,
+            target: RaftId,
+            args: InstallSnapshotRequest,
+        ) -> RpcResult<()> {
+            self.network
+                .send_install_snapshot_request(from, target, args)
+                .await
         }
 
-        async fn send_install_snapshot_response(&self, from: RaftId, target: RaftId, args: InstallSnapshotResponse) -> RpcResult<()> {
-            self.network.send_install_snapshot_response(from, target, args).await
+        async fn send_install_snapshot_response(
+            &self,
+            from: RaftId,
+            target: RaftId,
+            args: InstallSnapshotResponse,
+        ) -> RpcResult<()> {
+            self.network
+                .send_install_snapshot_response(from, target, args)
+                .await
         }
     }
 
     #[async_trait]
     impl Storage for TestCallbacks {
-        async fn save_hard_state(&self, from: RaftId, term: u64, voted_for: Option<RaftId>) -> StorageResult<()> {
+        async fn save_hard_state(
+            &self,
+            from: RaftId,
+            term: u64,
+            voted_for: Option<RaftId>,
+        ) -> StorageResult<()> {
             self.storage.save_hard_state(from, term, voted_for).await
         }
 
-        async fn load_hard_state(&self, from: RaftId) -> StorageResult<Option<(u64, Option<RaftId>)>> {
+        async fn load_hard_state(
+            &self,
+            from: RaftId,
+        ) -> StorageResult<Option<(u64, Option<RaftId>)>> {
             self.storage.load_hard_state(from).await
         }
 
-        async fn append_log_entries(&self, from: RaftId, entries: &[LogEntry]) -> StorageResult<()> {
+        async fn append_log_entries(
+            &self,
+            from: RaftId,
+            entries: &[LogEntry],
+        ) -> StorageResult<()> {
             self.storage.append_log_entries(from, entries).await
         }
 
-        async fn get_log_entries(&self, from: RaftId, low: u64, high: u64) -> StorageResult<Vec<LogEntry>> {
+        async fn get_log_entries(
+            &self,
+            from: RaftId,
+            low: u64,
+            high: u64,
+        ) -> StorageResult<Vec<LogEntry>> {
             self.storage.get_log_entries(from, low, high).await
         }
 
@@ -3886,7 +3943,11 @@ mod tests {
             self.storage.create_snapshot(from).await
         }
 
-        async fn save_cluster_config(&self, from: RaftId, conf: ClusterConfig) -> StorageResult<()> {
+        async fn save_cluster_config(
+            &self,
+            from: RaftId,
+            conf: ClusterConfig,
+        ) -> StorageResult<()> {
             self.storage.save_cluster_config(from, conf).await
         }
 
@@ -3927,7 +3988,12 @@ mod tests {
 
     #[async_trait]
     impl RaftCallbacks for TestCallbacks {
-        async fn client_response(&self, from: RaftId, request_id: RequestId, result: ClientResult<u64>) -> ClientResult<()> {
+        async fn client_response(
+            &self,
+            from: RaftId,
+            request_id: RequestId,
+            result: ClientResult<u64>,
+        ) -> ClientResult<()> {
             let mut responses = self.client_responses.lock().await;
             responses.push((from, request_id, result));
             Ok(())
@@ -3939,13 +4005,26 @@ mod tests {
             Ok(())
         }
 
-        async fn apply_command(&self, from: RaftId, index: u64, term: u64, cmd: Command) -> ApplyResult<()> {
+        async fn apply_command(
+            &self,
+            from: RaftId,
+            index: u64,
+            term: u64,
+            cmd: Command,
+        ) -> ApplyResult<()> {
             let mut commands = self.applied_commands.lock().await;
             commands.push((from, index, term, cmd));
             Ok(())
         }
 
-        async fn process_snapshot(&self, _from: RaftId, _index: u64, _term: u64, _data: Vec<u8>, _request_id: RequestId) -> SnapshotResult<()> {
+        async fn process_snapshot(
+            &self,
+            _from: RaftId,
+            _index: u64,
+            _term: u64,
+            _data: Vec<u8>,
+            _request_id: RequestId,
+        ) -> SnapshotResult<()> {
             Ok(())
         }
     }
@@ -3978,24 +4057,29 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let peer1 = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
-        
+
         let storage = Arc::new(MockStorage::new());
         let config = MockNetworkConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
-        
+
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
-        
+
         // 初始化集群配置
         let cluster_config = ClusterConfig::simple(
-            vec![node_id.clone(), peer1.clone(), peer2.clone()].into_iter().collect(),
-            0
+            vec![node_id.clone(), peer1.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
         );
-        storage.save_cluster_config(node_id.clone(), cluster_config).await.unwrap();
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
 
         let options = create_test_options(node_id.clone(), vec![peer1, peer2]);
         let raft_state = RaftState::new(options, callbacks).await;
-        
+
         assert!(raft_state.is_ok());
         let state = raft_state.unwrap();
         assert_eq!(state.get_role(), Role::Follower);
@@ -4007,30 +4091,35 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let peer1 = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
-        
+
         let storage = Arc::new(MockStorage::new());
         let config = MockNetworkConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
-        
+
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
-        
+
         // 初始化集群配置
         let cluster_config = ClusterConfig::simple(
-            vec![node_id.clone(), peer1.clone(), peer2.clone()].into_iter().collect(),
-            0
+            vec![node_id.clone(), peer1.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
         );
-        storage.save_cluster_config(node_id.clone(), cluster_config).await.unwrap();
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
 
         let options = create_test_options(node_id.clone(), vec![peer1, peer2]);
         let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
-        
+
         // 触发选举超时
         raft_state.handle_event(Event::ElectionTimeout).await;
-        
+
         // 应该变成候选人
         assert_eq!(raft_state.get_role(), Role::Candidate);
-        
+
         // 检查状态变更通知
         let state_changes = callbacks.state_changes.lock().await;
         assert!(!state_changes.is_empty());
@@ -4042,24 +4131,29 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let candidate_id = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
-        
+
         let storage = Arc::new(MockStorage::new());
         let config = MockNetworkConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
-        
+
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
-        
+
         // 初始化集群配置
         let cluster_config = ClusterConfig::simple(
-            vec![node_id.clone(), candidate_id.clone(), peer2.clone()].into_iter().collect(),
-            0
+            vec![node_id.clone(), candidate_id.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
         );
-        storage.save_cluster_config(node_id.clone(), cluster_config).await.unwrap();
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
 
         let options = create_test_options(node_id.clone(), vec![candidate_id.clone(), peer2]);
         let mut raft_state = RaftState::new(options, callbacks).await.unwrap();
-        
+
         // 创建投票请求
         let vote_request = RequestVoteRequest {
             term: 1,
@@ -4068,10 +4162,12 @@ mod tests {
             last_log_term: 0,
             request_id: RequestId::new(),
         };
-        
+
         // 处理投票请求
-        raft_state.handle_event(Event::RequestVoteRequest(vote_request)).await;
-        
+        raft_state
+            .handle_event(Event::RequestVoteRequest(vote_request))
+            .await;
+
         // 验证硬状态已更新（应该投票给候选人）
         let hard_state = storage.load_hard_state(node_id).await.unwrap();
         assert!(hard_state.is_some());
@@ -4085,24 +4181,29 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let leader_id = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
-        
+
         let storage = Arc::new(MockStorage::new());
         let config = MockNetworkConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
-        
+
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
-        
+
         // 初始化集群配置
         let cluster_config = ClusterConfig::simple(
-            vec![node_id.clone(), leader_id.clone(), peer2.clone()].into_iter().collect(),
-            0
+            vec![node_id.clone(), leader_id.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
         );
-        storage.save_cluster_config(node_id.clone(), cluster_config).await.unwrap();
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
 
         let options = create_test_options(node_id.clone(), vec![leader_id.clone(), peer2]);
         let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
-        
+
         // 创建日志条目
         let log_entry = LogEntry {
             term: 1,
@@ -4111,7 +4212,7 @@ mod tests {
             is_config: false,
             client_request_id: Some(RequestId::new()),
         };
-        
+
         // 创建 AppendEntries 请求
         let append_request = AppendEntriesRequest {
             term: 1,
@@ -4122,17 +4223,22 @@ mod tests {
             leader_commit: 1,
             request_id: RequestId::new(),
         };
-        
+
         // 处理 AppendEntries 请求
-        raft_state.handle_event(Event::AppendEntriesRequest(append_request)).await;
-        
+        raft_state
+            .handle_event(Event::AppendEntriesRequest(append_request))
+            .await;
+
         // 验证日志已存储
-        let stored_entries = storage.get_log_entries(node_id.clone(), 1, 2).await.unwrap();
+        let stored_entries = storage
+            .get_log_entries(node_id.clone(), 1, 2)
+            .await
+            .unwrap();
         assert!(!stored_entries.is_empty(), "Should have stored log entries");
         assert_eq!(stored_entries[0].term, 1);
         assert_eq!(stored_entries[0].index, 1);
         assert_eq!(stored_entries[0].command, vec![1, 2, 3]);
-        
+
         // 验证应用的命令 - 由于需要时间应用，我们检查是否有任何命令被应用
         let applied_commands = callbacks.applied_commands.lock().await;
         // 在测试环境中，命令可能还没有被应用，这是正常的
@@ -4144,58 +4250,70 @@ mod tests {
         let node1 = create_test_raft_id("test_group", "node1");
         let node2 = create_test_raft_id("test_group", "node2");
         let node3 = create_test_raft_id("test_group", "node3");
-        
+
         let storage = Arc::new(MockStorage::new());
         let config = MockNetworkConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node1.clone()).await;
-        
+
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
-        
+
         // 初始化集群配置
         let cluster_config = ClusterConfig::simple(
-            vec![node1.clone(), node2.clone(), node3.clone()].into_iter().collect(),
-            0
+            vec![node1.clone(), node2.clone(), node3.clone()]
+                .into_iter()
+                .collect(),
+            0,
         );
-        storage.save_cluster_config(node1.clone(), cluster_config).await.unwrap();
+        storage
+            .save_cluster_config(node1.clone(), cluster_config)
+            .await
+            .unwrap();
 
         let options = create_test_options(node1.clone(), vec![node2.clone(), node3.clone()]);
         let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
-        
+
         // 触发选举
         raft_state.handle_event(Event::ElectionTimeout).await;
         assert_eq!(raft_state.get_role(), Role::Candidate);
-        
+
         // 需要设置选举ID来匹配响应
         let current_election_id = raft_state.current_election_id.unwrap();
-        
+
         // 模拟收到投票响应
         let vote_response1 = RequestVoteResponse {
             term: 1,
             vote_granted: true,
             request_id: current_election_id,
         };
-        
+
         let vote_response2 = RequestVoteResponse {
             term: 1,
             vote_granted: true,
             request_id: current_election_id,
         };
-        
+
         // 处理投票响应
-        raft_state.handle_event(Event::RequestVoteResponse(node2, vote_response1)).await;
-        
+        raft_state
+            .handle_event(Event::RequestVoteResponse(node2, vote_response1))
+            .await;
+
         // 检查是否已经成为领导者（可能只需要一票就够了）
         if raft_state.get_role() != Role::Leader {
-            raft_state.handle_event(Event::RequestVoteResponse(node3, vote_response2)).await;
+            raft_state
+                .handle_event(Event::RequestVoteResponse(node3, vote_response2))
+                .await;
         }
-        
+
         // 验证最终成为领导者
         println!("Final role: {:?}", raft_state.get_role());
         // 在实际场景中，可能需要多数票才能成为领导者
         // 这里我们只验证选举逻辑没有出错
-        assert!(matches!(raft_state.get_role(), Role::Leader | Role::Candidate));
-        
+        assert!(matches!(
+            raft_state.get_role(),
+            Role::Leader | Role::Candidate
+        ));
+
         // 验证状态变更通知
         let state_changes = callbacks.state_changes.lock().await;
         assert!(!state_changes.is_empty());
@@ -4206,35 +4324,45 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let peer1 = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
-        
+
         let storage = Arc::new(MockStorage::new());
         let config = MockNetworkConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
-        
+
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
-        
+
         // 初始化集群配置
         let cluster_config = ClusterConfig::simple(
-            vec![node_id.clone(), peer1.clone(), peer2.clone()].into_iter().collect(),
-            0
+            vec![node_id.clone(), peer1.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
         );
-        storage.save_cluster_config(node_id.clone(), cluster_config).await.unwrap();
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
 
         let options = create_test_options(node_id.clone(), vec![peer1, peer2]);
         let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
-        
+
         // 模拟成为领导者
         raft_state.handle_event(Event::ElectionTimeout).await;
         // 这里需要手动设置为Leader来测试客户端请求处理
         // 在实际测试中，可能需要完整的选举流程
-        
+
         let command = vec![1, 2, 3, 4];
         let request_id = RequestId::new();
-        
+
         // 处理客户端提议
-        raft_state.handle_event(Event::ClientPropose { cmd: command.clone(), request_id }).await;
-        
+        raft_state
+            .handle_event(Event::ClientPropose {
+                cmd: command.clone(),
+                request_id,
+            })
+            .await;
+
         // 如果是领导者，应该有日志条目
         let stored_entries = storage.get_log_entries(node_id, 1, 2).await;
         if raft_state.get_role() == Role::Leader && stored_entries.is_ok() {
@@ -4252,32 +4380,43 @@ mod tests {
         let node2 = create_test_raft_id("test_group", "node2");
         let node3 = create_test_raft_id("test_group", "node3");
         let node4 = create_test_raft_id("test_group", "node4");
-        
+
         let storage = Arc::new(MockStorage::new());
         let config = MockNetworkConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node1.clone()).await;
-        
+
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
-        
+
         // 初始化集群配置
         let cluster_config = ClusterConfig::simple(
-            vec![node1.clone(), node2.clone(), node3.clone()].into_iter().collect(),
-            0
+            vec![node1.clone(), node2.clone(), node3.clone()]
+                .into_iter()
+                .collect(),
+            0,
         );
-        storage.save_cluster_config(node1.clone(), cluster_config).await.unwrap();
+        storage
+            .save_cluster_config(node1.clone(), cluster_config)
+            .await
+            .unwrap();
 
         let options = create_test_options(node1.clone(), vec![node2.clone(), node3.clone()]);
         let mut raft_state = RaftState::new(options, callbacks).await.unwrap();
-        
+
         // 新配置包含node4
         let new_voters = vec![node1.clone(), node2.clone(), node3.clone(), node4]
-            .into_iter().collect::<HashSet<_>>();
+            .into_iter()
+            .collect::<HashSet<_>>();
         let request_id = RequestId::new();
-        
+
         // 处理配置变更
-        raft_state.handle_event(Event::ChangeConfig { new_voters, request_id }).await;
-        
+        raft_state
+            .handle_event(Event::ChangeConfig {
+                new_voters,
+                request_id,
+            })
+            .await;
+
         // 检查是否创建了联合配置日志
         let stored_entries = storage.get_log_entries(node1, 1, 2).await;
         if stored_entries.is_ok() && raft_state.get_role() == Role::Leader {
@@ -4294,24 +4433,29 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let leader_id = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
-        
+
         let storage = Arc::new(MockStorage::new());
         let config = MockNetworkConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
-        
+
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
-        
+
         // 初始化集群配置
         let cluster_config = ClusterConfig::simple(
-            vec![node_id.clone(), leader_id.clone(), peer2.clone()].into_iter().collect(),
-            0
+            vec![node_id.clone(), leader_id.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
         );
-        storage.save_cluster_config(node_id.clone(), cluster_config).await.unwrap();
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
 
         let options = create_test_options(node_id.clone(), vec![leader_id.clone(), peer2]);
         let mut raft_state = RaftState::new(options, callbacks).await.unwrap();
-        
+
         // 创建快照安装请求
         let snapshot_request = InstallSnapshotRequest {
             term: 1,
@@ -4322,21 +4466,28 @@ mod tests {
             request_id: RequestId::new(),
             is_probe: false,
         };
-        
+
         // 处理快照安装
-        raft_state.handle_event(Event::InstallSnapshotRequest(snapshot_request.clone())).await;
-        
+        raft_state
+            .handle_event(Event::InstallSnapshotRequest(snapshot_request.clone()))
+            .await;
+
         // 验证快照处理（在实际实现中，业务层需要调用complete_snapshot_installation）
-        raft_state.complete_snapshot_installation(
-            snapshot_request.request_id,
-            true,
-            None,
-            snapshot_request.last_included_index,
-            snapshot_request.last_included_term,
-        ).await;
-        
+        raft_state
+            .complete_snapshot_installation(
+                snapshot_request.request_id,
+                true,
+                None,
+                snapshot_request.last_included_index,
+                snapshot_request.last_included_term,
+            )
+            .await;
+
         // 验证快照状态已更新
-        println!("Snapshot index: {}, term: {}", raft_state.last_snapshot_index, raft_state.last_snapshot_term);
+        println!(
+            "Snapshot index: {}, term: {}",
+            raft_state.last_snapshot_index, raft_state.last_snapshot_term
+        );
         // 快照安装可能需要更复杂的验证逻辑
         // 这里我们只验证没有发生错误
         assert!(raft_state.last_snapshot_index <= 10);
@@ -4347,34 +4498,39 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let peer1 = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
-        
+
         let storage = Arc::new(MockStorage::new());
         let config = MockNetworkConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
-        
+
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
-        
+
         // 初始化集群配置
         let cluster_config = ClusterConfig::simple(
-            vec![node_id.clone(), peer1.clone(), peer2.clone()].into_iter().collect(),
-            0
+            vec![node_id.clone(), peer1.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
         );
-        storage.save_cluster_config(node_id.clone(), cluster_config).await.unwrap();
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
 
         let options = create_test_options(node_id.clone(), vec![peer1, peer2]);
         let mut raft_state = RaftState::new(options, callbacks).await.unwrap();
-        
+
         // 触发选举并成为候选人
         raft_state.handle_event(Event::ElectionTimeout).await;
         assert_eq!(raft_state.get_role(), Role::Candidate);
-        
+
         // 手动成为领导者（在实际场景中需要收到足够的投票）
         // 这里我们通过处理心跳超时来测试领导者行为
         if raft_state.get_role() == Role::Leader {
             raft_state.handle_event(Event::HeartbeatTimeout).await;
         }
-        
+
         // 测试通过 - 如果没有panic，说明心跳处理正常
     }
 
@@ -4383,24 +4539,29 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let leader_id = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
-        
+
         let storage = Arc::new(MockStorage::new());
         let config = MockNetworkConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
-        
+
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
-        
+
         // 初始化集群配置
         let cluster_config = ClusterConfig::simple(
-            vec![node_id.clone(), leader_id.clone(), peer2.clone()].into_iter().collect(),
-            0
+            vec![node_id.clone(), leader_id.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
         );
-        storage.save_cluster_config(node_id.clone(), cluster_config).await.unwrap();
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
 
         let options = create_test_options(node_id.clone(), vec![leader_id.clone(), peer2]);
         let mut raft_state = RaftState::new(options, callbacks).await.unwrap();
-        
+
         // 先添加一些本地日志
         let local_entry = LogEntry {
             term: 1,
@@ -4409,8 +4570,11 @@ mod tests {
             is_config: false,
             client_request_id: Some(RequestId::new()),
         };
-        storage.append_log_entries(node_id.clone(), &[local_entry]).await.unwrap();
-        
+        storage
+            .append_log_entries(node_id.clone(), &[local_entry])
+            .await
+            .unwrap();
+
         // 创建冲突的 AppendEntries 请求（不同的prev_log_term）
         let conflicting_entry = LogEntry {
             term: 2,
@@ -4419,7 +4583,7 @@ mod tests {
             is_config: false,
             client_request_id: Some(RequestId::new()),
         };
-        
+
         let append_request = AppendEntriesRequest {
             term: 2,
             leader_id: leader_id.clone(),
@@ -4429,17 +4593,756 @@ mod tests {
             leader_commit: 1,
             request_id: RequestId::new(),
         };
-        
+
         // 处理冲突的 AppendEntries 请求
-        raft_state.handle_event(Event::AppendEntriesRequest(append_request)).await;
-        
+        raft_state
+            .handle_event(Event::AppendEntriesRequest(append_request))
+            .await;
+
         // 验证处理结果 - 在实际场景中，冲突解决可能很复杂
         let stored_entries = storage.get_log_entries(node_id, 1, 2).await.unwrap();
         println!("Stored entries count: {}", stored_entries.len());
         if !stored_entries.is_empty() {
-            println!("First entry term: {}, command: {:?}", stored_entries[0].term, stored_entries[0].command);
+            println!(
+                "First entry term: {}, command: {:?}",
+                stored_entries[0].term, stored_entries[0].command
+            );
             // 验证日志冲突处理逻辑
             assert!(stored_entries[0].term >= 1);
         }
+    }
+
+    // 1. 测试处理来自旧任期的 `RequestVoteRequest`
+    #[tokio::test]
+    async fn test_request_vote_from_old_term() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let candidate_id = create_test_raft_id("test_group", "node2");
+        let peer2 = create_test_raft_id("test_group", "node3");
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        // 初始化集群配置
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), candidate_id.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![candidate_id.clone(), peer2]);
+        let mut raft_state = RaftState::new(options, callbacks).await.unwrap();
+
+        // 设置 Raft 节点的当前任期为 2
+        raft_state.current_term = 2;
+        raft_state.role = Role::Follower; // 确保它不是 Candidate
+
+        // 创建一个来自旧任期 (term=1) 的投票请求
+        let old_term_vote_request = RequestVoteRequest {
+            term: 1, // 旧任期
+            candidate_id: candidate_id.clone(),
+            last_log_index: 0,
+            last_log_term: 0,
+            request_id: RequestId::new(),
+        };
+
+        // 处理旧任期的投票请求
+        raft_state
+            .handle_event(Event::RequestVoteRequest(old_term_vote_request))
+            .await;
+
+        // 验证节点的任期未被更改，且没有投票
+        assert_eq!(raft_state.current_term, 2);
+        assert_eq!(raft_state.voted_for, None);
+        // 验证是否发送了拒绝的响应（可以通过 MockNetwork 检查发送的消息）
+        // 这里简化处理，主要验证状态
+    }
+
+    // 2. 测试处理来自未来任期的 `RequestVoteRequest` 且日志不是最新的
+    #[tokio::test]
+    async fn test_request_vote_from_future_term_log_not_up_to_date() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let candidate_id = create_test_raft_id("test_group", "node2");
+        let peer2 = create_test_raft_id("test_group", "node3");
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        // 初始化集群配置
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), candidate_id.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![candidate_id.clone(), peer2]);
+        let mut raft_state = RaftState::new(options, callbacks).await.unwrap();
+
+        // 设置 Raft 节点的当前任期为 1，并添加一条索引为 2、任期为 1 的日志
+        raft_state.current_term = 1;
+        let local_entry = LogEntry {
+            term: 1,
+            index: 2, // 索引更大
+            command: vec![1, 1, 1],
+            is_config: false,
+            client_request_id: Some(RequestId::new()),
+        };
+        storage
+            .append_log_entries(node_id.clone(), &[local_entry])
+            .await
+            .unwrap();
+        // 更新 RaftState 的内存状态（如果需要）
+        raft_state.last_log_index = 2;
+        raft_state.last_log_term = 1;
+
+        // 创建一个来自未来任期 (term=2) 的投票请求，但其日志不如当前节点新
+        let future_term_vote_request = RequestVoteRequest {
+            term: 2, // 未来任期
+            candidate_id: candidate_id.clone(),
+            last_log_index: 1, // 候选人日志索引更小
+            last_log_term: 1,
+            request_id: RequestId::new(),
+        };
+
+        // 处理未来任期的投票请求
+        raft_state
+            .handle_event(Event::RequestVoteRequest(future_term_vote_request))
+            .await;
+
+        // 验证节点的任期更新为 2，角色变为 Follower，但未投票
+        assert_eq!(raft_state.current_term, 2);
+        assert_eq!(raft_state.role, Role::Follower);
+        assert_eq!(raft_state.voted_for, None); // 因为自己的日志更新
+        // 验证是否发送了拒绝的响应
+    }
+
+    // 3. 测试 Candidate 收到更高任期的 `RequestVoteResponse`（拒绝）
+    #[tokio::test]
+    async fn test_candidate_receive_higher_term_rejecting_vote_response() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let peer1 = create_test_raft_id("test_group", "node2");
+        let peer2 = create_test_raft_id("test_group", "node3");
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        // 初始化集群配置
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), peer1.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![peer1.clone(), peer2.clone()]);
+        let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
+
+        // 通过选举超时使其成为 Candidate
+        raft_state.handle_event(Event::ElectionTimeout).await;
+        assert_eq!(raft_state.role, Role::Candidate);
+        let candidate_term = raft_state.current_term;
+        
+        // 获取当前选举ID，确保投票响应能被正确处理
+        let current_election_id = raft_state.current_election_id.expect("Should have election ID after becoming candidate");
+
+        // 创建一个来自更高任期 (current_term + 1) 的拒绝投票响应
+        let higher_term_reject_response = RequestVoteResponse {
+            term: candidate_term + 1, // 更高任期
+            vote_granted: false,
+            request_id: current_election_id, // 使用正确的选举ID
+        };
+
+        // 处理该响应
+        raft_state
+            .handle_event(Event::RequestVoteResponse(
+                peer1.clone(), // 使用配置中的有效节点ID
+                higher_term_reject_response,
+            ))
+            .await;
+
+        // 验证节点角色变为 Follower，current_term 更新
+        assert_eq!(raft_state.role, Role::Follower);
+        assert_eq!(raft_state.current_term, candidate_term + 1);
+        // 验证状态变更通知
+        let state_changes = callbacks.state_changes.lock().await;
+        assert!(
+            state_changes
+                .iter()
+                .any(|&(_, role)| role == Role::Follower)
+        );
+    }
+
+    // 4. 测试 Leader 收到更高任期的 `AppendEntriesResponse`（失败）
+    #[tokio::test]
+    async fn test_leader_receive_higher_term_failing_append_entries_response() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let peer1 = create_test_raft_id("test_group", "node2");
+        let peer2 = create_test_raft_id("test_group", "node3");
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        // 初始化集群配置
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), peer1.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![peer1.clone(), peer2.clone()]);
+        let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
+
+        // 手动设置为 Leader (简化测试，跳过完整选举)
+        raft_state.role = Role::Leader;
+        raft_state.current_term = 2;
+        raft_state.leader_id = Some(node_id.clone());
+        // 初始化 Leader 的 next_index 和 match_index
+        raft_state.next_index.insert(peer1.clone(), 1);
+        raft_state.next_index.insert(peer2.clone(), 1);
+        raft_state.match_index.insert(peer1.clone(), 0);
+        raft_state.match_index.insert(peer2.clone(), 0);
+
+        // 记录初始任期
+        let initial_term = raft_state.current_term;
+
+        // 创建一个来自更高任期 (current_term + 1) 的失败追加条目响应
+        let higher_term_fail_response = AppendEntriesResponse {
+            conflict_index: None,
+            conflict_term: None,
+            term: initial_term + 1, // 更高任期 (3)
+            success: false,
+            matched_index: 0,
+            request_id: RequestId::new(),
+        };
+
+        // 处理该响应
+        raft_state
+            .handle_event(Event::AppendEntriesResponse(
+                peer1.clone(), // 发送者ID
+                higher_term_fail_response,
+            ))
+            .await;
+
+        // 验证节点角色变为 Follower，current_term 更新
+        assert_eq!(raft_state.role, Role::Follower);
+        assert_eq!(raft_state.current_term, initial_term + 1); // 应该是 3
+        assert_eq!(raft_state.leader_id, None);
+        // 验证状态变更通知
+        let state_changes = callbacks.state_changes.lock().await;
+        assert!(
+            state_changes
+                .iter()
+                .any(|&(_, role)| role == Role::Follower)
+        );
+    }
+
+    // 5. 测试 Follower 处理过期的 `AppendEntriesRequest`（`prev_log_index` < `last_snapshot_index` 且任期不匹配）
+    #[tokio::test]
+    async fn test_follower_handle_outdated_append_entries_prev_before_snapshot_term_mismatch() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let leader_id = create_test_raft_id("test_group", "node2");
+        let peer2 = create_test_raft_id("test_group", "node3");
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        // 初始化集群配置
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), leader_id.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![leader_id.clone(), peer2]);
+        let mut raft_state = RaftState::new(options, callbacks).await.unwrap();
+
+        // 设置快照状态
+        raft_state.last_snapshot_index = 5;
+        raft_state.last_snapshot_term = 1;
+        raft_state.current_term = 2; // 当前任期高于快照任期
+
+        // 创建一个 AppendEntriesRequest，prev_log_index < last_snapshot_index 且 prev_log_term != last_snapshot_term
+        let outdated_append_request = AppendEntriesRequest {
+            term: 2, // >= 当前任期
+            leader_id: leader_id.clone(),
+            prev_log_index: 3, // < last_snapshot_index (5)
+            prev_log_term: 2,  // != last_snapshot_term (1)
+            entries: vec![],   // 内容不重要
+            leader_commit: 0,
+            request_id: RequestId::new(),
+        };
+
+        // 处理该请求
+        raft_state
+            .handle_event(Event::AppendEntriesRequest(outdated_append_request))
+            .await;
+
+        // 验证返回的 AppendEntriesResponse 中 success 为 false
+        // 这需要检查 MockNetwork 发送的响应。这里假设网络调用会被捕获。
+        // 一种方法是检查 MockStorage 的 truncate_log_suffix 是否被调用（如果实现中尝试回滚），
+        // 或者更直接地，如果 handle_append_entries_request 的逻辑正确，它应该发送失败响应。
+        // 由于直接验证响应较复杂，我们可以通过检查 raft_state 的状态未因成功追加而改变来间接验证。
+        // 例如，last_log_index 应该仍然是快照索引或更高（如果有日志）。
+        assert_eq!(raft_state.last_snapshot_index, 5);
+        assert_eq!(raft_state.last_snapshot_term, 1);
+        // 如果没有日志，last_log_index 应该是快照索引
+        // assert_eq!(raft_state.get_last_log_index().await, 5);
+        // 角色应保持不变
+        assert_eq!(raft_state.role, Role::Follower);
+    }
+
+    // 6. 测试 Leader 处理 `AppendEntriesResponse` 时的日志冲突与回滚
+    // 注意：Raft 的标准实现通常是 Leader 不回滚自己的日志，而是让 Follower 通过冲突索引告诉 Leader 从哪里重试。
+    // 因此，这个测试更侧重于 Leader 根据 Follower 的失败响应（包含冲突索引）来调整 next_index。
+    // 假设 AppendEntriesResponse 包含一个 conflict_index 字段（您的代码中未明确显示，但这是常见做法）。
+    // 如果没有 conflict_index，Leader 通常会保守地将 next_index 减 1。
+    // 这里我们测试保守减 1 的情况。
+    #[tokio::test]
+    async fn test_leader_handle_append_entries_response_log_conflict_rollback_next_index() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let peer1 = create_test_raft_id("test_group", "node2");
+        let peer2 = create_test_raft_id("test_group", "node3");
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        // 初始化集群配置
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), peer1.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![peer1.clone(), peer2.clone()]);
+        let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
+
+        // 手动设置为 Leader
+        raft_state.role = Role::Leader;
+        raft_state.current_term = 2;
+        raft_state.leader_id = Some(node_id.clone());
+        // 添加一些日志
+        let log_entry1 = LogEntry {
+            term: 2,
+            index: 1,
+            command: vec![1],
+            is_config: false,
+            client_request_id: None,
+        };
+        let log_entry2 = LogEntry {
+            term: 2,
+            index: 2,
+            command: vec![2],
+            is_config: false,
+            client_request_id: None,
+        };
+        storage
+            .append_log_entries(node_id.clone(), &[log_entry1, log_entry2])
+            .await
+            .unwrap();
+        raft_state.last_log_index = 2;
+        raft_state.last_log_term = 2;
+
+        // 为 peer1 设置 next_index 和 match_index
+        raft_state.next_index.insert(peer1.clone(), 3); // 下一个要发送的是索引 3 (不存在)
+        raft_state.match_index.insert(peer1.clone(), 2); // peer1 已匹配到索引 2
+
+        // 模拟 peer1 发送一个 AppendEntriesResponse，success 为 false，表示索引 2 处冲突
+        // 假设响应中没有明确的 conflict_index，Leader 保守地将 next_index - 1
+        let failing_append_response = AppendEntriesResponse {
+            conflict_index: None,
+            conflict_term: None,
+            term: 2, // 任期相同
+            success: false,
+            matched_index: 1, // 假设 peer1 报告它只匹配到索引 1 (冲突点前一个)
+            request_id: RequestId::new(),
+        };
+
+        // 处理该响应
+        raft_state
+            .handle_event(Event::AppendEntriesResponse(
+                peer1.clone(),
+                failing_append_response,
+            ))
+            .await;
+
+        // 验证 Leader 更新了 peer1 的 next_index (应减小)
+        let updated_next_index = raft_state.next_index.get(&peer1).cloned().unwrap_or(0);
+        // 如果 matched_index 是 1，next_index 应该更新为 matched_index + 1 = 2
+        assert_eq!(updated_next_index, 2);
+        // match_index 也应该更新为 matched_index
+        assert_eq!(*raft_state.match_index.get(&peer1).unwrap(), 1);
+    }
+
+    // 7. 测试配置变更的超时处理
+    #[tokio::test]
+    async fn test_config_change_timeout_handling() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let peer1 = create_test_raft_id("test_group", "node2");
+        let peer2 = create_test_raft_id("test_group", "node3");
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        // 初始化集群配置
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), peer1.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![peer1.clone(), peer2.clone()]);
+        let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
+
+        // 手动设置为 Leader
+        raft_state.role = Role::Leader;
+        raft_state.current_term = 2;
+        raft_state.leader_id = Some(node_id.clone());
+
+        // 初始化 next_index 和 match_index (模拟其他节点已同步到联合配置日志)
+        raft_state.next_index.insert(peer1.clone(), 2);
+        raft_state.next_index.insert(peer2.clone(), 2);
+        raft_state.match_index.insert(peer1.clone(), 1); // 模拟 peer1 已同步到索引1
+        raft_state.match_index.insert(peer2.clone(), 1); // 模拟 peer2 已同步到索引1
+
+        // 模拟进入联合配置状态
+        let new_voters = vec![node_id.clone(), peer1.clone(), peer2.clone()]
+            .into_iter()
+            .collect();
+        raft_state
+            .config
+            .enter_joint(raft_state.config.voters.clone(), new_voters, 1)
+            .unwrap();
+        raft_state.config_change_in_progress = true;
+        raft_state.joint_config_log_index = 1;
+        // 设置超时时间 - 确保已经超过配置变更超时
+        raft_state.config_change_start_time =
+            Some(Instant::now() - raft_state.config_change_timeout - Duration::from_secs(1));
+
+        // 记录初始状态
+        let initial_joint_state = raft_state.config.is_joint();
+
+        // 触发配置变更超时事件
+        raft_state.handle_event(Event::ConfigChangeTimeout).await;
+
+        // 验证超时处理的效果：
+        // 1. 超时处理发现已超时，并且新旧配置都有多数派支持 (节点已同步到索引1)
+        // 2. 正常退出到新配置
+        // 3. 配置变更完成，config_change_in_progress 变为 false
+
+        assert!(initial_joint_state, "Initially should be in joint config");
+
+        // 由于多数派都已同步，超时处理应该完成配置变更
+        assert!(
+            !raft_state.config_change_in_progress,
+            "Config change should be completed after timeout with majority sync"
+        );
+
+        // 配置应该不再是联合状态
+        assert!(
+            !raft_state.config.is_joint(),
+            "Config should exit joint state after timeout"
+        );
+
+        // 角色应该仍然是 Leader（没有任期变化）
+        assert_eq!(raft_state.role, Role::Leader);
+
+        // 任期应该保持不变
+        assert_eq!(raft_state.current_term, 2);
+
+        // 验证超时处理没有导致 panic 且系统状态一致
+        assert!(raft_state.leader_id.is_some());
+    }
+
+    // 8. 测试快照探测计划的执行与失败
+    #[tokio::test]
+    async fn test_snapshot_probe_schedule_execution_and_failure() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let peer1 = create_test_raft_id("test_group", "node2");
+        let peer2 = create_test_raft_id("test_group", "node3");
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        // 初始化集群配置
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), peer1.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![peer1.clone(), peer2.clone()]);
+        let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
+
+        // 手动设置为 Leader
+        raft_state.role = Role::Leader;
+        raft_state.current_term = 2;
+        raft_state.leader_id = Some(node_id.clone());
+
+        // 为 peer1 设置快照状态为 Installing
+        raft_state
+            .follower_snapshot_states
+            .insert(peer1.clone(), InstallSnapshotState::Installing);
+        raft_state
+            .follower_last_snapshot_index
+            .insert(peer1.clone(), 10);
+        // 安排快照探测计划
+        let probe_schedule = SnapshotProbeSchedule {
+            peer: peer1.clone(),
+            next_probe_time: Instant::now(), // 立即可执行
+            interval: Duration::from_millis(50), // 使用较短的间隔方便测试
+            max_attempts: 3,
+            attempts: 0, // 初始尝试次数为 0
+        };
+        raft_state.snapshot_probe_schedules.push(probe_schedule);
+
+        // 模拟 `process_pending_probes` 被调用 (通过心跳超时触发)
+        // 首次调用，attempts 从 0 增加到 1
+        raft_state.handle_event(Event::HeartbeatTimeout).await;
+        // 检查 attempts 是否增加 (需要访问内部状态，这里通过检查 probe_time 是否更新来间接验证)
+        // 更直接的方法是检查是否发送了探测请求或 attempts 字段
+        // 假设 `process_pending_probes` 会更新 attempts
+        let updated_schedule = raft_state
+            .snapshot_probe_schedules
+            .iter()
+            .find(|s| s.peer == peer1)
+            .unwrap();
+        assert_eq!(updated_schedule.attempts, 1);
+
+        // 再次模拟超时，增加到 2
+        sleep(Duration::from_millis(100)).await; // 确保下次探测时间已到
+        raft_state.handle_event(Event::HeartbeatTimeout).await;
+        let updated_schedule = raft_state
+            .snapshot_probe_schedules
+            .iter()
+            .find(|s| s.peer == peer1)
+            .unwrap();
+        assert_eq!(updated_schedule.attempts, 2);
+
+        // 第三次模拟超时，达到 max_attempts (3)
+        sleep(Duration::from_millis(100)).await;
+        raft_state.handle_event(Event::HeartbeatTimeout).await;
+        let updated_schedule = raft_state
+            .snapshot_probe_schedules
+            .iter()
+            .find(|s| s.peer == peer1);
+        // 验证探测计划是否被移除 (因为达到最大尝试次数)
+        assert!(updated_schedule.is_none());
+        // 验证 follower 状态是否标记为 Failed (如果实现中有此逻辑)
+        // 假设 `process_pending_probes` 在达到 max_attempts 后会移除计划
+        // 如果有状态标记，可以在这里检查
+    }
+
+    // 9. 测试 Follower 完成快照安装后状态的正确性
+    #[tokio::test]
+    async fn test_follower_complete_snapshot_installation_state_correctness() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let leader_id = create_test_raft_id("test_group", "node2");
+        let peer2 = create_test_raft_id("test_group", "node3");
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        // 初始化集群配置
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), leader_id.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![leader_id.clone(), peer2.clone()]);
+        let mut raft_state = RaftState::new(options, callbacks).await.unwrap();
+
+        // 模拟处理一个非探测的 InstallSnapshotRequest
+        // 创建一个有效的 ClusterConfig 作为快照数据
+        let snap_config = ClusterConfig::simple(
+            vec![node_id.clone(), leader_id.clone(), peer2]
+                .into_iter()
+                .collect(),
+            0,
+        );
+        let snapshot_data = bincode::serialize(&snap_config).unwrap();
+        
+        let snapshot_request = InstallSnapshotRequest {
+            term: 1,
+            leader_id: leader_id.clone(),
+            last_included_index: 10,
+            last_included_term: 1,
+            data: snapshot_data,
+            request_id: RequestId::new(), // 使用特定 ID 以便验证
+            is_probe: false,
+        };
+        let request_id = snapshot_request.request_id.clone();
+
+        raft_state
+            .handle_event(Event::InstallSnapshotRequest(snapshot_request.clone()))
+            .await;
+
+        // 验证 RaftState 内部状态是否正确设置 (例如 current_snapshot_request_id)
+        assert_eq!(
+            raft_state.current_snapshot_request_id,
+            Some(request_id.clone())
+        );
+
+        // 调用 complete_snapshot_installation
+        let new_last_applied_index = snapshot_request.last_included_index;
+        let new_last_applied_term = snapshot_request.last_included_term;
+        raft_state
+            .complete_snapshot_installation(
+                request_id.clone(),
+                true, // success
+                None, // snapshot_data (如果需要)
+                new_last_applied_index,
+                new_last_applied_term,
+            )
+            .await;
+
+        // 验证 RaftState 状态是否正确更新
+        assert_eq!(raft_state.last_snapshot_index, new_last_applied_index);
+        assert_eq!(raft_state.last_snapshot_term, new_last_applied_term);
+        // commit_index 和 last_applied 通常也会更新到快照点或之后
+        assert!(raft_state.commit_index >= new_last_applied_index);
+        assert!(raft_state.last_applied >= new_last_applied_index);
+        // 验证 current_snapshot_request_id 是否被清除
+        assert_eq!(raft_state.current_snapshot_request_id, None);
+        // 验证角色是否保持 Follower (或根据实现可能不变)
+        assert_eq!(raft_state.role, Role::Follower);
+    }
+
+    // 10. 测试非领导者节点处理 `InstallSnapshotRequest`（探测）
+    #[tokio::test]
+    async fn test_non_leader_handle_install_snapshot_request_probe() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let leader_id = create_test_raft_id("test_group", "node2");
+        let peer2 = create_test_raft_id("test_group", "node3");
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await; // follower network
+        let (_leader_network, mut leader_rx) = hub.register_node(leader_id.clone()).await; // leader network for receiving responses
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        // 初始化集群配置
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), leader_id.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![leader_id.clone(), peer2]);
+        let mut raft_state = RaftState::new(options, callbacks).await.unwrap();
+
+        // 设置节点为 Follower (默认就是)
+        raft_state.role = Role::Follower;
+        raft_state.current_term = 1;
+
+        // 也可以测试 Candidate 状态
+        // raft_state.role = Role::Candidate;
+
+        // 创建一个探测快照请求
+        let probe_snapshot_request = InstallSnapshotRequest {
+            term: 1, // 与当前任期相同
+            leader_id: leader_id.clone(),
+            last_included_index: 5,
+            last_included_term: 1,
+            data: vec![], // 探测请求通常数据为空
+            request_id: RequestId::new(),
+            is_probe: true, // 标记为探测
+        };
+
+        // 处理探测请求
+        raft_state
+            .handle_event(Event::InstallSnapshotRequest(
+                probe_snapshot_request.clone(),
+            ))
+            .await;
+
+        // 验证是否发送了 InstallSnapshotResponse
+        // 从 MockNetwork 的接收端读取消息 (leader 端)
+        let resp_event = timeout(Duration::from_millis(100), leader_rx.recv()).await;
+        assert!(resp_event.is_ok(), "Should have received a response");
+        let event = resp_event.unwrap();
+        match event {
+            Some(mock_network::NetworkEvent::InstallSnapshotResponse(resp)) => {
+                // 验证响应内容，例如 term 和 success (具体取决于 handle_install_snapshot_request_probe 的实现)
+                assert_eq!(resp.term, 1);
+                // 探测响应的 success 通常表示 follower 是否需要快照或其状态
+                // 这里假设如果 follower 的状态允许接收快照，则返回 true
+                // 具体逻辑需根据实现调整
+                // assert_eq!(resp.success, true/false based on logic);
+            }
+            _ => panic!("Expected InstallSnapshotResponse"),
+        }
+
+        // 验证节点状态未发生不应有的改变
+        assert_eq!(raft_state.role, Role::Follower); // Candidate 如果收到探测且任期不高，不应变 Follower
+        assert_eq!(raft_state.current_term, 1);
+        // current_snapshot_request_id 不应因探测而设置
+        assert_eq!(raft_state.current_snapshot_request_id, None);
     }
 }
