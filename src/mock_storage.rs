@@ -26,6 +26,21 @@ impl MockStorage {
 
 #[async_trait]
 impl Storage for MockStorage {
+    async fn get_log_entries_term(
+        &self,
+        _from: RaftId,
+        low: u64,
+        high: u64,
+    ) -> StorageResult<Vec<(u64, u64)>> {
+        let log = self.log.read().unwrap();
+        let entries: Vec<(u64, u64)> = log
+            .iter()
+            .filter(|e| e.index >= low && e.index < high)
+            .map(|e| (e.index, e.term))
+            .collect();
+        Ok(entries)
+    }
+
     async fn save_hard_state(
         &self,
         _from: RaftId,

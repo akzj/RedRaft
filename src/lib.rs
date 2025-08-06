@@ -592,6 +592,43 @@ pub trait Network: Send + Sync {
 }
 
 #[async_trait]
+/// The `Storage` trait defines the interface for persistent storage required by a Raft node.
+/// Implementors of this trait are responsible for storing and retrieving Raft state, log entries,
+/// snapshots, and cluster configuration in a thread-safe and asynchronous manner.
+///
+/// All methods are asynchronous and must be safe to call from multiple threads concurrently.
+///
+/// # Methods
+///
+/// - `save_hard_state`: Persist the current term and the candidate voted for by this node.
+/// - `load_hard_state`: Load the persisted term and voted-for candidate for this node.
+/// - `append_log_entries`: Append a slice of log entries to the log.
+/// - `get_log_entries`: Retrieve a range of log entries by index (inclusive of `low`, exclusive of `high`).
+/// - `get_log_entries_term`: Retrieve a range of log entry indices and their terms.
+/// - `truncate_log_suffix`: Remove all log entries after the given index (inclusive).
+/// - `truncate_log_prefix`: Remove all log entries before the given index (exclusive).
+/// - `get_last_log_index`: Get the last log index and its term.
+/// - `get_log_term`: Get the term for a specific log index.
+/// - `save_snapshot`: Persist a snapshot of the state machine.
+/// - `load_snapshot`: Load the latest snapshot, if any.
+/// - `create_snapshot`: Create a new snapshot and return its index and term.
+/// - `save_cluster_config`: Persist the current cluster configuration.
+/// - `load_cluster_config`: Load the persisted cluster configuration.
+///
+/// # Parameters
+///
+/// - `from`: The Raft node identifier for which the operation is performed.
+/// - `term`: The current term to persist.
+/// - `voted_for`: The candidate voted for in the current term.
+/// - `entries`: The log entries to append.
+/// - `low`, `high`: The range of log indices to retrieve.
+/// - `idx`: The log index for truncation or term retrieval.
+/// - `snap`: The snapshot to persist.
+/// - `conf`: The cluster configuration to persist.
+///
+/// # Returns
+///
+/// All methods return a `StorageResult` indicating success or failure, with the appropriate result type.
 pub trait Storage: Send + Sync {
     async fn save_hard_state(
         &self,
@@ -610,6 +647,13 @@ pub trait Storage: Send + Sync {
         low: u64,
         high: u64,
     ) -> StorageResult<Vec<LogEntry>>;
+
+    async fn get_log_entries_term(
+        &self,
+        from: RaftId,
+        low: u64,
+        high: u64,
+    ) -> StorageResult<Vec<(u64, u64)>>;
 
     async fn truncate_log_suffix(&self, from: RaftId, idx: u64) -> StorageResult<()>;
 
@@ -2194,18 +2238,21 @@ impl RaftState {
 
                 // 第一遍：查找冲突任期的最后一个索引
                 for i in (1..=start_index).rev() {
-                    match storage.get_log_entries(self.id.clone(), i, i + 1).await {
+                    match storage
+                        .get_log_entries_term(self.id.clone(), i, i + 1)
+                        .await
+                    {
                         Ok(entries) if !entries.is_empty() => {
                             debug!(
                                 "Checking index {} with term {} for peer {}",
-                                i, entries[0].term, peer
+                                i, entries[0].1, peer
                             );
 
-                            if entries[0].term == conflict_term {
+                            if entries[0].1 == conflict_term {
                                 // 记录冲突任期的最后一个索引
                                 last_conflict_term_index = Some(i);
                                 break; // 反向遍历，找到第一个即最后一个
-                            } else if entries[0].term < conflict_term {
+                            } else if entries[0].1 < conflict_term {
                                 // 任期小于冲突任期，无需继续查找
                                 break;
                             }
@@ -3985,6 +4032,15 @@ mod tests {
             high: u64,
         ) -> StorageResult<Vec<LogEntry>> {
             self.storage.get_log_entries(from, low, high).await
+        }
+
+        async fn get_log_entries_term(
+            &self,
+            from: RaftId,
+            low: u64,
+            high: u64,
+        ) -> StorageResult<Vec<(u64, u64)>> {
+            self.storage.get_log_entries_term(from, low, high).await
         }
 
         async fn truncate_log_suffix(&self, from: RaftId, idx: u64) -> StorageResult<()> {
