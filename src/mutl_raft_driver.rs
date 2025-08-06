@@ -17,7 +17,7 @@ use std::sync::atomic::AtomicU8;
 
 use crate::{
     AppendEntriesRequest, AppendEntriesResponse, Event, InstallSnapshotRequest,
-    InstallSnapshotResponse, RaftId, RaftState, RequestVoteRequest, RequestVoteResponse,
+    InstallSnapshotResponse, RaftId, RaftState, RequestVoteRequest, RequestVoteResponse, RpcResult,
 };
 
 // 原子RaftGroupStatus包装器
@@ -68,26 +68,6 @@ impl AtomicRaftNodeStatus {
     }
 }
 
-#[async_trait::async_trait]
-pub trait Network: Send + Sync {
-    async fn send_request_vote(
-        &self,
-        target: RaftId,
-        args: RequestVoteRequest,
-    ) -> RequestVoteResponse;
-
-    async fn send_append_entries(
-        &self,
-        target: RaftId,
-        args: AppendEntriesRequest,
-    ) -> AppendEntriesResponse;
-
-    async fn send_install_snapshot(
-        &self,
-        target: RaftId,
-        args: InstallSnapshotRequest,
-    ) -> InstallSnapshotResponse;
-}
 
 #[derive(Debug)]
 struct TimerEvent {
