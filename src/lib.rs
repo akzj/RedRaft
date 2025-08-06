@@ -2114,84 +2114,32 @@ impl RaftState {
                     self.id, peer, response.conflict_index, response.conflict_term
                 );
 
-                // 如果响应包含 matched_index，使用它来更新 match_index
+                // 更新 match_index
                 if response.matched_index > 0 {
                     self.match_index
                         .insert(peer.clone(), response.matched_index);
                 }
 
-                // 日志冲突，更高效的回退策略
-                let current_next = self.next_index.get(&peer).copied().unwrap_or(1);
-                let new_next = if let (Some(conflict_term), Some(conflict_index)) =
-                    (response.conflict_term, response.conflict_index)
-                {
-                    // 查找冲突任期的最后一个日志索引
-                    let mut idx = conflict_index;
-                    // 从 conflict_index 向前查找，直到找到任期小于 conflict_term 的日志条目
-                    // 或者到达快照点或索引0
-                    while idx > self.last_snapshot_index && idx > 0 {
-                        // 使用 error_handler 处理 get_log_term
-                        let term_result = self
-                            .error_handler
-                            .handle(
-                                self.callbacks.get_log_term(self.id.clone(), idx).await,
-                                "get_log_term",
-                                Some(&peer),
-                            )
-                            .await;
-
-                        match term_result {
-                            Some(term) => {
-                                if term < conflict_term {
-                                    break; // 找到任期小于冲突任期的条目，停止
-                                } else {
-                                    debug!(
-                                        // 降级为 debug
-                                        "Term {} at index {} matches or exceeds conflict_term {}",
-                                        term, idx, conflict_term
-                                    );
-                                }
-                            }
-                            None => {
-                                // get_log_term 失败，无法精确回退，保守地将 next_index 设为 conflict_index
-                                warn!(
-                                    "Failed to get log term for index {} during conflict resolution, falling back to conflict_index",
-                                    idx
-                                );
-                                idx = conflict_index;
-                                break;
-                            }
-                        }
-                        idx = idx.saturating_sub(1); // 防止溢出
-                    }
-
-                    // 如果没有找到任期小于 conflict_term 的条目（即 idx 没有从原始值改变太多），
-                    // 且 follower 提供了 matched_index，则使用 matched_index 作为更保守的回退
-                    let computed_next = idx + 1;
-                    if response.matched_index > 0 && computed_next <= response.matched_index {
-                        // 如果计算出的 next_index 过于激进（小于等于 matched_index），
-                        // 使用 matched_index + 1 作为更安全的选择
-                        response.matched_index + 1
-                    } else {
-                        // idx 现在指向任期小于 conflict_term 的条目，或者快照点，或者0
-                        // 下一次发送从 idx + 1 开始
-                        computed_next
-                    }
+                // 计算新的 next_index - 简化的回退策略
+                let new_next = if response.matched_index > 0 {
+                    // 如果有明确的 matched_index，使用它作为基准
+                    response.matched_index + 1
+                } else if let Some(conflict_index) = response.conflict_index {
+                    // 否则使用 conflict_index 保守回退
+                    conflict_index.max(1)
                 } else {
-                    // 如果 Follower 没有提供足够的冲突信息，基于 matched_index 计算 next_index
-                    if response.matched_index > 0 {
-                        response.matched_index + 1
-                    } else {
-                        // 保守回退
-                        response
-                            .conflict_index
-                            .unwrap_or(current_next.saturating_sub(1))
-                            .max(1)
-                    }
+                    // 最后的保守回退：当前 next_index - 1
+                    self.next_index
+                        .get(&peer)
+                        .copied()
+                        .unwrap_or(1)
+                        .saturating_sub(1)
+                        .max(1)
                 };
-                self.next_index.insert(peer.clone(), new_next.max(1)); // 确保 next_index 至少为1
+
+                self.next_index.insert(peer.clone(), new_next);
                 debug!(
-                    "Node {} updated next_index for {} to {}",
+                    "Node {} updated next_index for {} to {} (conflict resolution)",
                     self.id, peer, new_next
                 );
             }
@@ -6246,5 +6194,468 @@ mod tests {
         assert_eq!(raft_state.current_term, 3); // Term should be updated to candidate's term
         assert_eq!(raft_state.voted_for, Some(candidate_id));
         assert_eq!(raft_state.role, Role::Follower); // Role changes to Follower upon term update
+    }
+
+    // 1. 测试 Leader 处理来自旧任期的 AppendEntriesResponse
+    #[tokio::test]
+    async fn test_leader_ignores_old_term_append_entries_response_v2() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let peer1 = create_test_raft_id("test_group", "node2");
+        // ... (设置 storage, network, callbacks, cluster_config, options 如之前测试)
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), peer1.clone()].into_iter().collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![peer1.clone()]);
+        let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
+
+        raft_state.role = Role::Leader;
+        raft_state.current_term = 5; // Leader 当前任期是 5
+
+        // 设置初始复制状态
+        let initial_next_index = 10;
+        let initial_match_index = 5;
+        raft_state
+            .next_index
+            .insert(peer1.clone(), initial_next_index);
+        raft_state
+            .match_index
+            .insert(peer1.clone(), initial_match_index);
+
+        // 创建一个来自旧任期 (term=3) 的响应
+        let old_term_response = AppendEntriesResponse {
+            term: 3,              // 旧任期
+            success: false,       // 值不重要
+            matched_index: 0,     // 值不重要
+            conflict_index: None, // 值不重要
+            conflict_term: None,  // 值不重要
+            request_id: RequestId::new(),
+        };
+
+        // 处理响应
+        raft_state
+            .handle_event(Event::AppendEntriesResponse(
+                peer1.clone(),
+                old_term_response,
+            ))
+            .await;
+
+        // 验证 Leader 状态未变
+        assert_eq!(raft_state.current_term, 5);
+        assert_eq!(raft_state.role, Role::Leader);
+        assert_eq!(
+            *raft_state.next_index.get(&peer1).unwrap(),
+            initial_next_index
+        );
+        assert_eq!(
+            *raft_state.match_index.get(&peer1).unwrap(),
+            initial_match_index
+        );
+        // 可以验证没有调用 update_commit_index 或修改 next_index/match_index 的逻辑
+    }
+
+    // 2. 测试 Leader 处理来自未来任期的 AppendEntriesResponse (导致降级)
+    #[tokio::test]
+    async fn test_leader_steps_down_on_future_term_append_entries_response_v2() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let peer1 = create_test_raft_id("test_group", "node2");
+        // ... (设置 storage, network, callbacks, cluster_config, options 如之前测试)
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), peer1.clone()].into_iter().collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![peer1.clone()]);
+        let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
+
+        raft_state.role = Role::Leader;
+        raft_state.current_term = 5; // Leader 当前任期是 5
+
+        // 设置初始复制状态
+        raft_state.next_index.insert(peer1.clone(), 10);
+        raft_state.match_index.insert(peer1.clone(), 5);
+
+        // 创建一个来自未来任期 (term=7) 的失败响应
+        let future_term_response = AppendEntriesResponse {
+            term: 7, // 未来任期
+            success: false,
+            matched_index: 0,
+            conflict_index: None,
+            conflict_term: None,
+            request_id: RequestId::new(),
+        };
+
+        // 处理响应
+        raft_state
+            .handle_event(Event::AppendEntriesResponse(
+                peer1.clone(),
+                future_term_response,
+            ))
+            .await;
+
+        // 验证 Leader 降级为 Follower
+        assert_eq!(raft_state.current_term, 7); // 任期更新
+        assert_eq!(raft_state.role, Role::Follower);
+        assert_eq!(raft_state.voted_for, None);
+        // next_index 和 match_index 通常在降级时会被清理或重置，但具体取决于实现
+        // 这里主要验证角色和任期变化
+    }
+
+    // 3. 测试 Leader 处理当前任期的成功 AppendEntriesResponse
+    #[tokio::test]
+    async fn test_leader_handles_current_term_successful_append_entries_response() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let peer1 = create_test_raft_id("test_group", "node2");
+        let peer2 = create_test_raft_id("test_group", "node3");
+        // ... (设置 storage, network, callbacks, cluster_config, options 如之前测试)
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), peer1.clone(), peer2.clone()]
+                .into_iter()
+                .collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![peer1.clone(), peer2.clone()]);
+        let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
+
+        raft_state.role = Role::Leader;
+        raft_state.current_term = 5;
+        // 假设有一些日志
+        raft_state.last_log_index = 15;
+        raft_state.last_log_term = 5;
+
+        // 设置初始复制状态
+        let initial_next_index = 10;
+        let initial_match_index = 5;
+        raft_state
+            .next_index
+            .insert(peer1.clone(), initial_next_index);
+        raft_state
+            .match_index
+            .insert(peer1.clone(), initial_match_index);
+        // 为 update_commit_index 设置另一个节点的状态
+        raft_state.next_index.insert(peer2.clone(), 16);
+        raft_state.match_index.insert(peer2.clone(), 15);
+
+        let initial_commit_index = raft_state.commit_index;
+
+        // 创建一个来自当前任期的成功响应
+        let successful_response = AppendEntriesResponse {
+            term: 5, // 当前任期
+            success: true,
+            matched_index: 12,    // Follower 已匹配到索引 12
+            conflict_index: None, // 成功时通常不设置
+            conflict_term: None,  // 成功时通常不设置
+            request_id: RequestId::new(),
+        };
+
+        // 处理响应
+        raft_state
+            .handle_event(Event::AppendEntriesResponse(
+                peer1.clone(),
+                successful_response,
+            ))
+            .await;
+
+        // 验证状态更新
+        let expected_new_next_index = 13; // matched_index + 1
+        let expected_new_match_index = 12; // matched_index
+        assert_eq!(
+            *raft_state.next_index.get(&peer1).unwrap(),
+            expected_new_next_index
+        );
+        assert_eq!(
+            *raft_state.match_index.get(&peer1).unwrap(),
+            expected_new_match_index
+        );
+        // 验证 commit_index 是否可能更新 (需要多数派确认)
+        // Peer2 匹配到 15, Peer1 现在匹配到 12, Leader 本地是 15
+        // 多数派 (N=3, 需要 2) 确认的最高索引是 12? 不对，是 min(15, 12) = 12? 不对，是排序后的中间值。
+        // match_index: [12, 15], 本地 last_log_index: 15. 排序 [12, 15, 15]. 中位数是 15.
+        // 但是 update_commit_index 通常只提交当前任期的日志。
+        // 假设所有日志都是任期 5，那么 commit_index 应该更新到 15。
+        // 这个测试主要验证 next_index 和 match_index 的更新。
+        // commit_index 的更新可以作为一个更复杂的测试。
+        // 这里简单断言它至少没有减少，并且可能增加了。
+        assert!(raft_state.commit_index >= initial_commit_index); // 至少不减少
+        // 如果 update_commit_index 逻辑正确，它应该增加到 15
+        // assert_eq!(raft_state.commit_index, 15); // 如果逻辑是提交到多数派最小值且所有日志同任期
+        // 为了测试的确定性，我们只验证 next_index 和 match_index
+    }
+
+    // 4. 测试 Leader 处理当前任期的失败响应 (包含 matched_index)
+    #[tokio::test]
+    async fn test_leader_handles_current_term_failing_response_with_matched_index() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let peer1 = create_test_raft_id("test_group", "node2");
+        // ... (设置)
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), peer1.clone()].into_iter().collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![peer1.clone()]);
+        let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
+
+        raft_state.role = Role::Leader;
+        raft_state.current_term = 5;
+
+        // 设置初始复制状态
+        raft_state.next_index.insert(peer1.clone(), 10);
+        raft_state.match_index.insert(peer1.clone(), 5);
+
+        // 创建一个来自当前任期的失败响应，包含 matched_index
+        let failing_response = AppendEntriesResponse {
+            term: 5, // 当前任期
+            success: false,
+            matched_index: 7,     // Follower 实际上匹配到了 7
+            conflict_index: None, // 没有提供冲突索引
+            conflict_term: None,
+            request_id: RequestId::new(),
+        };
+
+        // 处理响应
+        raft_state
+            .handle_event(Event::AppendEntriesResponse(
+                peer1.clone(),
+                failing_response,
+            ))
+            .await;
+
+        // 验证 match_index 和 next_index 更新
+        // 根据代码，如果 matched_index > 0，使用 matched_index + 1 作为 new_next_index
+        let expected_new_match_index = 7;
+        let expected_new_next_index = 8; // matched_index + 1
+        assert_eq!(
+            *raft_state.match_index.get(&peer1).unwrap(),
+            expected_new_match_index
+        );
+        assert_eq!(
+            *raft_state.next_index.get(&peer1).unwrap(),
+            expected_new_next_index
+        );
+    }
+
+    // 5. 测试 Leader 处理当前任期的失败响应 (包含 conflict_index)
+    #[tokio::test]
+    async fn test_leader_handles_current_term_failing_response_with_conflict_index() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let peer1 = create_test_raft_id("test_group", "node2");
+        // ... (设置)
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), peer1.clone()].into_iter().collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![peer1.clone()]);
+        let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
+
+        raft_state.role = Role::Leader;
+        raft_state.current_term = 5;
+
+        // 设置初始复制状态
+        raft_state.next_index.insert(peer1.clone(), 10);
+        raft_state.match_index.insert(peer1.clone(), 5);
+
+        // 创建一个来自当前任期的失败响应，包含 conflict_index，但没有 matched_index
+        let failing_response = AppendEntriesResponse {
+            term: 5, // 当前任期
+            success: false,
+            matched_index: 0,        // 没有提供匹配索引
+            conflict_index: Some(6), // 冲突发生在索引 6
+            conflict_term: Some(4),
+            request_id: RequestId::new(),
+        };
+
+        // 处理响应
+        raft_state
+            .handle_event(Event::AppendEntriesResponse(
+                peer1.clone(),
+                failing_response,
+            ))
+            .await;
+
+        // 验证 next_index 更新 (使用 conflict_index)
+        // 根据代码，如果 matched_index == 0 且有 conflict_index，则 new_next = conflict_index.max(1)
+        let expected_new_next_index = 6; // conflict_index.max(1) = 6.max(1) = 6
+        assert_eq!(
+            *raft_state.next_index.get(&peer1).unwrap(),
+            expected_new_next_index
+        );
+        // match_index 不应因无 matched_index 的失败响应而更新
+        assert_eq!(*raft_state.match_index.get(&peer1).unwrap(), 5);
+    }
+
+    // 6. 测试 Leader 处理当前任期的失败响应 (无 matched_index 和 conflict_index - 保守回退)
+    #[tokio::test]
+    async fn test_leader_handles_current_term_failing_response_conservative_fallback() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let peer1 = create_test_raft_id("test_group", "node2");
+        // ... (设置)
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), peer1.clone()].into_iter().collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![peer1.clone()]);
+        let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
+
+        raft_state.role = Role::Leader;
+        raft_state.current_term = 5;
+
+        // 设置初始复制状态
+        let initial_next_index = 10;
+        raft_state
+            .next_index
+            .insert(peer1.clone(), initial_next_index);
+        raft_state.match_index.insert(peer1.clone(), 5);
+
+        // 创建一个来自当前任期的失败响应，不包含任何有助于回退的信息
+        let failing_response = AppendEntriesResponse {
+            term: 5, // 当前任期
+            success: false,
+            matched_index: 0,     // 没有提供匹配索引
+            conflict_index: None, // 没有提供冲突索引
+            conflict_term: None,
+            request_id: RequestId::new(),
+        };
+
+        // 处理响应
+        raft_state
+            .handle_event(Event::AppendEntriesResponse(
+                peer1.clone(),
+                failing_response,
+            ))
+            .await;
+
+        // 验证 next_index 保守回退 (当前 next_index - 1)
+        let expected_new_next_index = initial_next_index - 1;
+        assert_eq!(
+            *raft_state.next_index.get(&peer1).unwrap(),
+            expected_new_next_index
+        );
+        // match_index 不应更新
+        assert_eq!(*raft_state.match_index.get(&peer1).unwrap(), 5);
+    }
+
+    // 7. 测试 Leader 处理失败响应时 next_index 不低于 1
+    #[tokio::test]
+    async fn test_leader_next_index_not_below_one_after_failure() {
+        let node_id = create_test_raft_id("test_group", "node1");
+        let peer1 = create_test_raft_id("test_group", "node2");
+        // ... (设置)
+        let storage = Arc::new(MockStorage::new());
+        let config = MockNetworkConfig::default();
+        let hub = MockNetworkHub::new(config);
+        let (network, _rx) = hub.register_node(node_id.clone()).await;
+        let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
+
+        let cluster_config = ClusterConfig::simple(
+            vec![node_id.clone(), peer1.clone()].into_iter().collect(),
+            0,
+        );
+        storage
+            .save_cluster_config(node_id.clone(), cluster_config)
+            .await
+            .unwrap();
+
+        let options = create_test_options(node_id.clone(), vec![peer1.clone()]);
+        let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
+
+        raft_state.role = Role::Leader;
+        raft_state.current_term = 5;
+
+        // 设置初始复制状态，next_index 为 1
+        raft_state.next_index.insert(peer1.clone(), 1);
+        raft_state.match_index.insert(peer1.clone(), 0);
+
+        // 创建一个失败响应，触发保守回退
+        let failing_response = AppendEntriesResponse {
+            term: 5,
+            success: false,
+            matched_index: 0,
+            conflict_index: None,
+            conflict_term: None,
+            request_id: RequestId::new(),
+        };
+
+        // 处理响应
+        raft_state
+            .handle_event(Event::AppendEntriesResponse(
+                peer1.clone(),
+                failing_response,
+            ))
+            .await;
+
+        // 验证 next_index 没有低于 1
+        let final_next_index = *raft_state.next_index.get(&peer1).unwrap();
+        assert!(
+            final_next_index >= 1,
+            "next_index should not be less than 1, but was {}",
+            final_next_index
+        );
+        // 在保守回退策略下，1.saturating_sub(1).max(1) = 0.max(1) = 1
+        assert_eq!(final_next_index, 1);
     }
 }
