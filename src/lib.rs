@@ -8,9 +8,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
-pub mod mock_network;
-pub mod mock_storage;
+pub mod mock;
 pub mod mutl_raft_driver;
+pub mod network;
+pub mod pb;
 
 // 类型定义
 
@@ -163,7 +164,7 @@ pub enum SnapshotError {
     TooOld(u64),
 
     #[error("Snapshot data corrupted")]
-    DataCorrupted,
+    DataCorrupted(anyhow::Error),
 
     #[error("Snapshot creation in progress")]
     InProgress,
@@ -334,7 +335,7 @@ impl ErrorHandler for SnapshotError {
         match self {
             SnapshotError::AlreadyExists(_) => ErrorSeverity::Ignorable,
             SnapshotError::TooOld(_) => ErrorSeverity::Ignorable,
-            SnapshotError::DataCorrupted => ErrorSeverity::Fatal,
+            SnapshotError::DataCorrupted(_) => ErrorSeverity::Fatal,
             SnapshotError::InProgress => ErrorSeverity::Recoverable,
             SnapshotError::SizeExceeded => ErrorSeverity::Recoverable,
             SnapshotError::NotSupported => ErrorSeverity::Fatal,
@@ -347,7 +348,7 @@ impl ErrorHandler for SnapshotError {
                 format!("Snapshot at index {} already exists", index)
             }
             SnapshotError::TooOld(index) => format!("Snapshot at index {} is too old", index),
-            SnapshotError::DataCorrupted => "Snapshot data corrupted".to_string(),
+            SnapshotError::DataCorrupted(e) => format!("Snapshot data corrupted: {}", e),
             SnapshotError::InProgress => "Snapshot creation in progress".to_string(),
             SnapshotError::SizeExceeded => "Snapshot size exceeds limit".to_string(),
             SnapshotError::NotSupported => "Snapshot not supported".to_string(),
@@ -472,18 +473,18 @@ impl fmt::Display for RequestId {
 }
 
 // === 事件定义（输入）===
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Event {
     // 定时器事件
     ElectionTimeout,     // 选举超时（Follower/Candidate 触发）
     HeartbeatTimeout,    // 心跳超时（Leader 触发日志同步）
-    ApplyLogs,           // 定期将已提交日志应用到状态机
+    ApplyLogTimeout,     // 定期将已提交日志应用到状态机
     ConfigChangeTimeout, // 配置变更超时
 
     // RPC 请求事件（来自其他节点）
-    RequestVoteRequest(RequestVoteRequest),
-    AppendEntriesRequest(AppendEntriesRequest),
-    InstallSnapshotRequest(InstallSnapshotRequest),
+    RequestVoteRequest(RaftId, RequestVoteRequest),
+    AppendEntriesRequest(RaftId, AppendEntriesRequest),
+    InstallSnapshotRequest(RaftId, InstallSnapshotRequest),
 
     // RPC 响应事件（其他节点对本节点请求的回复）
     RequestVoteResponse(RaftId, RequestVoteResponse),
@@ -674,7 +675,7 @@ pub trait Storage: Send + Sync {
     async fn load_cluster_config(&self, from: RaftId) -> StorageResult<ClusterConfig>;
 }
 
-pub trait Timer {
+pub trait TimerService {
     fn del_timer(&self, from: RaftId, timer_id: TimerId) -> ();
     fn set_leader_transfer_timer(&self, from: RaftId, dur: Duration) -> TimerId;
     fn set_election_timer(&self, from: RaftId, dur: Duration) -> TimerId;
@@ -684,7 +685,7 @@ pub trait Timer {
 }
 
 #[async_trait]
-pub trait RaftCallbacks: Network + Storage + Timer + Send + Sync {
+pub trait RaftCallbacks: Network + Storage + TimerService + Send + Sync {
     // 客户端响应回调
     async fn client_response(
         &self,
@@ -1048,18 +1049,17 @@ pub struct RaftState {
 
 #[derive(Debug, Clone)]
 pub struct RaftStateOptions {
-    id: RaftId,
-    peers: Vec<RaftId>,
-    election_timeout_min: u64,
-    election_timeout_max: u64,
-    heartbeat_interval: u64,
-    apply_interval: u64,
-    config_change_timeout: Duration,
-    leader_transfer_timeout: Duration,
-    apply_batch_size: u64, // 每次应用到状态机的日志条数
-
-    schedule_snapshot_probe_interval: Duration,
-    schedule_snapshot_probe_retries: u32,
+    pub id: RaftId,
+    pub peers: Vec<RaftId>,
+    pub election_timeout_min: u64,
+    pub election_timeout_max: u64,
+    pub heartbeat_interval: u64,
+    pub apply_interval: u64,
+    pub config_change_timeout: Duration,
+    pub leader_transfer_timeout: Duration,
+    pub apply_batch_size: u64, // 每次应用到状态机的日志条数
+    pub schedule_snapshot_probe_interval: Duration,
+    pub schedule_snapshot_probe_retries: u32,
 }
 
 impl Default for RaftStateOptions {
@@ -1190,23 +1190,30 @@ impl RaftState {
     pub async fn handle_event(&mut self, event: Event) {
         match event {
             Event::ElectionTimeout => self.handle_election_timeout().await,
-            Event::RequestVoteRequest(args) => self.handle_request_vote(args).await,
-            Event::AppendEntriesRequest(args) => self.handle_append_entries(args).await,
-            Event::RequestVoteResponse(peer, reply) => {
-                self.handle_request_vote_response(peer, reply).await
+            Event::RequestVoteRequest(sender, request) => {
+                self.handle_request_vote(sender, request).await
             }
-            Event::AppendEntriesResponse(peer, reply) => {
-                self.handle_append_entries_response(peer, reply).await
+            Event::AppendEntriesRequest(sender, request) => {
+                self.handle_append_entries_request(sender, request).await
+            }
+            Event::RequestVoteResponse(sender, response) => {
+                self.handle_request_vote_response(sender, response).await
+            }
+            Event::AppendEntriesResponse(sender, response) => {
+                self.handle_append_entries_response(sender, response).await
             }
             Event::HeartbeatTimeout => self.handle_heartbeat_timeout().await,
             Event::ClientPropose { cmd, request_id } => {
                 self.handle_client_propose(cmd, request_id).await
             }
-            Event::InstallSnapshotRequest(args) => self.handle_install_snapshot(args).await,
-            Event::InstallSnapshotResponse(peer, reply) => {
-                self.handle_install_snapshot_response(peer, reply).await
+            Event::InstallSnapshotRequest(sender, request) => {
+                self.handle_install_snapshot(sender, request).await
             }
-            Event::ApplyLogs => self.apply_committed_logs().await,
+            Event::InstallSnapshotResponse(sender, response) => {
+                self.handle_install_snapshot_response(sender, response)
+                    .await
+            }
+            Event::ApplyLogTimeout => self.apply_committed_logs().await,
             Event::ConfigChangeTimeout => self.handle_config_change_timeout().await,
             Event::ChangeConfig {
                 new_voters,
@@ -1320,7 +1327,15 @@ impl RaftState {
         // handle_void 内部已处理错误，这里通常不需要额外处理
     }
 
-    async fn handle_request_vote(&mut self, request: RequestVoteRequest) {
+    async fn handle_request_vote(&mut self, sender: RaftId, request: RequestVoteRequest) {
+        if sender != request.candidate_id {
+            warn!(
+                "Node {} received vote request from {}, but candidate is {}",
+                self.id, sender, request.candidate_id
+            );
+            return;
+        }
+
         // --- 1. 处理更高任期 ---
         // 如果收到的任期大于当前任期，更新任期并转换为 Follower
         if request.term > self.current_term {
@@ -1722,7 +1737,19 @@ impl RaftState {
         }
     }
 
-    async fn handle_append_entries(&mut self, request: AppendEntriesRequest) {
+    async fn handle_append_entries_request(
+        &mut self,
+        sender: RaftId,
+        request: AppendEntriesRequest,
+    ) {
+        if sender != request.leader_id {
+            warn!(
+                "Node {} received AppendEntries from {}, but leader is {}",
+                self.id, sender, request.leader_id
+            );
+            return;
+        }
+
         debug!(
             "Node {} received AppendEntries from {} (term {}, prev_log_index {}, entries {}, leader_commit {})",
             self.id,
@@ -2519,7 +2546,14 @@ impl RaftState {
             .await;
     }
 
-    async fn handle_install_snapshot(&mut self, request: InstallSnapshotRequest) {
+    async fn handle_install_snapshot(&mut self, sender: RaftId, request: InstallSnapshotRequest) {
+        if sender != request.leader_id {
+            warn!(
+                "Node {} received InstallSnapshot from {}, but leader is {}",
+                self.id, sender, request.leader_id
+            );
+            return;
+        }
         // 处理更低任期的请求
         if request.term < self.current_term {
             let resp = InstallSnapshotResponse {
@@ -2543,7 +2577,17 @@ impl RaftState {
             return;
         }
 
+        if self.leader_id.is_some() && self.leader_id.clone().unwrap() != request.leader_id {
+            warn!(
+                "Node {} received InstallSnapshot, old leader is {} , new leader is {}",
+                self.id,
+                self.leader_id.clone().unwrap(),
+                request.leader_id,
+            );
+        }
+
         // 切换为Follower并更新状态
+        self.leader_id = Some(request.leader_id.clone());
         self.role = Role::Follower;
         self.current_term = request.term;
         self.last_heartbeat = Instant::now();
@@ -3903,8 +3947,8 @@ impl RaftState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mock_network::{MockNetworkConfig, MockNetworkHub};
-    use crate::mock_storage::MockStorage;
+    use crate::mock::mock_network::{MockNetworkHub, MockNetworkHubConfig, NetworkEvent};
+    use crate::mock::mock_storage::MockStorage;
     use std::sync::Arc;
     use tokio::sync::Mutex;
     use tokio::time::{Duration, sleep, timeout};
@@ -4084,7 +4128,7 @@ mod tests {
         }
     }
 
-    impl Timer for TestCallbacks {
+    impl TimerService for TestCallbacks {
         fn del_timer(&self, _from: RaftId, _timer_id: TimerId) {}
 
         fn set_leader_transfer_timer(&self, _from: RaftId, _dur: Duration) -> TimerId {
@@ -4187,7 +4231,7 @@ mod tests {
         let peer2 = create_test_raft_id("test_group", "node3");
 
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
 
@@ -4221,7 +4265,7 @@ mod tests {
         let peer2 = create_test_raft_id("test_group", "node3");
 
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
 
@@ -4261,7 +4305,7 @@ mod tests {
         let peer2 = create_test_raft_id("test_group", "node3");
 
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
 
@@ -4293,7 +4337,10 @@ mod tests {
 
         // 处理投票请求
         raft_state
-            .handle_event(Event::RequestVoteRequest(vote_request))
+            .handle_event(Event::RequestVoteRequest(
+                candidate_id.clone(),
+                vote_request,
+            ))
             .await;
 
         // 验证硬状态已更新（应该投票给候选人）
@@ -4311,7 +4358,7 @@ mod tests {
         let peer2 = create_test_raft_id("test_group", "node3");
 
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
 
@@ -4354,7 +4401,10 @@ mod tests {
 
         // 处理 AppendEntries 请求
         raft_state
-            .handle_event(Event::AppendEntriesRequest(append_request))
+            .handle_event(Event::AppendEntriesRequest(
+                leader_id.clone(),
+                append_request,
+            ))
             .await;
 
         // 验证日志已存储
@@ -4380,7 +4430,7 @@ mod tests {
         let node3 = create_test_raft_id("test_group", "node3");
 
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node1.clone()).await;
 
@@ -4454,7 +4504,7 @@ mod tests {
         let peer2 = create_test_raft_id("test_group", "node3");
 
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
 
@@ -4510,7 +4560,7 @@ mod tests {
         let node4 = create_test_raft_id("test_group", "node4");
 
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node1.clone()).await;
 
@@ -4563,7 +4613,7 @@ mod tests {
         let peer2 = create_test_raft_id("test_group", "node3");
 
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
 
@@ -4597,7 +4647,10 @@ mod tests {
 
         // 处理快照安装
         raft_state
-            .handle_event(Event::InstallSnapshotRequest(snapshot_request.clone()))
+            .handle_event(Event::InstallSnapshotRequest(
+                node_id.clone(),
+                snapshot_request.clone(),
+            ))
             .await;
 
         // 验证快照处理（在实际实现中，业务层需要调用complete_snapshot_installation）
@@ -4628,7 +4681,7 @@ mod tests {
         let peer2 = create_test_raft_id("test_group", "node3");
 
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
 
@@ -4669,7 +4722,7 @@ mod tests {
         let peer2 = create_test_raft_id("test_group", "node3");
 
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
 
@@ -4724,7 +4777,10 @@ mod tests {
 
         // 处理冲突的 AppendEntries 请求
         raft_state
-            .handle_event(Event::AppendEntriesRequest(append_request))
+            .handle_event(Event::AppendEntriesRequest(
+                leader_id.clone(),
+                append_request,
+            ))
             .await;
 
         // 验证处理结果 - 在实际场景中，冲突解决可能很复杂
@@ -4747,7 +4803,7 @@ mod tests {
         let candidate_id = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -4782,7 +4838,10 @@ mod tests {
 
         // 处理旧任期的投票请求
         raft_state
-            .handle_event(Event::RequestVoteRequest(old_term_vote_request))
+            .handle_event(Event::RequestVoteRequest(
+                candidate_id.clone(),
+                old_term_vote_request,
+            ))
             .await;
 
         // 验证节点的任期未被更改，且没有投票
@@ -4799,7 +4858,7 @@ mod tests {
         let candidate_id = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -4847,7 +4906,10 @@ mod tests {
 
         // 处理未来任期的投票请求
         raft_state
-            .handle_event(Event::RequestVoteRequest(future_term_vote_request))
+            .handle_event(Event::RequestVoteRequest(
+                candidate_id.clone(),
+                future_term_vote_request,
+            ))
             .await;
 
         // 验证节点的任期更新为 2，角色变为 Follower，但未投票
@@ -4864,7 +4926,7 @@ mod tests {
         let peer1 = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -4928,7 +4990,7 @@ mod tests {
         let peer1 = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -4999,7 +5061,7 @@ mod tests {
         let leader_id = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -5037,7 +5099,10 @@ mod tests {
 
         // 处理该请求
         raft_state
-            .handle_event(Event::AppendEntriesRequest(outdated_append_request))
+            .handle_event(Event::AppendEntriesRequest(
+                leader_id.clone(),
+                outdated_append_request,
+            ))
             .await;
 
         // 验证返回的 AppendEntriesResponse 中 success 为 false
@@ -5066,7 +5131,7 @@ mod tests {
         let peer1 = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -5150,7 +5215,7 @@ mod tests {
         let peer1 = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -5237,7 +5302,7 @@ mod tests {
         let peer1 = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -5323,7 +5388,7 @@ mod tests {
         let leader_id = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -5365,7 +5430,10 @@ mod tests {
         let request_id = snapshot_request.request_id.clone();
 
         raft_state
-            .handle_event(Event::InstallSnapshotRequest(snapshot_request.clone()))
+            .handle_event(Event::InstallSnapshotRequest(
+                leader_id.clone(),
+                snapshot_request.clone(),
+            ))
             .await;
 
         // 验证 RaftState 内部状态是否正确设置 (例如 current_snapshot_request_id)
@@ -5406,7 +5474,7 @@ mod tests {
         let leader_id = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await; // follower network
         let (_leader_network, mut leader_rx) = hub.register_node(leader_id.clone()).await; // leader network for receiving responses
@@ -5448,6 +5516,7 @@ mod tests {
         // 处理探测请求
         raft_state
             .handle_event(Event::InstallSnapshotRequest(
+                leader_id.clone(),
                 probe_snapshot_request.clone(),
             ))
             .await;
@@ -5458,7 +5527,9 @@ mod tests {
         assert!(resp_event.is_ok(), "Should have received a response");
         let event = resp_event.unwrap();
         match event {
-            Some(mock_network::NetworkEvent::InstallSnapshotResponse(resp)) => {
+            Some(NetworkEvent::InstallSnapshotResponse(sender, target, resp)) => {
+                assert_eq!(sender, node_id);
+                assert_eq!(target, leader_id);
                 // 验证响应内容，例如 term 和 success (具体取决于 handle_install_snapshot_request_probe 的实现)
                 assert_eq!(resp.term, 1);
                 // 探测响应的 success 通常表示 follower 是否需要快照或其状态
@@ -5482,7 +5553,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let leader_id = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -5518,7 +5589,10 @@ mod tests {
 
         // 处理请求
         raft_state
-            .handle_event(Event::AppendEntriesRequest(stale_append_request))
+            .handle_event(Event::AppendEntriesRequest(
+                leader_id.clone(),
+                stale_append_request,
+            ))
             .await;
 
         // 验证状态未变
@@ -5534,7 +5608,7 @@ mod tests {
         let peer1 = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -5631,7 +5705,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let peer1 = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -5727,7 +5801,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let leader_id = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -5772,7 +5846,10 @@ mod tests {
 
         // 处理请求
         raft_state
-            .handle_event(Event::AppendEntriesRequest(valid_append_request))
+            .handle_event(Event::AppendEntriesRequest(
+                leader_id.clone(),
+                valid_append_request,
+            ))
             .await;
 
         // 验证日志被追加 (需要检查存储)
@@ -5788,7 +5865,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let leader_id = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -5837,7 +5914,10 @@ mod tests {
 
         // 处理请求
         raft_state
-            .handle_event(Event::AppendEntriesRequest(mismatch_append_request))
+            .handle_event(Event::AppendEntriesRequest(
+                leader_id.clone(),
+                mismatch_append_request,
+            ))
             .await;
 
         // 验证返回失败的 AppendEntriesResponse
@@ -5853,7 +5933,7 @@ mod tests {
         let peer1 = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -5893,7 +5973,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let candidate_id = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -5928,7 +6008,10 @@ mod tests {
 
         // 处理请求
         raft_state
-            .handle_event(Event::RequestVoteRequest(higher_term_vote_request))
+            .handle_event(Event::RequestVoteRequest(
+                candidate_id.clone(),
+                higher_term_vote_request,
+            ))
             .await;
 
         // 验证 Leader 退化为 Follower
@@ -5944,7 +6027,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let leader_id = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await; // follower network
         let (_leader_network, mut leader_rx) = hub.register_node(leader_id.clone()).await; // leader network for receiving responses
@@ -5982,7 +6065,10 @@ mod tests {
         };
 
         raft_state
-            .handle_event(Event::InstallSnapshotRequest(probe_request))
+            .handle_event(Event::InstallSnapshotRequest(
+                leader_id.clone(),
+                probe_request,
+            ))
             .await;
 
         // 验证发送了 InstallSnapshotResponse，状态为 Installing
@@ -5990,7 +6076,9 @@ mod tests {
         assert!(resp_event.is_ok());
         let message = resp_event.unwrap();
         match message {
-            Some(crate::mock_network::NetworkEvent::InstallSnapshotResponse(resp)) => {
+            Some(NetworkEvent::InstallSnapshotResponse(sender, target, resp)) => {
+                assert_eq!(sender, node_id);
+                assert_eq!(target, leader_id);
                 assert_eq!(resp.term, 2);
                 assert_eq!(resp.state, InstallSnapshotState::Installing);
             }
@@ -6004,7 +6092,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let leader_id = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let (_leader_network, mut leader_rx) = hub.register_node(leader_id.clone()).await;
@@ -6042,7 +6130,10 @@ mod tests {
         };
 
         raft_state
-            .handle_event(Event::InstallSnapshotRequest(probe_request))
+            .handle_event(Event::InstallSnapshotRequest(
+                leader_id.clone(),
+                probe_request,
+            ))
             .await;
 
         // 验证发送了 InstallSnapshotResponse，状态为 Failed
@@ -6050,7 +6141,9 @@ mod tests {
         assert!(resp_event.is_ok());
         let message = resp_event.unwrap();
         match message {
-            Some(crate::mock_network::NetworkEvent::InstallSnapshotResponse(resp)) => {
+            Some(NetworkEvent::InstallSnapshotResponse(sender, target, resp)) => {
+                assert_eq!(sender, node_id);
+                assert_eq!(target, leader_id);
                 assert_eq!(resp.term, 2);
                 matches!(resp.state, InstallSnapshotState::Failed(_)); // Check it's a Failed variant
             }
@@ -6064,7 +6157,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let leader_id = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let (_leader_network, mut leader_rx) = hub.register_node(leader_id.clone()).await;
@@ -6098,7 +6191,10 @@ mod tests {
         };
 
         raft_state
-            .handle_event(Event::InstallSnapshotRequest(low_term_request))
+            .handle_event(Event::InstallSnapshotRequest(
+                leader_id.clone(),
+                low_term_request,
+            ))
             .await;
 
         // Verify follower state is unchanged
@@ -6109,7 +6205,9 @@ mod tests {
         assert!(resp_event.is_ok());
         let message = resp_event.unwrap();
         match message {
-            Some(crate::mock_network::NetworkEvent::InstallSnapshotResponse(resp)) => {
+            Some(NetworkEvent::InstallSnapshotResponse(sender, target, resp)) => {
+                assert_eq!(sender, node_id);
+                assert_eq!(target, leader_id);
                 assert_eq!(resp.term, 5); // Response should have the follower's term
                 // Assuming rejection means not Installing/Success, could also check specific state if defined
             }
@@ -6123,7 +6221,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let leader_id = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let (_leader_network, mut leader_rx) = hub.register_node(leader_id.clone()).await;
@@ -6159,7 +6257,10 @@ mod tests {
         };
 
         raft_state
-            .handle_event(Event::InstallSnapshotRequest(outdated_request))
+            .handle_event(Event::InstallSnapshotRequest(
+                leader_id.clone(),
+                outdated_request,
+            ))
             .await;
 
         // Verify follower state is largely unchanged (might update term if leader's term was higher, but not here)
@@ -6181,7 +6282,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let peer1 = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -6247,7 +6348,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let candidate_id = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -6293,7 +6394,10 @@ mod tests {
         };
 
         raft_state
-            .handle_event(Event::RequestVoteRequest(candidate_vote_request))
+            .handle_event(Event::RequestVoteRequest(
+                candidate_id.clone(),
+                candidate_vote_request,
+            ))
             .await;
 
         // Verify follower did not vote
@@ -6308,7 +6412,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let candidate_id = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -6354,7 +6458,10 @@ mod tests {
         };
 
         raft_state
-            .handle_event(Event::RequestVoteRequest(candidate_vote_request))
+            .handle_event(Event::RequestVoteRequest(
+                candidate_id.clone(),
+                candidate_vote_request,
+            ))
             .await;
 
         // Verify follower updated its term and voted for the candidate
@@ -6370,7 +6477,7 @@ mod tests {
         let peer1 = create_test_raft_id("test_group", "node2");
         // ... (设置 storage, network, callbacks, cluster_config, options 如之前测试)
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -6439,7 +6546,7 @@ mod tests {
         let peer1 = create_test_raft_id("test_group", "node2");
         // ... (设置 storage, network, callbacks, cluster_config, options 如之前测试)
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -6497,7 +6604,7 @@ mod tests {
         let peer2 = create_test_raft_id("test_group", "node3");
         // ... (设置 storage, network, callbacks, cluster_config, options 如之前测试)
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -6588,7 +6695,7 @@ mod tests {
         let peer1 = create_test_raft_id("test_group", "node2");
         // ... (设置)
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -6651,7 +6758,7 @@ mod tests {
         let peer1 = create_test_raft_id("test_group", "node2");
         // ... (设置)
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -6711,7 +6818,7 @@ mod tests {
         let peer1 = create_test_raft_id("test_group", "node2");
         // ... (设置)
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -6773,7 +6880,7 @@ mod tests {
         let peer1 = create_test_raft_id("test_group", "node2");
         // ... (设置)
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -6833,7 +6940,7 @@ mod tests {
         let peer1 = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -6918,7 +7025,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let peer1 = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -7001,7 +7108,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let leader_id = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -7036,7 +7143,10 @@ mod tests {
 
         // 处理快照安装请求
         raft_state
-            .handle_event(Event::InstallSnapshotRequest(snapshot_request.clone()))
+            .handle_event(Event::InstallSnapshotRequest(
+                leader_id.clone(),
+                snapshot_request.clone(),
+            ))
             .await;
 
         // 验证 Follower 状态
@@ -7074,7 +7184,7 @@ mod tests {
         let node3 = create_test_raft_id("test_group", "node3");
         let node4 = create_test_raft_id("test_group", "node4");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -7159,7 +7269,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let leader_id = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -7192,7 +7302,10 @@ mod tests {
         };
 
         raft_state
-            .handle_event(Event::AppendEntriesRequest(old_term_request))
+            .handle_event(Event::AppendEntriesRequest(
+                leader_id.clone(),
+                old_term_request,
+            ))
             .await;
 
         // 验证 Follower 拒绝了请求 (任期未更新，角色未变)
@@ -7208,7 +7321,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let leader_id = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -7242,7 +7355,10 @@ mod tests {
         };
 
         raft_state
-            .handle_event(Event::AppendEntriesRequest(current_term_request))
+            .handle_event(Event::AppendEntriesRequest(
+                leader_id.clone(),
+                current_term_request,
+            ))
             .await;
 
         // 验证 Candidate 转为 Follower
@@ -7259,7 +7375,7 @@ mod tests {
         let node_id = create_test_raft_id("test_group", "node1");
         let leader_id = create_test_raft_id("test_group", "node2");
         let storage = Arc::new(MockStorage::new());
-        let config = MockNetworkConfig::default();
+        let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
         let (network, _rx) = hub.register_node(node_id.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
@@ -7301,7 +7417,10 @@ mod tests {
         };
 
         raft_state
-            .handle_event(Event::AppendEntriesRequest(append_request))
+            .handle_event(Event::AppendEntriesRequest(
+                leader_id.clone(),
+                append_request,
+            ))
             .await;
 
         // 验证日志被追加 (从快照点之后开始)

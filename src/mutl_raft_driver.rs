@@ -1,5 +1,6 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{Notify, mpsc};
@@ -15,9 +16,7 @@ pub enum RaftNodeStatus {
 // Raft事件类型（示例）
 use std::sync::atomic::AtomicU8;
 
-use crate::{
-    Event, RaftId, RaftState,
-};
+use crate::{Event, RaftId, TimerId};
 
 // 原子RaftGroupStatus包装器
 pub struct AtomicRaftNodeStatus(AtomicU8);
@@ -69,9 +68,11 @@ impl AtomicRaftNodeStatus {
 
 #[derive(Debug)]
 struct TimerEvent {
+    timer_id: TimerId,
     node_id: RaftId,
     event: Event,
     trigger_time: Instant,
+    delay: Duration,
 }
 
 // Implement ordering for TimerEvent so it can be used in BinaryHeap (min-heap by trigger_time)
@@ -97,87 +98,172 @@ impl Ord for TimerEvent {
     }
 }
 
+#[async_trait::async_trait]
+pub trait HandleEventTrait: Send + Sync {
+    async fn handle_event(&self, event: Event);
+}
+
 // Raft组核心数据（状态+通道+业务状态）
 struct RaftGroupCore {
-    status: AtomicRaftNodeStatus,     // 原子状态管理
-    tx: mpsc::Sender<Event>,          // 事件发送端
-    rx: Mutex<mpsc::Receiver<Event>>, // 事件接收端
-    state: Mutex<RaftState>,          // Raft业务状态（如日志、任期等）
+    status: AtomicRaftNodeStatus,         // 原子状态管理
+    sender: mpsc::UnboundedSender<Event>, // 事件发送端
+    recevier: tokio::sync::Mutex<mpsc::UnboundedReceiver<Event>>, // 事件接收端
+    handle_event: Box<dyn HandleEventTrait>,
+}
+
+pub struct MultiRaftDriverInner {
+    timer_service: Timers,
+    groups: Mutex<HashMap<RaftId, Arc<RaftGroupCore>>>, // 所有Raft组
+    active_map: Mutex<HashSet<RaftId>>,                 // 待处理组集合
+    notify: Notify,                                     // Worker唤醒信号
+    stop: AtomicBool,                                   // 停止标志
 }
 
 // Multi-Raft驱动核心
+#[derive(Clone)]
 pub struct MultiRaftDriver {
-    groups: Arc<Mutex<HashMap<RaftId, Arc<RaftGroupCore>>>>, // 所有Raft组
-    active_map: Arc<Mutex<HashSet<RaftId>>>,                 // 待处理组集合
-    notify: Arc<Notify>,                                     // Worker唤醒信号
-    stop: AtomicBool,                                        // 停止标志
-    network_tx: mpsc::Sender<(RaftId, Vec<u8>)>,             // 网络发送通道
-    // 定时器堆（全局管理所有组的定时器）
-    timer_heap: Arc<Mutex<BinaryHeap<TimerEvent>>>,
+    inner: Arc<MultiRaftDriverInner>,
 }
 
-impl MultiRaftDriver {
-    // 创建新的MultiRaftDriver
-    pub fn new(network_tx: mpsc::Sender<(RaftId, Vec<u8>)>) -> Self {
+impl Deref for MultiRaftDriver {
+    type Target = MultiRaftDriverInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+pub struct TimerInner {
+    timer_id_counter: AtomicU64,
+    timer_heap: Mutex<BinaryHeap<TimerEvent>>,
+}
+
+#[derive(Clone)]
+pub struct Timers {
+    inner: Arc<TimerInner>,
+}
+
+impl Timers {
+    pub fn new() -> Self {
         Self {
-            network_tx,
-            timer_heap: Arc::new(Mutex::new(BinaryHeap::new())),
-            groups: Arc::new(Mutex::new(HashMap::new())),
-            active_map: Arc::new(Mutex::new(HashSet::new())),
-            notify: Arc::new(Notify::new()),
-            stop: AtomicBool::new(false),
+            inner: Arc::new(TimerInner {
+                timer_id_counter: AtomicU64::new(0),
+                timer_heap: Mutex::new(BinaryHeap::new()),
+            }),
         }
     }
+}
 
-    // 添加新的Raft组
-    pub fn add_raft_group(&self, group_id: RaftId, state: RaftState) {
-        let (tx, rx) = mpsc::channel(100); // 事件通道（缓冲区大小100）
-        let core = RaftGroupCore {
-            status: AtomicRaftNodeStatus::new(RaftNodeStatus::Idle),
-            tx,
-            rx: Mutex::new(rx), // 使用Mutex包装接收端
-            state: Mutex::new(state),
+impl Deref for Timers {
+    type Target = TimerInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl Timers {
+    pub fn add_timer(&self, node_id: RaftId, event: Event, delay: Duration) -> TimerId {
+        let timer_id = self.timer_id_counter.fetch_add(1, Ordering::Relaxed);
+        let trigger_time = Instant::now() + delay;
+        let timer_event = TimerEvent {
+            timer_id,
+            node_id,
+            event,
+            trigger_time,
+            delay,
         };
-        self.groups.lock().unwrap().insert(group_id, Arc::new(core));
+        self.timer_heap.lock().unwrap().push(timer_event);
+        timer_id
     }
 
-    fn process_expired_timers(&self) -> Option<Duration> {
+    pub fn del_timer(&self, timer_id: TimerId) {
+        let mut timer_heap = self.timer_heap.lock().unwrap();
+        timer_heap.retain(|timer_event| timer_event.timer_id != timer_id);
+    }
+
+    fn process_expired_timers(&self) -> (Vec<TimerEvent>, Option<Duration>) {
         let now = Instant::now();
+        let mut events = Vec::new();
         let mut timer_heap = self.timer_heap.lock().unwrap();
 
         while let Some(timer_event) = timer_heap.peek() {
             if timer_event.trigger_time <= now {
-                let timer_event = timer_heap.pop().unwrap();
-                let node_id = timer_event.node_id;
-
-                // 发送定时器事件到组通道
-                let groups = self.groups.lock().unwrap();
-                if let Some(group) = groups.get(&node_id) {
-                    let _ = group.tx.try_send(timer_event.event);
-
-                    // 激活组并唤醒 Driver
-                    let mut active_groups = self.active_map.lock().unwrap();
-                    active_groups.insert(node_id);
-                    let _ = self.notify.notify_one();
-                }
+                let event = timer_heap.pop().unwrap();
+                events.push(event);
             } else {
                 // 未来时间 - 当前时间 = 正的剩余时间
-                return Some(timer_event.trigger_time - now);
+                return (events, Some(timer_event.trigger_time - now));
             }
         }
-        None
+        (events, None)
+    }
+}
+
+#[derive(Debug)]
+pub enum SendEventResult {
+    Success,
+    NotFound,
+    SendFailed,
+}
+
+impl MultiRaftDriver {
+    // 创建新的MultiRaftDriver
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(MultiRaftDriverInner {
+                timer_service: Timers::new(),
+                groups: Mutex::new(HashMap::new()),
+                active_map: Mutex::new(HashSet::new()),
+                notify: Notify::new(),
+                stop: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    pub fn get_timer_service(&self) -> Timers {
+        self.inner.timer_service.clone()
+    }
+
+    // 添加新的Raft组
+    pub fn add_raft_group(&self, group_id: RaftId, handle_event: Box<dyn HandleEventTrait>) {
+        let (tx, rx) = mpsc::unbounded_channel(); // 事件通道（缓冲区大小100）
+        let core = RaftGroupCore {
+            status: AtomicRaftNodeStatus::new(RaftNodeStatus::Idle),
+            sender: tx,
+            recevier: tokio::sync::Mutex::new(rx), // 使用Mutex包装接收端
+            handle_event,
+        };
+        self.groups.lock().unwrap().insert(group_id, Arc::new(core));
+    }
+
+    async fn process_expired_timers(&self) -> Option<Duration> {
+        let (events, duration) = self.timer_service.process_expired_timers();
+        for event in events {
+            let result = self.send_event(event.node_id.clone(), event.event.clone());
+            if !matches!(result, SendEventResult::Success) {
+                log::error!(
+                    "send timer event failed {:?}, node_id: {}, event: {:?}, delay: {:?}",
+                    result,
+                    event.node_id,
+                    event.event,
+                    event.delay
+                );
+            }
+        }
+        duration
     }
 
     // 向指定Raft组发送事件
-    pub async fn send_event(&self, group_id: RaftId, event: Event) -> bool {
+    pub fn send_event(&self, target: RaftId, event: Event) -> SendEventResult {
         let groups = self.groups.lock().unwrap();
-        let Some(core) = groups.get(&group_id) else {
-            return false; // 组不存在
+        let Some(core) = groups.get(&target) else {
+            return SendEventResult::NotFound; // 组不存在
         };
 
         // 1. 先发送事件到通道（确保消息不丢失）
-        if core.tx.send(event).await.is_err() {
-            return false; // 通道已关闭
+        if core.sender.send(event).is_err() {
+            return SendEventResult::SendFailed; // 通道已关闭
         }
 
         // 2. 根据当前状态决定是否需要激活组
@@ -197,7 +283,7 @@ impl MultiRaftDriver {
 
                 if swapped {
                     let mut active_map = self.active_map.lock().unwrap();
-                    active_map.insert(group_id);
+                    active_map.insert(target);
                     let _ = self.notify.notify_one(); // 唤醒Worker
                 }
             }
@@ -205,17 +291,15 @@ impl MultiRaftDriver {
                 // 已在处理流程中，无需额外操作
             }
         }
-        true
+        SendEventResult::Success
     }
 
     // 启动Worker（可启动多个）
     pub async fn main_loop(&self) {
         loop {
             // 处理过期定时器，获取下一个定时器的剩余时间
-            let next_timer_duration = self.process_expired_timers();
-
             // 等待逻辑：有定时器则等待到其到期，否则无限等待唤醒
-            if let Some(duration) = next_timer_duration {
+            if let Some(duration) = self.process_expired_timers().await {
                 tokio::select! {
                     _ = tokio::time::sleep(duration) => {
                         continue; // 定时器到期，继续处理
@@ -277,15 +361,14 @@ impl MultiRaftDriver {
 
         // 2. 克隆接收端用于处理（避免持有groups锁）
 
-        let state = &core.state;
+        let handle_event = &core.handle_event;
 
         // 3. 循环处理所有事件
         loop {
-            match core.rx.lock().unwrap().try_recv() {
+            match core.recevier.lock().await.try_recv() {
                 Ok(event) => {
                     // 处理事件并获取响应
-                    let mut raft_state = state.lock().unwrap();
-                    raft_state.handle_event(event.into()).await;
+                    handle_event.handle_event(event).await;
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                     // 暂时无消息，尝试转为Idle并检查是否有新消息
@@ -301,7 +384,7 @@ impl MultiRaftDriver {
 
                     if swapped {
                         // 转为Idle后检查是否有新消息
-                        let has_remaining = !core.rx.lock().unwrap().is_empty();
+                        let has_remaining = !core.recevier.lock().await.is_empty();
                         if has_remaining {
                             // 尝试抢回处理权
                             let swapped = core
