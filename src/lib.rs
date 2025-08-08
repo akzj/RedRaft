@@ -1715,6 +1715,7 @@ impl RaftState {
                 }
             };
 
+            let entries_len = entries.len();
             let req = AppendEntriesRequest {
                 term: current_term,
                 leader_id: leader_id.clone(),
@@ -1725,14 +1726,34 @@ impl RaftState {
                 request_id: RequestId::new(),
             };
 
+            debug!(
+                "Leader {} sending AppendEntries to {}: req_id={}, prev_log_index={}, entries_count={}, next_index={} -> {}",
+                self.id,
+                peer,
+                req.request_id,
+                prev_log_index,
+                entries_len,
+                next_idx,
+                next_idx + entries_len as u64
+            );
+
             if let Err(err) = self
                 .callbacks
-                .send_append_entries_request(self.id.clone(), peer, req)
+                .send_append_entries_request(self.id.clone(), peer.clone(), req)
                 .await
             {
                 warn!(
                     "node {}: send append entries request failed: {}",
                     self.id, err
+                );
+            } else {
+                // 乐观更新next_index，避免重复发送相同的日志条目
+                // 如果AppendEntries失败，会在响应处理中回退next_index
+                let new_next_idx = next_idx + entries_len as u64;
+                self.next_index.insert(peer.clone(), new_next_idx);
+                debug!(
+                    "Leader {} optimistically updated next_index for {} to {}",
+                    self.id, peer, new_next_idx
                 );
             }
         }
@@ -2012,8 +2033,13 @@ impl RaftState {
 
             // 如果检查通过，则执行截断
             info!(
-                "Node {} truncating log suffix from index {}",
-                self.id, truncate_from_index
+                "Node {} truncating log suffix from index {} (request_id: {:?}, leader: {}, prev_log_index: {}, entries_count: {})",
+                self.id,
+                truncate_from_index,
+                request.request_id,
+                request.leader_id,
+                request.prev_log_index,
+                request.entries.len()
             );
             let truncate_result = self
                 .error_handler
@@ -2099,7 +2125,10 @@ impl RaftState {
                         );
                         // DEBUG: Check last log index after append
                         let after_append_last_index = self.get_last_log_index().await;
-                        debug!("Node {} last_log_index after append: {}", self.id, after_append_last_index);
+                        debug!(
+                            "Node {} last_log_index after append: {}",
+                            self.id, after_append_last_index
+                        );
                     }
                 }
             }
@@ -2108,7 +2137,11 @@ impl RaftState {
         // --- 6. 更新提交索引 ---
         info!(
             "Node {} commit_index update check: success={}, leader_commit={}, self.commit_index={}, last_log_index={}",
-            self.id, success, request.leader_commit, self.commit_index, self.get_last_log_index().await
+            self.id,
+            success,
+            request.leader_commit,
+            self.commit_index,
+            self.get_last_log_index().await
         );
         if success && request.leader_commit > self.commit_index {
             let new_commit_index =
@@ -2203,17 +2236,33 @@ impl RaftState {
 
         // 仅处理当前任期的响应，忽略过期响应
         if response.term == self.current_term {
+            debug!(
+                "Leader {} received AppendEntries response from {}: req_id={}, success={}, matched_index={}",
+                self.id, peer, response.request_id, response.success, response.matched_index
+            );
+
             // 处理成功响应
             if response.success {
                 let match_index = response.matched_index;
                 let new_next_idx = match_index + 1;
-                self.match_index.insert(peer.clone(), match_index);
-                self.next_index.insert(peer.clone(), new_next_idx);
 
-                info!(
-                    "Node {} updated replication state for {}: next_index={}, match_index={}",
-                    self.id, peer, new_next_idx, match_index
-                );
+                // 更新match_index
+                self.match_index.insert(peer.clone(), match_index);
+
+                // 只有当计算出的next_index比当前的大时才更新，避免回退
+                let current_next = self.next_index.get(&peer).copied().unwrap_or(1);
+                if new_next_idx > current_next {
+                    self.next_index.insert(peer.clone(), new_next_idx);
+                    info!(
+                        "Node {} updated replication state for {}: next_index={} (advanced), match_index={}",
+                        self.id, peer, new_next_idx, match_index
+                    );
+                } else {
+                    info!(
+                        "Node {} updated match_index for {}: match_index={} (next_index={} unchanged)",
+                        self.id, peer, match_index, current_next
+                    );
+                }
 
                 // 尝试更新commit_index
                 self.update_commit_index().await;
@@ -3044,8 +3093,10 @@ impl RaftState {
     async fn apply_committed_logs(&mut self) {
         // 应用已提交但未应用的日志
         if self.last_applied >= self.commit_index {
-            debug!("Node {} apply_committed_logs: nothing to apply (last_applied={}, commit_index={})", 
-                   self.id, self.last_applied, self.commit_index);
+            debug!(
+                "Node {} apply_committed_logs: nothing to apply (last_applied={}, commit_index={})",
+                self.id, self.last_applied, self.commit_index
+            );
             return;
         }
 
@@ -3055,8 +3106,10 @@ impl RaftState {
             self.last_applied + self.options.apply_batch_size,
         );
 
-        info!("Node {} apply_committed_logs: applying logs from {} to {} (last_applied={}, commit_index={})", 
-              self.id, start, end, self.last_applied, self.commit_index);
+        info!(
+            "Node {} apply_committed_logs: applying logs from {} to {} (last_applied={}, commit_index={})",
+            self.id, start, end, self.last_applied, self.commit_index
+        );
 
         let entries = match self
             .callbacks
@@ -3135,14 +3188,22 @@ impl RaftState {
                 }
             } else {
                 let index = entry.index;
-                info!("Node {} applying command to state machine: index={}, term={}, command_len={}", 
-                      self.id, entry.index, entry.term, entry.command.len());
+                info!(
+                    "Node {} applying command to state machine: index={}, term={}, command_len={}",
+                    self.id,
+                    entry.index,
+                    entry.term,
+                    entry.command.len()
+                );
                 let _ = self
                     .callbacks
                     .apply_command(self.id.clone(), entry.index, entry.term, entry.command)
                     .await;
                 self.last_applied = index;
-                info!("Node {} updated last_applied to {}", self.id, self.last_applied);
+                info!(
+                    "Node {} updated last_applied to {}",
+                    self.id, self.last_applied
+                );
 
                 // 如果是客户端请求，返回响应
                 self.check_client_response(index).await;

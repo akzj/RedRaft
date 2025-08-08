@@ -88,9 +88,14 @@ impl TestNode {
                         }
                     };
 
-                    info!("Dispatching event from {} to {:?}", target_id, event);
+                    //info!("Dispatching event from {} to {:?}", target_id, event);
                     let result = driver.send_event(target_id.clone(), event);
-                    info!("send event done {:?}", result);
+                    if !matches!(
+                        result,
+                        raft_lite::mutl_raft_driver::SendEventResult::Success
+                    ) {
+                        info!("send event failed {:?}", result);
+                    }
                     ()
                 }),
             )
