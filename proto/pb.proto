@@ -1,0 +1,145 @@
+syntax = "proto3";
+
+package pb;
+
+/// Raft 节点完整标识（GroupId + NodeId，对应 Rust 中的 RaftId）
+message RaftId {
+  string group = 1; // 集群 ID
+  string node = 2;  // 节点 ID
+}
+
+/// 日志条目（对应 Rust 中的 LogEntry）
+message LogEntry {
+  uint64 term = 1;    // 日志产生的任期
+  uint64 index = 2;   // 日志索引
+  bytes command = 3;  // 命令数据（对应 Command = Vec<u8>）
+  bool is_config = 4; // 是否为配置变更日志
+  optional uint64 client_request_id = 5; // 关联的客户端请求 ID（用于去重）
+}
+
+/// 集群配置（对应 Rust 中的 ClusterConfig）
+message ClusterConfig {
+  uint64 epoch = 1;           // 配置版本号
+  uint64 log_index = 2;       // 最后一次配置变更的日志索引
+  repeated RaftId voters = 3; // 投票节点集合（对应 HashSet<RaftId>）
+  optional JointConfig joint = 4; // 联合配置（仅在配置变更过程中存在）
+}
+
+/// 联合配置（对应 Rust 中的 JointConfig）
+message JointConfig {
+  repeated RaftId old = 1; // 旧配置的投票节点
+  repeated RaftId new = 2; // 新配置的投票节点
+  uint64 log_index = 3;    // 联合配置创建时的日志索引
+}
+
+/// 快照数据（对应 Rust 中的 Snapshot）
+message Snapshot {
+  uint64 index = 1;         // 快照包含的最后日志索引
+  uint64 term = 2;          // 快照包含的最后日志任期
+  bytes data = 3;           // 快照数据
+  ClusterConfig config = 4; // 快照时的集群配置
+}
+
+// 枚举类型定义
+/// 快照安装状态（对应 Rust 中的 InstallSnapshotState）
+enum InstallSnapshotState {
+  INSTALL_SNAPSHOT_STATE_UNSPECIFIED = 0;
+  FAILED = 1;     // 安装失败
+  INSTALLING = 2; // 正在安装
+  SUCCESS = 3;    // 安装成功
+}
+
+/// 节点角色（对应 Rust 中的 Role）
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  FOLLOWER = 1;  // 追随者
+  CANDIDATE = 2; // 候选人
+  LEADER = 3;    // 领导者
+}
+
+// RPC 请求/响应定义（网络传输核心类型）
+/// 请求投票请求（对应 Rust 中的 RequestVoteRequest）
+message RequestVoteRequest {
+  uint64 term = 1;           // 候选人的任期
+  RaftId candidate_id = 2;   // 候选人 ID
+  uint64 last_log_index = 3; // 候选人最后日志的索引
+  uint64 last_log_term = 4;  // 候选人最后日志的任期
+  uint64 request_id = 5;     // 请求 ID（用于匹配响应）
+}
+
+/// 请求投票响应（对应 Rust 中的 RequestVoteResponse）
+message RequestVoteResponse {
+  uint64 term = 1;       // 当前任期（供候选人更新自己）
+  bool vote_granted = 2; // 是否授予投票
+  uint64 request_id = 3; // 对应请求的 ID
+}
+
+/// 追加日志请求（对应 Rust 中的 AppendEntriesRequest）
+message AppendEntriesRequest {
+  uint64 term = 1;               // 领导者任期
+  RaftId leader_id = 2;          // 领导者 ID
+  uint64 prev_log_index = 3;     // 前一条日志的索引
+  uint64 prev_log_term = 4;      // 前一条日志的任期
+  repeated LogEntry entries = 5; // 要追加的日志条目（空表示心跳）
+  uint64 leader_commit = 6;      // 领导者的已提交索引
+  uint64 request_id = 7;         // 请求 ID（用于匹配响应）
+}
+
+/// 追加日志响应（对应 Rust 中的 AppendEntriesResponse）
+message AppendEntriesResponse {
+  uint64 term = 1;  // 当前任期（供领导者更新自己）
+  bool success = 2; // 日志是否成功追加
+  optional uint64 conflict_index = 3; // 日志冲突的索引（优化用）
+  optional uint64 conflict_term = 4;  // 日志冲突的任期（优化用）
+  uint64 request_id = 5;              // 对应请求的 ID
+  uint64 matched_index = 6; // 已匹配的日志索引（快速同步用）
+}
+
+/// 安装快照请求（对应 Rust 中的 InstallSnapshotRequest）
+message InstallSnapshotRequest {
+  uint64 term = 1;                // 领导者任期
+  RaftId leader_id = 2;           // 领导者 ID
+  uint64 last_included_index = 3; // 快照包含的最后日志索引
+  uint64 last_included_term = 4;  // 快照包含的最后日志任期
+  bytes data = 5;                 // 快照数据
+  uint64 request_id = 6;          // 请求 ID（用于匹配响应）
+  bool is_probe = 7; // 是否为探测请求（检查安装状态）
+}
+
+/// 安装快照响应（对应 Rust 中的 InstallSnapshotResponse）
+message InstallSnapshotResponse {
+  uint64 term = 1;                // 当前任期（供领导者更新自己）
+  uint64 request_id = 2;          // 对应请求的 ID
+  InstallSnapshotState state = 3; // 快照安装状态
+  string error_message = 4; // 失败时的错误信息（仅 FAILED 状态有效）
+}
+
+// 批量消息容器（用于高效批量发送 RPC）
+message BatchRequest {
+  string node_id = 1;          // 发送方节点 ID
+  repeated RpcMessage messages = 2; // 批量消息列表
+}
+
+message BatchResponse {
+  bool success = 1; // 批量处理是否成功
+  string error = 2; // 错误信息（失败时有效）
+}
+
+/// 统一 RPC 消息包装（包含所有可能的 RPC 类型）
+message RpcMessage {
+  oneof message_type {
+    RequestVoteRequest request_vote = 1;
+    RequestVoteResponse request_vote_response = 2;
+    AppendEntriesRequest append_entries = 3;
+    AppendEntriesResponse append_entries_response = 4;
+    InstallSnapshotRequest install_snapshot = 5;
+    InstallSnapshotResponse install_snapshot_response = 6;
+  }
+  RaftId to = 7; // 目标节点 ID
+}
+
+// Raft 核心 RPC 服务定义
+service RaftService {
+  // 发送批量 RPC 消息（支持所有类型的请求/响应）
+  rpc SendBatch(BatchRequest) returns (BatchResponse);
+}
