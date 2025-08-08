@@ -27,20 +27,17 @@ async fn test_basic_raft_kv_cluster() {
     // 2. 创建并启动集群
     let cluster = TestCluster::new(config).await;
 
+    // 3. 启动集群在后台
     let cluster_clone = cluster.clone();
-
     tokio::spawn(async move { cluster_clone.start().await });
 
-    // 3. 等待集群稳定，选出 Leader
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await; // 等待选举完成
+    // 4. 等待选举完成，寻找 Leader
     println!("Waiting for leader election to complete...");
-
-    // 4. 找到 Leader
-    let leader_node = find_leader(&cluster, &[&node1, &node2, &node3]).await
-        .expect("Should have elected a leader");
+    let leader_node = wait_for_leader(&cluster, &[&node1, &node2, &node3]).await
+        .expect("Should have elected a leader within timeout");
     println!("Found leader: {:?}", leader_node.id);
 
-    // 5. 执行业务操作 (SET)
+    // 5. 执行业务操作 (SET) 仅当 leader 确认是 Leader
     let set_cmd = KvCommand::Set { 
         key: "key1".to_string(), 
         value: "value1".to_string() 
@@ -100,17 +97,24 @@ async fn test_basic_raft_kv_cluster() {
     // 集群会在 drop 时自动清理
 }
 
-// Helper function to find the leader node
-async fn find_leader(cluster: &TestCluster, node_ids: &[&RaftId]) -> Option<crate::common::test_node::TestNode> {
-    // Try to find leader by checking node roles
-    // For now, we'll just return the first available node as a placeholder
-    // In a real implementation, you'd check the Role of each node's RaftState
-    for node_id in node_ids {
-        if let Some(node) = cluster.get_node(node_id) {
-            // TODO: Add method to check if node is leader
-            // if node.is_leader() { return Some(node); }
-            return Some(node); // Return first node for now
+// Helper function to wait for leader election
+async fn wait_for_leader(cluster: &TestCluster, node_ids: &[&RaftId]) -> Option<crate::common::test_node::TestNode> {
+    let timeout = tokio::time::Duration::from_secs(10);
+    let start_time = tokio::time::Instant::now();
+    
+    while start_time.elapsed() < timeout {
+        println!("Checking nodes for leader at {:?}...", start_time.elapsed());
+        for node_id in node_ids {
+            if let Some(node) = cluster.get_node(node_id) {
+                let role = node.get_role();
+                println!("Node {:?} role: {:?}", node_id, role);
+                if role == raft_lite::Role::Leader {
+                    return Some(node);
+                }
+            }
         }
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
+    println!("Timeout waiting for leader election");
     None
 }

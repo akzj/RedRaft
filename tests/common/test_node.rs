@@ -1,6 +1,6 @@
 // test_node.rs
 use crate::common::test_statemachine::TestStateMachine;
-use axum::async_trait;
+use async_trait::async_trait;
 use log::info;
 use raft_lite::mock::mock_network::{MockNetworkHub, MockNodeNetwork, NetworkEvent};
 use raft_lite::mock::mock_storage::{MockStorage, SnapshotStorage};
@@ -50,6 +50,17 @@ impl TestNode {
         let storage = MockStorage::new_with_snapshot_storage(snapshot_storage);
         let target_id = id.clone();
         let driver = driver.clone();
+        // 初始化并保存集群配置，避免在 RaftState::new 时读取到 None
+        {
+            let voters: std::collections::HashSet<raft_lite::RaftId> = std::iter::once(id.clone())
+                .chain(initial_peers.iter().cloned())
+                .collect();
+            let cluster_config = raft_lite::ClusterConfig::simple(voters, 0);
+            storage
+                .save_cluster_config(id.clone(), cluster_config)
+                .await
+                .expect("save_cluster_config before RaftState::new");
+        }
         // 注册网络并获取 dispatch 回调
         let (network) = hub
             .register_node_with_dispatch(
@@ -101,9 +112,21 @@ impl TestNode {
         });
 
         // 创建 RaftState 实例
-        let mut raft_state = RaftState::new(options, inner.clone())
+        let raft_state = RaftState::new(options, inner.clone())
             .await
             .map_err(|e| format!("Failed to create RaftState: {:?}", e))?;
+
+        // 设置初始选举定时器以开始 Raft 协议
+        let election_timeout = std::time::Duration::from_millis(200 + rand::random::<u64>() % 100); // 200-300ms
+        let timer_id = inner.timers.add_timer(
+            inner.id.clone(),
+            raft_lite::Event::ElectionTimeout,
+            election_timeout,
+        );
+        info!(
+            "Started initial election timer for node {:?} with id {}",
+            inner.id, timer_id
+        );
 
         Ok(TestNode {
             inner,
@@ -117,7 +140,31 @@ impl TestNode {
     }
 
     pub async fn handle_event(&self, event: raft_lite::Event) {
+        info!(
+            "Node {:?} handling event: {:?}",
+            self.id,
+            match &event {
+                raft_lite::Event::ElectionTimeout => "ElectionTimeout".to_string(),
+                raft_lite::Event::RequestVoteRequest(_, req) =>
+                    format!("RequestVoteRequest(term={})", req.term),
+                raft_lite::Event::RequestVoteResponse(_, resp) => {
+                    format!(
+                        "RequestVoteResponse(from={:?}, vote_granted={}, term={})",
+                        resp.request_id, resp.vote_granted, resp.term
+                    )
+                }
+                _ => format!("{:?}", event),
+            }
+        );
         self.raft_state.lock().await.handle_event(event).await;
+    }
+
+    pub fn get_role(&self) -> raft_lite::Role {
+        // 使用 try_lock 来避免阻塞，如果锁被占用就返回 Follower
+        match self.raft_state.try_lock() {
+            Ok(state) => state.get_role(),
+            Err(_) => raft_lite::Role::Follower, // 默认返回 Follower
+        }
     }
 }
 
@@ -137,9 +184,26 @@ impl Network for TestNodeInner {
         target: RaftId,
         args: raft_lite::RequestVoteRequest,
     ) -> RpcResult<()> {
-        self.network
-            .send_request_vote_request(from, target, args)
-            .await
+        info!(
+            "Node {:?} sending RequestVote to {:?} for term {}",
+            from, target, args.term
+        );
+        let result = self
+            .network
+            .send_request_vote_request(from.clone(), target.clone(), args)
+            .await;
+        if result.is_ok() {
+            // info!(
+            //     "Successfully sent RequestVote from {:?} to {:?}",
+            //     from, target
+            // );
+        } else {
+            info!(
+                "Failed to send RequestVote from {:?} to {:?}: {:?}",
+                from, target, result
+            );
+        }
+        result
     }
 
     async fn send_request_vote_response(
@@ -148,6 +212,10 @@ impl Network for TestNodeInner {
         target: RaftId,
         args: raft_lite::RequestVoteResponse,
     ) -> RpcResult<()> {
+        info!(
+            "Node {:?} sending RequestVoteResponse to {:?}: vote_granted={}, term={}",
+            from, target, args.vote_granted, args.term
+        );
         self.network
             .send_request_vote_response(from, target, args)
             .await
@@ -353,9 +421,9 @@ impl RaftCallbacks for TestNodeInner {
 }
 
 // 实现 Drop trait 来清理资源（如果需要）
-impl Drop for TestNode {
+impl Drop for TestNodeInner {
     fn drop(&mut self) {
         // 可以在这里 abort task 或执行其他清理
-        info!("Dropping TestNode {:?}", self.id);
+        info!("Dropping TestNodeInner {:?}", self.id);
     }
 }

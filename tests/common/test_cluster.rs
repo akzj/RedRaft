@@ -30,7 +30,7 @@ pub struct TestCluster {
 impl TestCluster {
     pub async fn new(config: TestClusterConfig) -> Self {
         let hub = MockNetworkHub::new(config.hub.clone());
-        let mut cluster = TestCluster {
+        let cluster = TestCluster {
             snapshot_storage: SnapshotStorage::new(),
             driver: MultiRaftDriver::new(),
             config,
@@ -85,7 +85,7 @@ impl TestCluster {
     // 启动集群（例如，触发初始选举）
     pub async fn start(&self) {
         info!("Starting TestCluster...");
-        self.driver.main_loop().await;
+        self.driver.main_loop().await
     }
 
     // 获取节点
