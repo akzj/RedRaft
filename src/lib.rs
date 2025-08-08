@@ -2244,23 +2244,38 @@ impl RaftState {
             // 处理成功响应
             if response.success {
                 let match_index = response.matched_index;
-                let new_next_idx = match_index + 1;
 
                 // 更新match_index
-                self.match_index.insert(peer.clone(), match_index);
+                // 只有当新的 matched_index 更大时才更新
+                let current_match = self.match_index.get(&peer).copied().unwrap_or(0);
+                if match_index > current_match {
+                    // matched_index 有真正的进展，更新它
+                    self.match_index.insert(peer.clone(), match_index);
 
-                // 只有当计算出的next_index比当前的大时才更新，避免回退
-                let current_next = self.next_index.get(&peer).copied().unwrap_or(1);
-                if new_next_idx > current_next {
-                    self.next_index.insert(peer.clone(), new_next_idx);
-                    info!(
-                        "Node {} updated replication state for {}: next_index={} (advanced), match_index={}",
-                        self.id, peer, new_next_idx, match_index
-                    );
+                    // next_index 应该至少是 matched_index + 1
+                    // 但如果当前 next_index 更大（由于乐观更新），保持较大值
+                    let current_next = self.next_index.get(&peer).copied().unwrap_or(1);
+                    let min_next = match_index + 1;
+                    if current_next < min_next {
+                        // 当前 next_index 太小，需要更新
+                        self.next_index.insert(peer.clone(), min_next);
+                        info!(
+                            "Node {} updated replication state for {}: next_index={} (corrected), match_index={}",
+                            self.id, peer, min_next, match_index
+                        );
+                    } else {
+                        // 保持当前的 next_index（可能是乐观更新的结果）
+                        info!(
+                            "Node {} updated match_index for {}: match_index={} (next_index={} kept)",
+                            self.id, peer, match_index, current_next
+                        );
+                    }
                 } else {
+                    // 这是过期的响应，忽略所有更新
                     info!(
-                        "Node {} updated match_index for {}: match_index={} (next_index={} unchanged)",
-                        self.id, peer, match_index, current_next
+                        "Node {} Ignoring stale response from {}: matched_index={} <= current={}",
+                        self.id,
+                        peer, match_index, current_match
                     );
                 }
 
