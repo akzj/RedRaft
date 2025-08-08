@@ -1,7 +1,6 @@
 // test_node.rs
 use crate::common::test_statemachine::TestStateMachine;
 use async_trait::async_trait;
-use log::info;
 use raft_lite::mock::mock_network::{MockNetworkHub, MockNodeNetwork, NetworkEvent};
 use raft_lite::mock::mock_storage::{MockStorage, SnapshotStorage};
 use raft_lite::mutl_raft_driver::{HandleEventTrait, MultiRaftDriver, Timers};
@@ -13,6 +12,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tracing::info;
 
 pub struct TestNodeInner {
     pub id: RaftId,
@@ -87,7 +87,10 @@ impl TestNode {
                             raft_lite::Event::InstallSnapshotResponse(source, resp)
                         }
                     };
-                    driver.send_event(target_id.clone(), event);
+
+                    info!("Dispatching event from {} to {:?}", target_id, event);
+                    let result = driver.send_event(target_id.clone(), event);
+                    info!("send event done {:?}", result);
                     ()
                 }),
             )

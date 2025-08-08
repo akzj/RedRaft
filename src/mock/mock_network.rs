@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, Instant};
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 // --- 模拟网络配置 ---
 
@@ -178,22 +178,22 @@ impl MockNetworkHub {
                                 let _removed_msg = queue.pop_front(); // 移除队首消息
                                 drop(queues_mut); // 释放写锁
 
-                                log::trace!(
+                                info!(
                                     "Delayed message from {} to {} ready for sending",
-                                    sender_id,
-                                    msg_to_send.target
+                                    sender_id, msg_to_send.target
                                 );
                                 // 4. 发送到 real_send 通道
                                 if let Err(_e) = inner
                                     .real_send_tx
                                     .send((msg_to_send.target, msg_to_send.event))
                                 {
-                                    log::warn!(
+                                    warn!(
                                         "Real send channel is closed, stopping delayed queue processor"
                                     );
                                     break; // Channel closed, stop
                                 }
                                 // 处理完一个消息后，立即继续循环检查下一个
+                                info!("send message done,continue");
                                 continue;
                             }
                         }
@@ -203,19 +203,18 @@ impl MockNetworkHub {
                 } else {
                     // 还没到时间，计算等待时长
                     let wait_duration = msg_to_send.scheduled_time.duration_since(now);
-                    log::trace!(
+                    info!(
                         "Waiting {:?} for next delayed message from {}",
-                        wait_duration,
-                        sender_id
+                        wait_duration, sender_id
                     );
                     // 等待指定时间或被新消息入队通知唤醒
                     tokio::select! {
                         _ = tokio::time::sleep(wait_duration) => {
-                            debug!("continue to dispatch message")
+                            info!("continue to dispatch message")
                         }
                         _ = inner.delay_queue_notify.notified() => {
                             // 被通知，可能有新消息或更早的消息，继续循环检查
-                            debug!("Woken up by notification, rechecking queues");
+                            info!("Woken up by notification, rechecking queues");
                         }
                     }
                     continue; // 继续循环
@@ -250,7 +249,7 @@ impl MockNetworkHub {
                                     batch.push(item);
                                 }
                                 _ = tokio::time::sleep_until(deadline) => {
-                                    // 超时，批次完成
+                                    info!("batch receive message done");
                                     break;
                                 }
                             }
@@ -263,7 +262,7 @@ impl MockNetworkHub {
                 }
                 // 如果第一个都没收到，超时后也继续（虽然 batch 会是空的）
                 _ = tokio::time::sleep(timeout_duration) => {
-                    // 超时，即使 batch 为空也继续循环（可能用于周期性检查）
+                    // info!("wait message timeout");
                 }
             }
 
@@ -302,9 +301,12 @@ impl MockNetworkHub {
                     if let Some(sender) = senders.get(&target) {
                         match (sender.dispatch.as_ref(), sender.sender.as_ref()) {
                             (Some(dispatch), None) => {
+                                info!("dispatch event {:?}", event);
                                 dispatch(event.clone());
+                                info!("dispatch event done {:?}", event);
                             }
                             (None, Some(sender)) => {
+                                info!("send message {:?}", event);
                                 sender.send(event).unwrap_or_else(|e| {
                                     log::warn!(
                                         "MockNetwork: Failed to send message to {}, channel closed",
@@ -422,6 +424,8 @@ impl MockNodeNetwork {
         target: RaftId,
         event: NetworkEvent,
     ) -> RpcResult<()> {
+        info!("");
+
         let config = self.hub_inner.raft_config.read().await;
         let config = config.get(&from).cloned().unwrap_or_default();
         let mut rng = rand::rngs::StdRng::from_os_rng(); // [!code ++]
@@ -429,10 +433,9 @@ impl MockNodeNetwork {
 
         if rng.random::<f64>() < config.drop_rate {
             // [!code ++]
-            log::debug!(
+            info!(
                 "MockNetwork: Dropping message from {} to {} (before queuing)",
-                self.node_id,
-                target
+                self.node_id, target
             );
             // 对于丢包，操作被视为“成功”（消息已发出但丢失）
             return Ok(());
@@ -463,12 +466,9 @@ impl MockNodeNetwork {
         // 4. 通知延迟队列处理器有新消息
         self.hub_inner.delay_queue_notify.notify_one();
 
-        log::trace!(
+        info!(
             "MockNetwork: Message from {} to {} queued for sending in {:?} (scheduled at {:?})",
-            self.node_id,
-            target,
-            delay,
-            scheduled_time
+            self.node_id, target, delay, scheduled_time
         );
 
         // 5. 立即返回，模拟网络调用瞬间完成

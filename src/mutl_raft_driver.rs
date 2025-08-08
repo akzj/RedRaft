@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{Notify, mpsc};
+use tracing::info;
 
 // Raft组状态枚举（原子操作安全）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,12 +284,14 @@ impl MultiRaftDriver {
 
                 if swapped {
                     let mut active_map = self.active_map.lock().unwrap();
-                    active_map.insert(target);
-                    let _ = self.notify.notify_one(); // 唤醒Worker
+                    active_map.insert(target.clone());
+                    self.notify.notify_one();
+
+                    info!("push target {} into active map", target);
                 }
             }
             RaftNodeStatus::Pending | RaftNodeStatus::Active => {
-                // 已在处理流程中，无需额外操作
+                info!("target is active")
             }
         }
         SendEventResult::Success
@@ -296,23 +299,29 @@ impl MultiRaftDriver {
 
     // 启动Worker（可启动多个）
     pub async fn main_loop(&self) {
+        info!("Starting main loop for MultiRaftDriver");
+
         loop {
             // 处理过期定时器，获取下一个定时器的剩余时间
             // 等待逻辑：有定时器则等待到其到期，否则无限等待唤醒
             if let Some(duration) = self.process_expired_timers().await {
                 tokio::select! {
                     _ = tokio::time::sleep(duration) => {
-                        continue; // 定时器到期，继续处理
+                        info!("Timer expired, processing expired timers");
+                        continue;
                     },
-                    _ = self.notify.notified() => {},
+                    _ = self.notify.notified() => {
+                        info!("Worker notified, processing active nodes");
+                    },
                 }
             } else {
-                // 无定时器，等待唤醒（新事件或停止信号）
                 self.notify.notified().await;
+                info!("Worker notified (no timer), processing active nodes");
             }
 
             // 检查停止标志
             if self.stop.load(Ordering::Relaxed) {
+                info!("Stop signal received, exiting main loop");
                 break;
             }
 
@@ -322,26 +331,29 @@ impl MultiRaftDriver {
     }
     // 处理active_map中的所有待处理组
     async fn process_active_nodes(&self) {
-        // 一次性取出所有待处理组（减少锁竞争）
         let pendings = {
             let mut active_map = self.active_map.lock().unwrap();
             std::mem::take(&mut *active_map)
         };
 
-        // 逐个处理组
         for node_id in pendings {
-            self.process_single_group(node_id).await;
+            let self_clone = self.clone();
+            tokio::spawn(async move {
+                self_clone.process_single_group(node_id).await;
+            });
         }
     }
 
     // 处理单个Raft组的所有事件
     async fn process_single_group(&self, node_id: RaftId) {
-        // 获取组核心数据
+        info!("Starting to process single group: {}", node_id);
+
         let core = {
             let groups = self.groups.lock().unwrap(); // 非mut锁
             groups.get(&node_id).cloned() // 假设RaftGroupCore实现了Clone，或仅获取引用
         };
         let Some(core) = core else {
+            info!("Group {} not found, skipping processing", node_id);
             return;
         }; // 组已删除
         // 1. 尝试获取处理权（Pending -> Active）
@@ -356,6 +368,11 @@ impl MultiRaftDriver {
             .is_ok();
 
         if !swapped {
+            info!(
+                "Group {} status not pending, current status: {:?}, skipping processing",
+                node_id,
+                core.status.load(Ordering::Acquire)
+            );
             return; // 已被其他Worker处理
         }
 
@@ -364,14 +381,21 @@ impl MultiRaftDriver {
         let handle_event = &core.handle_event;
 
         // 3. 循环处理所有事件
+
+        let mut rx = core.recevier.lock().await;
         loop {
-            match core.recevier.lock().await.try_recv() {
+            match rx.try_recv() {
                 Ok(event) => {
-                    // 处理事件并获取响应
+                    info!("Processing event for node {}: {:?}", node_id, event);
                     handle_event.handle_event(event).await;
+                    info!("Completed processing event for node {}", node_id);
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                    // 暂时无消息，尝试转为Idle并检查是否有新消息
+                    info!(
+                        "No more events in queue for node {}, attempting to transition to idle",
+                        node_id
+                    );
+
                     let swapped = core
                         .status
                         .compare_exchange(
@@ -383,10 +407,16 @@ impl MultiRaftDriver {
                         .is_ok();
 
                     if swapped {
-                        // 转为Idle后检查是否有新消息
-                        let has_remaining = !core.recevier.lock().await.is_empty();
+                        info!(
+                            "Successfully transitioned node {} from Active to Idle",
+                            node_id
+                        );
+                        let has_remaining = !rx.is_empty();
+                        info!(
+                            "Checked for remaining messages in node {} queue: has_remaining = {}",
+                            node_id, has_remaining
+                        );
                         if has_remaining {
-                            // 尝试抢回处理权
                             let swapped = core
                                 .status
                                 .compare_exchange(
@@ -396,28 +426,212 @@ impl MultiRaftDriver {
                                     Ordering::Acquire,
                                 )
                                 .is_ok();
-
                             if swapped {
-                                continue; // 抢回成功，继续处理
+                                info!(
+                                    "Successfully reacquired processing rights for node {}, continuing to process",
+                                    node_id
+                                );
+                                continue;
                             } else {
-                                // 抢回失败，由其他Worker处理
+                                info!(
+                                    "Failed to reacquire processing rights for node {}, another worker took over",
+                                    node_id
+                                );
                                 break;
                             }
                         } else {
-                            // 无新消息，保持Idle
+                            info!(
+                                "No remaining messages for node {}, transitioning to idle",
+                                node_id
+                            );
                             break;
                         }
                     } else {
-                        // 状态已被修改（如其他事件触发了Pending）
+                        info!(
+                            "Failed to transition node {} from Active to Idle, another state change occurred",
+                            node_id
+                        );
                         break;
                     }
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    // 通道关闭，清理状态
                     core.status.store(RaftNodeStatus::Idle, Ordering::Release);
+                    info!("Channel disconnected for node {}, marking as idle", node_id);
                     return;
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*; // 导入被测试模块的所有内容
+    use crate::{Event, RaftId}; // 导入需要的类型
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+    use tokio::{self, time::sleep}; // 确保 tokio 用于异步测试
+
+    #[derive(Clone)] // 为了方便在测试中共享
+    struct MockHandleEvent {
+        pub events_received: Arc<Mutex<Vec<Event>>>,
+    }
+
+    impl MockHandleEvent {
+        fn new() -> Self {
+            Self {
+                events_received: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        pub fn get_events(&self) -> Vec<Event> {
+            self.events_received.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl HandleEventTrait for MockHandleEvent {
+        async fn handle_event(&self, event: Event) {
+            self.events_received.lock().unwrap().push(event);
+        }
+    }
+
+    // --- 测试用例 ---
+
+    #[tokio::test]
+    async fn test_add_raft_group() {
+        let manager = MultiRaftDriver::new();
+
+        let clone = manager.clone();
+
+        tokio::spawn(async move {
+            clone.main_loop().await;
+        });
+
+        let group_id = RaftId::new("test_group".to_string(), "node1".to_string());
+        let mock_handler = MockHandleEvent::new();
+
+        manager.add_raft_group(group_id.clone(), Box::new(mock_handler.clone()));
+
+        assert!(matches!(
+            manager.send_event(group_id.clone(), Event::HeartbeatTimeout),
+            SendEventResult::Success
+        )); // 应该成功，说明组存在
+
+        sleep(Duration::from_millis(30)).await;
+
+        assert!(mock_handler.get_events().len() == 1);
+    }
+
+    #[tokio::test]
+    async fn test_send_event_success() {
+        let manager = MultiRaftDriver::new();
+
+        let driver_clone = manager.clone();
+        tokio::spawn(async move {
+            driver_clone.main_loop().await;
+        });
+
+        let group_id = RaftId::new("test_group".to_string(), "node1".to_string());
+        let mock_handler = MockHandleEvent::new();
+
+        manager.add_raft_group(group_id.clone(), Box::new(mock_handler.clone()));
+
+        let test_event = Event::HeartbeatTimeout; // 使用一个简单的事件进行测试
+
+        let result = manager.send_event(group_id.clone(), test_event.clone());
+
+        assert!(
+            matches!(result, SendEventResult::Success),
+            "Sending event to existing group should succeed"
+        );
+
+        // 给 Worker 一点时间来处理事件
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // 验证事件是否被处理（即传递给了 MockHandleEvent）
+        let received_events = mock_handler.get_events();
+        assert_eq!(
+            received_events.len(),
+            1,
+            "Handler should have received one event"
+        );
+        // Remove the equality check since Event doesn't implement PartialEq
+        // Just verify that an event was received
+    }
+
+    #[tokio::test]
+    async fn test_send_event_failure() {
+        let manager = MultiRaftDriver::new();
+        let driver_clone = manager.clone();
+        tokio::spawn(async move {
+            driver_clone.main_loop().await;
+        });
+
+        let mock_handler = MockHandleEvent::new();
+
+        let group_id = RaftId::new("test_group".to_string(), "node1".to_string());
+
+        manager.add_raft_group(group_id.clone(), Box::new(mock_handler.clone()));
+
+        // 2. 发送事件
+        let event1 = Event::HeartbeatTimeout;
+        let event2 = Event::ElectionTimeout; // 发送两个事件以测试 Pending 状态的持续
+        assert!(matches!(
+            manager.send_event(group_id.clone(), event1.clone()),
+            SendEventResult::Success
+        ));
+        assert!(matches!(
+            manager.send_event(group_id.clone(), event2.clone()),
+            SendEventResult::Success
+        )); // 快速连续发送
+        // 4. 验证事件被处理
+
+        // 给 Worker 一点时间来处理事件
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let received_events = mock_handler.get_events();
+        assert_eq!(
+            received_events.len(),
+            2,
+            "Handler should have received two events"
+        );
+        // Note: We can't compare Event values directly since Event doesn't implement PartialEq
+        // Just verify that we received the expected number of events
+        // 这个测试主要验证事件被处理，Worker 机制在运行。
+    }
+
+    #[tokio::test]
+    async fn test_timer_service_integration() {
+        use tokio::time::Duration;
+        let manager = MultiRaftDriver::new();
+
+        let driver_clone = manager.clone();
+        tokio::spawn(async move {
+            driver_clone.main_loop().await;
+        });
+
+        let mock_handler = MockHandleEvent::new();
+
+        let group_id = RaftId::new("test_group".to_string(), "node1".to_string());
+
+        manager.add_raft_group(group_id.clone(), Box::new(mock_handler.clone()));
+
+        // 注册一个定时器，100ms 后触发
+        let test_event = Event::HeartbeatTimeout;
+        let delay = Duration::from_millis(100);
+
+        let timers = manager.get_timer_service();
+        timers.add_timer(group_id, test_event, delay);
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // 确保等待没有超时
+        let received_events = mock_handler.get_events();
+        assert_eq!(
+            received_events.len(),
+            1,
+            "Handler should have received two events"
+        );
     }
 }
