@@ -238,6 +238,13 @@ impl MultiRaftDriver {
         self.groups.lock().unwrap().insert(group_id, Arc::new(core));
     }
 
+    pub fn del_raft_group(&self, group_id: &RaftId) {
+        let mut groups = self.groups.lock().unwrap();
+        if let Some(_core) = groups.remove(group_id) {
+            info!("Removed Raft group: {}", group_id);
+        }
+    }
+
     async fn process_expired_timers(&self) -> Option<Duration> {
         let (events, duration) = self.timer_service.process_expired_timers();
         for event in events {

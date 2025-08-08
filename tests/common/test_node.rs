@@ -102,7 +102,7 @@ impl TestNode {
             .await;
 
         // 创建状态机回调
-        let state_machine = TestStateMachine::new();
+        let state_machine = TestStateMachine::new(id.clone());
 
         // 创建 RaftState 选项
         let options = RaftStateOptions {
@@ -163,7 +163,7 @@ impl TestNode {
         self.network.restore().await;
     }
 
-    pub async fn handle_event(&self, event: raft_lite::Event) {
+    async fn handle_event(&self, event: raft_lite::Event) {
         info!(
             "Node {:?} handling event: {:?}",
             self.id,

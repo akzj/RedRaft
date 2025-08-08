@@ -6,7 +6,7 @@ mod common;
 use common::test_cluster::{TestCluster, TestClusterConfig};
 use common::test_statemachine::KvCommand;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_cluster_config_operations() {
     tracing_subscriber::fmt().init();
 
@@ -65,14 +65,14 @@ async fn test_cluster_config_operations() {
     println!("\n=== Testing business message handling ===");
 
     // 发送一些业务命令到leader
-    for i in 1..=5 {
+    for i in 1..=20 {
         let command = KvCommand::Set {
             key: format!("key{}", i),
             value: format!("value{}", i),
         };
         let command_bytes = command.encode();
 
-        match cluster.propose_command(&leader_id, command_bytes).await {
+        match cluster.propose_command(&leader_id, command_bytes) {
             Ok(()) => println!("✓ Successfully proposed command: {:?}", command),
             Err(e) => println!("✗ Failed to propose command {:?}: {}", command, e),
         }
@@ -247,7 +247,7 @@ async fn test_cluster_config_operations() {
             };
             let command_bytes = test_command.encode();
 
-            match cluster.propose_command(current_leader, command_bytes).await {
+            match cluster.propose_command(current_leader, command_bytes) {
                 Ok(()) => {
                     println!(
                         "✓ Cluster still accepts commands after iteration {}",

@@ -5,7 +5,7 @@ use tokio;
 mod common;
 use common::test_cluster::{TestCluster, TestClusterConfig};
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_network_leader_election() {
     tracing_subscriber::fmt().init();
 

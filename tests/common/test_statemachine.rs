@@ -1,5 +1,6 @@
 use raft_lite::{RaftId, RequestId};
 use serde::{Deserialize, Serialize};
+use tracing::info;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -58,12 +59,14 @@ impl SimpleKvStore {
 // --- 实现 RaftCallbacks ---
 // TestStateMachine 将包含 KvStore 和与 Raft 交互所需的其他组件
 pub struct TestStateMachine {
+    id : RaftId,
     pub store: Arc<RwLock<SimpleKvStore>>,
 }
 
 impl TestStateMachine {
-    pub fn new() -> Self {
+    pub fn new(id: RaftId) -> Self {
         Self {
+            id,
             store: Arc::new(RwLock::new(SimpleKvStore::new())),
         }
     }
@@ -76,8 +79,9 @@ impl TestStateMachine {
         _term: u64,
         cmd: raft_lite::Command,
     ) -> raft_lite::ApplyResult<()> {
-        println!(
-            "TestStateMachine apply_command called: index={}, term={}, cmd_len={}",
+        info!(
+            "node {:?} TestStateMachine apply_command called: index={}, term={}, cmd_len={}",
+            self.id,
             _index,
             _term,
             cmd.len()
@@ -88,11 +92,11 @@ impl TestStateMachine {
             raft_lite::ApplyError::internal_err(format!("Failed to decode command: {}", e))
         })?;
 
-        println!("Decoded KV command: {:?}", kv_cmd);
+        info!("node {:?} Applying command: {:?}", self.id, kv_cmd);
 
         match kv_cmd {
             KvCommand::Set { key, value } => {
-                println!("Setting key={}, value={}", key, value);
+                info!("node {:?} Setting key={}, value={}",self.id, key, value);
                 self.store.write().unwrap().set(key.clone(), value.clone());
                 //     println!("Current store state: {:?}", self.store.read().unwrap().data);
             }

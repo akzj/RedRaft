@@ -1563,6 +1563,11 @@ impl RaftState {
     }
 
     async fn become_leader(&mut self) {
+        warn!(
+            "Node {} becoming leader for term {} (previous role: {:?})",
+            self.id, self.current_term, self.role
+        );
+        
         self.role = Role::Leader;
         self.current_election_id = None;
         self.leader_id = None; // Leader 不需要跟踪其他 Leader
@@ -1833,6 +1838,12 @@ impl RaftState {
                 request_id: request.request_id,
                 matched_index,
             };
+            
+            info!(
+                "Node {} sending rejection response to {} with higher term {} (request term was {})",
+                self.id, request.leader_id, self.current_term, request.term
+            );
+            
             let _ = self
                 .error_handler // 使用 error_handler 处理发送响应的错误
                 .handle(
@@ -2210,9 +2221,14 @@ impl RaftState {
             return;
         }
 
+        debug!(
+            "Leader {} received AppendEntries response from {}: term={}, success={}, current_term={}",
+            self.id, peer, response.term, response.success, self.current_term
+        );
+
         // 处理更高任期：当前Leader发现更高任期，降级为Follower
         if response.term > self.current_term {
-            info!(
+            warn!(
                 "Node {} stepping down to Follower, found higher term {} from {} (current term {})",
                 self.id, response.term, peer, self.current_term
             );
@@ -2279,17 +2295,17 @@ impl RaftState {
                         );
                     } else {
                         // 保持当前的 next_index（可能是乐观更新的结果）
-                        info!(
-                            "Node {} updated match_index for {}: match_index={} (next_index={} kept)",
-                            self.id, peer, match_index, current_next
-                        );
+                        // info!(
+                        //     "Node {} updated match_index for {}: match_index={} (next_index={} kept)",
+                        //     self.id, peer, match_index, current_next
+                        // );
                     }
                 } else {
                     // 这是过期的响应，忽略所有更新
-                    info!(
-                        "Node {} Ignoring stale response from {}: matched_index={} <= current={}",
-                        self.id, peer, match_index, current_match
-                    );
+                    // info!(
+                    //     "Node {} Ignoring stale response from {}: matched_index={} <= current={}",
+                    //     self.id, peer, match_index, current_match
+                    // );
                 }
 
                 // 尝试更新commit_index
@@ -2328,10 +2344,10 @@ impl RaftState {
 
             // 若当前处于联合配置，更新确认状态
             if response.success && self.config.joint.is_some() {
-                info!(
-                    "Checking joint exit condition after successful replication to {}",
-                    peer
-                );
+                // info!(
+                //     "Checking joint exit condition after successful replication to {}",
+                //     peer
+                // );
                 self.check_joint_exit_condition().await;
             }
         }
@@ -3450,6 +3466,10 @@ impl RaftState {
         self.config_change_start_time = Some(Instant::now());
         self.client_requests.insert(request_id, last_idx + 1);
 
+        // 更新 Leader 的本地日志状态
+        self.last_log_index = index;
+        self.last_log_term = self.current_term;
+
         assert!(
             self.is_leader_joint_config(),
             "Leader should be in joint config after initiating config change"
@@ -3701,6 +3721,10 @@ impl RaftState {
 
         // 广播日志条目至集群
         self.broadcast_append_entries().await;
+
+        // 更新 Leader 的本地日志状态
+        self.last_log_index = index;
+        self.last_log_term = self.current_term;
 
         // 更新本地配置（无论回滚还是正常退出，均与日志保持一致）
         // 注：严格遵循论文需等待日志提交后更新，此处为基础修复，完整实现需监听提交事件
@@ -4123,6 +4147,11 @@ impl RaftState {
         }
 
         voter_indices.sort_unstable_by(|a, b| b.cmp(a));
+
+        info!(
+            "Node {} found voter indices: {:?} for quorum {}",
+            self.id, voter_indices, quorum
+        );
 
         if voter_indices.len() >= quorum {
             Some(voter_indices[quorum - 1])

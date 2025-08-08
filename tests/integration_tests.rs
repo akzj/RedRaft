@@ -5,12 +5,13 @@ pub mod common;
 
 use raft_lite::mock::mock_network::MockNetworkHubConfig;
 use raft_lite::{RaftId, RequestId};
+use tokio::time::sleep;
 use tracing_subscriber;
 
 use crate::common::test_cluster::{TestCluster, TestClusterConfig};
 use crate::common::test_statemachine::KvCommand;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_basic_raft_kv_cluster() {
     let _ = tracing_subscriber::fmt::try_init(); // 初始化日志
 
@@ -71,24 +72,15 @@ async fn test_basic_raft_kv_cluster() {
 
         let final_role = new_leader.get_role();
         println!("Final leader role before sending command: {:?}", final_role);
-
-        new_leader
-            .handle_event(raft_lite::Event::ClientPropose {
-                cmd: set_cmd_data,
-                request_id,
-            })
-            .await;
+        cluster.propose_command(&new_leader.id, set_cmd_data.clone()).unwrap();
         println!(
             "Sent SET command for key1=value1 to new leader, request_id: {:?}",
             request_id
         );
     } else {
-        leader_node
-            .handle_event(raft_lite::Event::ClientPropose {
-                cmd: set_cmd_data,
-                request_id,
-            })
-            .await;
+        // 如果 Leader 状态正常，直接发送命令
+        cluster.propose_command(&leader_node.id, set_cmd_data.clone()).unwrap();
+
         println!(
             "Sent SET command for key1=value1, request_id: {:?}",
             request_id
@@ -133,12 +125,14 @@ async fn test_basic_raft_kv_cluster() {
         key: "key2".to_string(),
         value: "value2".to_string(),
     };
-    leader_node
-        .handle_event(raft_lite::Event::ClientPropose {
-            cmd: set_cmd2.encode(),
-            request_id: RequestId::new(),
-        })
-        .await;
+
+    let set_cmd2_data = set_cmd2.encode();
+    let request_id2 = RequestId::new();
+    println!(
+        "Sending second SET command for key2=value2, request_id: {:?}",
+        request_id2
+    );
+    cluster.propose_command(&leader_node.id, set_cmd2_data.clone()).unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
@@ -167,33 +161,36 @@ async fn test_basic_raft_kv_cluster() {
     }
 
     for cmd in pipeline_commands {
-        leader_node
-            .handle_event(raft_lite::Event::ClientPropose {
-                cmd: cmd.encode(),
-                request_id: RequestId::new(),
-            })
-            .await;
+        sleep(tokio::time::Duration::from_micros(100)).await; // 每个命令间隔 1ms
+        cluster.propose_command(&leader_node.id, cmd.clone().encode()).unwrap();
+        //println!("Sent pipeline command for {:?}", cmd);
     }
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
     // 验证管道中的命令 - 在所有节点上检查所有keys
     println!("Verifying pipeline commands on all nodes...");
-    
+
     // 选择几个关键的key进行验证，而不是全部97个
     let sample_keys = [3, 10, 25, 50, 75, 99];
-    
+
     for &key_num in &sample_keys {
         let key = format!("key{}", key_num);
         let expected_value = format!("value{}", key_num);
-        
+
         println!("Checking key: {}", key);
         for node_id in [&node1, &node2, &node3].iter() {
             if let Some(node) = cluster.get_node(node_id) {
                 let value = node.get_value(&key);
-                println!("  Node {:?} - Value for {}: {:?}", node_id, key, value);
-                assert_eq!(value, Some(expected_value.clone()), 
-                          "Node {:?} should have {}={}", node_id, key, expected_value);
+                //println!("  Node {:?} - Value for {}: {:?}", node_id, key, value);
+                assert_eq!(
+                    value,
+                    Some(expected_value.clone()),
+                    "Node {:?} should have {}={}",
+                    node_id,
+                    key,
+                    expected_value
+                );
             }
         }
     }
