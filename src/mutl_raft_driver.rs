@@ -287,11 +287,11 @@ impl MultiRaftDriver {
                     active_map.insert(target.clone());
                     self.notify.notify_one();
 
-                    info!("push target {} into active map", target);
+                    //    info!("push target {} into active map", target);
                 }
             }
             RaftNodeStatus::Pending | RaftNodeStatus::Active => {
-                info!("target is active")
+                //info!("target is active")
             }
         }
         SendEventResult::Success
@@ -306,17 +306,17 @@ impl MultiRaftDriver {
             // 等待逻辑：有定时器则等待到其到期，否则无限等待唤醒
             if let Some(duration) = self.process_expired_timers().await {
                 tokio::select! {
-                    _ = tokio::time::sleep(duration) => {
-                        info!("Timer expired, processing expired timers");
-                        continue;
-                    },
-                    _ = self.notify.notified() => {
-                        info!("Worker notified, processing active nodes");
-                    },
-                }
+                        _ = tokio::time::sleep(duration) => {
+                  //          info!("Timer expired, processing expired timers");
+                            continue;
+                        },
+                        _ = self.notify.notified() => {
+                //            info!("Worker notified, processing active nodes");
+                        },
+                    }
             } else {
                 self.notify.notified().await;
-                info!("Worker notified (no timer), processing active nodes");
+                //info!("Worker notified (no timer), processing active nodes");
             }
 
             // 检查停止标志
@@ -346,7 +346,7 @@ impl MultiRaftDriver {
 
     // 处理单个Raft组的所有事件
     async fn process_single_group(&self, node_id: RaftId) {
-        info!("Starting to process single group: {}", node_id);
+        //info!("Starting to process single group: {}", node_id);
 
         let core = {
             let groups = self.groups.lock().unwrap(); // 非mut锁
@@ -386,15 +386,15 @@ impl MultiRaftDriver {
         loop {
             match rx.try_recv() {
                 Ok(event) => {
-                    info!("Processing event for node {}: {:?}", node_id, event);
+                    //        info!("Processing event for node {}: {:?}", node_id, event);
                     handle_event.handle_event(event).await;
-                    info!("Completed processing event for node {}", node_id);
+                    //      info!("Completed processing event for node {}", node_id);
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                    info!(
-                        "No more events in queue for node {}, attempting to transition to idle",
-                        node_id
-                    );
+                    // info!(
+                    //     "No more events in queue for node {}, attempting to transition to idle",
+                    //     node_id
+                    // );
 
                     let swapped = core
                         .status
@@ -407,15 +407,15 @@ impl MultiRaftDriver {
                         .is_ok();
 
                     if swapped {
-                        info!(
-                            "Successfully transitioned node {} from Active to Idle",
-                            node_id
-                        );
+                        // info!(
+                        //     "Successfully transitioned node {} from Active to Idle",
+                        //     node_id
+                        // );
                         let has_remaining = !rx.is_empty();
-                        info!(
-                            "Checked for remaining messages in node {} queue: has_remaining = {}",
-                            node_id, has_remaining
-                        );
+                        // info!(
+                        //     "Checked for remaining messages in node {} queue: has_remaining = {}",
+                        //     node_id, has_remaining
+                        // );
                         if has_remaining {
                             let swapped = core
                                 .status
@@ -440,10 +440,10 @@ impl MultiRaftDriver {
                                 break;
                             }
                         } else {
-                            info!(
-                                "No remaining messages for node {}, transitioning to idle",
-                                node_id
-                            );
+                            // info!(
+                            //     "No remaining messages for node {}, transitioning to idle",
+                            //     node_id
+                            // );
                             break;
                         }
                     } else {

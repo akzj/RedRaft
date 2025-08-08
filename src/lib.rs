@@ -1,12 +1,13 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
+use tracing::info;
 
 pub mod mock;
 pub mod mutl_raft_driver;
@@ -423,7 +424,7 @@ impl CallbackErrorHandler {
                         None
                     }
                     ErrorSeverity::Ignorable => {
-                        debug!("[IGNORABLE] {} failed: {}", ctx, e.context());
+                        info!("[IGNORABLE] {} failed: {}", ctx, e.context());
                         None
                     }
                 }
@@ -1417,14 +1418,14 @@ impl RaftState {
                     .await;
                 // 注意：这里不需要再次调用 state_changed，因为角色已经在任期更新时确定为 Follower
             } else {
-                debug!(
+                info!(
                     "Node {} rejecting vote for {}, logs not up-to-date",
                     self.id, request.candidate_id
                 );
             }
         } else {
             // 不满足投票条件 (任期不够新，或已投票给其他人)
-            debug!(
+            info!(
                 "Node {} rejecting vote for {} in term {}, already voted for {:?} or term mismatch (args.term: {}, self.current_term: {})",
                 self.id,
                 request.candidate_id,
@@ -1468,7 +1469,7 @@ impl RaftState {
 
     async fn handle_request_vote_response(&mut self, peer: RaftId, response: RequestVoteResponse) {
         // 过滤非候选人状态或过期请求
-        debug!("node {}: received vote response: {:?}", self.id, response);
+        info!("node {}: received vote response: {:?}", self.id, response);
         if self.role != Role::Candidate || self.current_election_id != Some(response.request_id) {
             return;
         }
@@ -1528,7 +1529,7 @@ impl RaftState {
     }
 
     async fn check_election_result(&mut self) {
-        debug!(
+        info!(
             "Node {}: check_election_result, votes: {:?}, current_term: {}, role: {:?}, election_id: {:?}",
             self.id, self.election_votes, self.current_term, self.role, self.current_election_id
         );
@@ -1750,7 +1751,7 @@ impl RaftState {
             return;
         }
 
-        debug!(
+        info!(
             "Node {} received AppendEntries from {} (term {}, prev_log_index {}, entries {}, leader_commit {})",
             self.id,
             request.leader_id,
@@ -1763,7 +1764,7 @@ impl RaftState {
         let mut success;
         let mut conflict_index = None;
         let mut conflict_term = None;
-        let matched_index = self.get_last_log_index().await;
+        let mut matched_index = self.get_last_log_index().await; // 初始值：当前的最后日志索引
 
         // --- 1. 处理更低任期的请求 ---
         if request.term < self.current_term {
@@ -2010,7 +2011,7 @@ impl RaftState {
             }
 
             // 如果检查通过，则执行截断
-            debug!(
+            info!(
                 "Node {} truncating log suffix from index {}",
                 self.id, truncate_from_index
             );
@@ -2064,7 +2065,7 @@ impl RaftState {
             }
 
             if success {
-                debug!(
+                info!(
                     "Node {} appending {} log entries starting from index {}",
                     self.id,
                     request.entries.len(),
@@ -2085,16 +2086,35 @@ impl RaftState {
                     success = false;
                     // 对于 append 失败，通常没有特定的 conflict_index/term，Leader 会根据 next_index 回退
                     // 这里可以不设置 conflict_index/term，或者设置为指示存储错误的值（如果协议支持）
+                } else {
+                    // 成功追加日志后，更新matched_index为最后一个追加的日志条目的索引
+                    if let Some(last_entry) = request.entries.last() {
+                        matched_index = last_entry.index;
+                        // 更新 Follower 的 last_log_index 和 last_log_term
+                        self.last_log_index = last_entry.index;
+                        self.last_log_term = last_entry.term;
+                        info!(
+                            "Node {} successfully appended log entries, updated matched_index to {}, last_log_index to {}",
+                            self.id, matched_index, self.last_log_index
+                        );
+                        // DEBUG: Check last log index after append
+                        let after_append_last_index = self.get_last_log_index().await;
+                        debug!("Node {} last_log_index after append: {}", self.id, after_append_last_index);
+                    }
                 }
             }
         }
 
         // --- 6. 更新提交索引 ---
+        info!(
+            "Node {} commit_index update check: success={}, leader_commit={}, self.commit_index={}, last_log_index={}",
+            self.id, success, request.leader_commit, self.commit_index, self.get_last_log_index().await
+        );
         if success && request.leader_commit > self.commit_index {
             let new_commit_index =
                 std::cmp::min(request.leader_commit, self.get_last_log_index().await);
             if new_commit_index > self.commit_index {
-                debug!(
+                info!(
                     "Node {} updating commit index from {} to {}",
                     self.id, self.commit_index, new_commit_index
                 );
@@ -2110,7 +2130,7 @@ impl RaftState {
             request_id: request.request_id,
             conflict_index: if success { None } else { conflict_index }, // 成功时通常不设置 conflict_index
             conflict_term: if success { None } else { conflict_term }, // 成功时通常不设置 conflict_term
-            matched_index: self.get_last_log_index().await, // 示例：无论成功与否都返回当前最新索引（如果字段存在）
+            matched_index,                                             // 使用更新后的matched_index
         };
         let _send_result = self
             .error_handler
@@ -2126,7 +2146,7 @@ impl RaftState {
 
         // --- 8. 应用已提交的日志 ---
         if success && self.commit_index > self.last_applied {
-            debug!(
+            info!(
                 "Node {} applying committed logs up to index {}",
                 self.id, self.commit_index
             );
@@ -2190,7 +2210,7 @@ impl RaftState {
                 self.match_index.insert(peer.clone(), match_index);
                 self.next_index.insert(peer.clone(), new_next_idx);
 
-                debug!(
+                info!(
                     "Node {} updated replication state for {}: next_index={}, match_index={}",
                     self.id, peer, new_next_idx, match_index
                 );
@@ -2199,7 +2219,7 @@ impl RaftState {
                 self.update_commit_index().await;
             } else {
                 // 处理日志冲突
-                debug!(
+                info!(
                     "Node {} received log conflict from {}: index={:?}, term={:?}",
                     self.id, peer, response.conflict_index, response.conflict_term
                 );
@@ -2214,7 +2234,7 @@ impl RaftState {
                 let new_next = self.resolve_log_conflict(&peer, &response).await;
                 self.next_index.insert(peer.clone(), new_next);
 
-                debug!(
+                info!(
                     "Node {} updated next_index for {} to {} (conflict resolution)",
                     self.id, peer, new_next
                 );
@@ -2231,7 +2251,7 @@ impl RaftState {
 
             // 若当前处于联合配置，更新确认状态
             if response.success && self.config.joint.is_some() {
-                debug!(
+                info!(
                     "Checking joint exit condition after successful replication to {}",
                     peer
                 );
@@ -2244,7 +2264,7 @@ impl RaftState {
     async fn resolve_log_conflict(&self, peer: &RaftId, response: &AppendEntriesResponse) -> u64 {
         if response.matched_index > 0 {
             // 有明确的匹配索引，直接使用它作为基准
-            debug!(
+            info!(
                 "Using matched_index {} for peer {} conflict resolution",
                 response.matched_index, peer
             );
@@ -2252,7 +2272,7 @@ impl RaftState {
         } else if let Some(conflict_index) = response.conflict_index {
             // 尝试使用冲突任期优化
             if let Some(conflict_term) = response.conflict_term {
-                debug!(
+                info!(
                     "Optimizing with conflict_term: {} at index: {} for peer {}",
                     conflict_term, conflict_index, peer
                 );
@@ -2270,7 +2290,7 @@ impl RaftState {
                         .await
                     {
                         Ok(entries) if !entries.is_empty() => {
-                            debug!(
+                            info!(
                                 "Checking index {} with term {} for peer {}",
                                 i, entries[0].1, peer
                             );
@@ -2286,7 +2306,7 @@ impl RaftState {
                             // 任期大于冲突任期，继续向前查找是否有冲突任期的条目
                         }
                         Ok(_entries) => {
-                            debug!("Index {} returned empty entries for peer {}", i, peer);
+                            info!("Index {} returned empty entries for peer {}", i, peer);
                         }
                         Err(e) => {
                             error!(
@@ -2301,7 +2321,7 @@ impl RaftState {
 
                 // 如果找到冲突任期的条目，使用其索引+1
                 if let Some(index) = last_conflict_term_index {
-                    debug!(
+                    info!(
                         "Found matching term {} at index {} for peer {}",
                         conflict_term, index, peer
                     );
@@ -2313,7 +2333,7 @@ impl RaftState {
                     match storage.get_log_entries(self.id.clone(), i, i + 1).await {
                         Ok(entries) if !entries.is_empty() => {
                             if entries[0].term > conflict_term {
-                                debug!(
+                                info!(
                                     "Found optimized index {} for peer {} conflict resolution",
                                     i, peer
                                 );
@@ -2334,7 +2354,7 @@ impl RaftState {
                 // 如果遍历完所有日志都没有找到更大的任期，使用冲突索引
                 conflict_index.max(1)
             } else {
-                debug!(
+                info!(
                     "Using conflict_index {} without term for peer {}",
                     conflict_index, peer
                 );
@@ -2342,7 +2362,7 @@ impl RaftState {
             }
         } else {
             // 最后的保守回退：当前next_index - 1
-            debug!(
+            info!(
                 "Using conservative fallback for peer {} conflict resolution",
                 peer
             );
@@ -2511,7 +2531,7 @@ impl RaftState {
 
     // 发送探测消息检查快照安装状态（Leader端）
     async fn probe_snapshot_status(&mut self, target: RaftId) {
-        debug!(
+        info!(
             "Probing snapshot status for follower {} at term {}, last_snapshot_index {}",
             target,
             self.current_term,
@@ -2827,7 +2847,7 @@ impl RaftState {
             }
             InstallSnapshotState::Installing => {
                 // 仍在安装中，更新探测计划（延长尝试次数）
-                debug!("Follower {} is still installing snapshot", peer);
+                info!("Follower {} is still installing snapshot", peer);
                 self.extend_snapshot_probe(&peer);
             }
             InstallSnapshotState::Failed(reason) => {
@@ -2910,7 +2930,16 @@ impl RaftState {
 
     // === 客户端请求与日志应用 ===
     async fn handle_client_propose(&mut self, cmd: Command, request_id: RequestId) {
+        info!(
+            "Node {} handling ClientPropose with request_id={:?}, role={:?}",
+            self.id, request_id, self.role
+        );
+
         if self.role != Role::Leader {
+            warn!(
+                "Node {} rejecting ClientPropose (not leader, current role: {:?}, leader: {:?})",
+                self.id, self.role, self.leader_id
+            );
             self.error_handler
                 .handle_void(
                     self.callbacks
@@ -2956,6 +2985,10 @@ impl RaftState {
         };
 
         // 追加日志
+        info!(
+            "Node {} (Leader) appending log entry at index {} for request_id={:?}",
+            self.id, index, request_id
+        );
         let append_success = self
             .error_handler
             .handle_void(
@@ -2967,6 +3000,10 @@ impl RaftState {
             )
             .await;
         if !append_success {
+            error!(
+                "Node {} failed to append log entry for request_id={:?}",
+                self.id, request_id
+            );
             self.error_handler
                 .handle_void(
                     self.callbacks
@@ -2985,6 +3022,10 @@ impl RaftState {
             return;
         }
 
+        info!(
+            "Node {} successfully appended log entry at index {}, broadcasting to followers",
+            self.id, index
+        );
         self.last_log_index = index;
         self.last_log_term = self.current_term;
 
@@ -2993,21 +3034,29 @@ impl RaftState {
         self.client_requests_revert.insert(index, request_id);
 
         // 立即同步日志
+        info!(
+            "Node {} broadcasting append entries for log index {}",
+            self.id, index
+        );
         self.broadcast_append_entries().await;
     }
 
     async fn apply_committed_logs(&mut self) {
         // 应用已提交但未应用的日志
         if self.last_applied >= self.commit_index {
+            debug!("Node {} apply_committed_logs: nothing to apply (last_applied={}, commit_index={})", 
+                   self.id, self.last_applied, self.commit_index);
             return;
         }
 
         let start = self.last_applied + 1;
-
         let end = std::cmp::min(
             self.commit_index,
             self.last_applied + self.options.apply_batch_size,
         );
+
+        info!("Node {} apply_committed_logs: applying logs from {} to {} (last_applied={}, commit_index={})", 
+              self.id, start, end, self.last_applied, self.commit_index);
 
         let entries = match self
             .callbacks
@@ -3086,11 +3135,14 @@ impl RaftState {
                 }
             } else {
                 let index = entry.index;
+                info!("Node {} applying command to state machine: index={}, term={}, command_len={}", 
+                      self.id, entry.index, entry.term, entry.command.len());
                 let _ = self
                     .callbacks
                     .apply_command(self.id.clone(), entry.index, entry.term, entry.command)
                     .await;
                 self.last_applied = index;
+                info!("Node {} updated last_applied to {}", self.id, self.last_applied);
 
                 // 如果是客户端请求，返回响应
                 self.check_client_response(index).await;
@@ -3378,7 +3430,7 @@ impl RaftState {
         // 检查是否超时
         let enter_time = self.config_change_start_time.unwrap();
         if enter_time.elapsed() < self.config_change_timeout {
-            debug!(
+            info!(
                 "Joint config not timed out (elapsed: {:?}, timeout: {:?})",
                 enter_time.elapsed(),
                 self.config_change_timeout
@@ -3874,6 +3926,9 @@ impl RaftState {
             }
         };
 
+        // 记录原来的commit_index
+        let old_commit_index = self.commit_index;
+
         // 任期检查
         if candidate_index > self.commit_index {
             let candidate_term = match self
@@ -3913,6 +3968,15 @@ impl RaftState {
                     self.commit_index = candidate_index;
                 }
             }
+        }
+
+        // 如果commit_index有更新，立即应用已提交的日志
+        if self.commit_index > old_commit_index {
+            info!(
+                "Node {} commit_index updated from {} to {}, applying committed logs",
+                self.id, old_commit_index, self.commit_index
+            );
+            self.apply_committed_logs().await;
         }
     }
 

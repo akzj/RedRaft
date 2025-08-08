@@ -71,14 +71,20 @@ impl TestStateMachine {
         _term: u64,
         cmd: raft_lite::Command,
     ) -> raft_lite::ApplyResult<()> {
+        println!("TestStateMachine apply_command called: index={}, term={}, cmd_len={}", _index, _term, cmd.len());
+        
         // Decode and execute KV command
         let kv_cmd = KvCommand::decode(&cmd).map_err(|e| {
             raft_lite::ApplyError::internal_err(format!("Failed to decode command: {}", e))
         })?;
 
+        println!("Decoded KV command: {:?}", kv_cmd);
+
         match kv_cmd {
             KvCommand::Set { key, value } => {
-                self.store.write().unwrap().set(key, value);
+                println!("Setting key={}, value={}", key, value);
+                self.store.write().unwrap().set(key.clone(), value.clone());
+                println!("Current store state: {:?}", self.store.read().unwrap().data);
             }
             KvCommand::Get { key } => {
                 assert!(false, "Get operation not passed to state machine");
