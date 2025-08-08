@@ -48,6 +48,11 @@ impl SimpleKvStore {
     pub fn delete(&mut self, key: &str) -> bool {
         self.data.remove(key).is_some()
     }
+
+    // Get all data for verification
+    pub fn get_all_data(&self) -> HashMap<String, String> {
+        self.data.clone()
+    }
 }
 
 // --- 实现 RaftCallbacks ---
@@ -126,5 +131,15 @@ impl TestStateMachine {
             .map_err(|e| raft_lite::SnapshotError::DataCorrupted(e.into()))?;
         self.store.write().unwrap().data = store.data;
         Ok(())
+    }
+
+    // Get all stored data for verification
+    pub fn get_all_data(&self) -> HashMap<String, String> {
+        self.store.read().unwrap().get_all_data()
+    }
+
+    // Get a specific key value for verification  
+    pub fn get_value(&self, key: &str) -> Option<String> {
+        self.store.read().unwrap().get(key)
     }
 }

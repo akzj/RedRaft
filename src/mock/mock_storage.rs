@@ -179,14 +179,20 @@ impl Storage for MockStorage {
     }
 
     async fn get_log_term(&self, _from: RaftId, idx: u64) -> StorageResult<u64> {
+        if idx == 0 {
+            return Ok(0); // 索引 0 的任期总是 0
+        }
+        
         let log = self.log.read().unwrap();
         for entry in log.iter() {
             if entry.index == idx {
                 return Ok(entry.term);
             }
         }
-        // If not found, return 0 or an error as appropriate for your use case
-        Ok(0)
+        
+        // 如果日志条目不存在，返回错误而不是 0
+        // 这样可以避免日志一致性检查的混淆
+        Err(crate::StorageError::LogNotFound(idx))
     }
 
     async fn load_snapshot(&self, _from: RaftId) -> StorageResult<Option<Snapshot>> {
@@ -361,8 +367,8 @@ mod tests {
         assert_eq!(storage.get_log_term(node_id.clone(), 2).await.unwrap(), 2);
         assert_eq!(storage.get_log_term(node_id.clone(), 3).await.unwrap(), 2);
 
-        // 测试获取不存在的日志任期
-        assert_eq!(storage.get_log_term(node_id, 5).await.unwrap(), 0);
+        // 测试获取不存在的日志任期 - 现在应该返回错误
+        assert!(storage.get_log_term(node_id, 5).await.is_err());
     }
 
     #[tokio::test]

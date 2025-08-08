@@ -125,7 +125,7 @@ impl TestNode {
             .map_err(|e| format!("Failed to create RaftState: {:?}", e))?;
 
         // 设置初始选举定时器以开始 Raft 协议
-        let election_timeout = std::time::Duration::from_millis(200 + rand::random::<u64>() % 100); // 200-300ms
+        let election_timeout = std::time::Duration::from_millis(500 + rand::random::<u64>() % 500); // 500-1000ms
         let timer_id = inner.timers.add_timer(
             inner.id.clone(),
             raft_lite::Event::ElectionTimeout,
@@ -144,7 +144,12 @@ impl TestNode {
 
     // 可以添加方法来查询状态机
     pub fn get_value(&self, key: &str) -> Option<String> {
-        self.state_machine.store.read().unwrap().get(key)
+        self.state_machine.get_value(key)
+    }
+
+    // Get all stored data for verification
+    pub fn get_all_data(&self) -> std::collections::HashMap<String, String> {
+        self.state_machine.get_all_data()
     }
 
     pub async fn isolate(&self) {

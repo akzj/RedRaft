@@ -1068,8 +1068,8 @@ impl Default for RaftStateOptions {
         Self {
             id: RaftId::new("".to_string(), "".to_string()),
             peers: vec![],
-            election_timeout_min: 150,
-            election_timeout_max: 300,
+            election_timeout_min: 500,
+            election_timeout_max: 1000,
             heartbeat_interval: 50,
             apply_interval: 100,
             apply_batch_size: 64,
@@ -1565,6 +1565,7 @@ impl RaftState {
     async fn become_leader(&mut self) {
         self.role = Role::Leader;
         self.current_election_id = None;
+        self.leader_id = None; // Leader 不需要跟踪其他 Leader
 
         // 初始化复制状态
         let last_log_index = self.get_last_log_index().await;
@@ -1574,7 +1575,18 @@ impl RaftState {
         self.follower_last_snapshot_index.clear();
         self.snapshot_probe_schedules.clear();
 
-        for peer in &self.peers {
+        // 收集所有需要管理的节点（peers + 联合配置中的新节点）
+        let mut all_peers = self.peers.clone();
+        for peer in self.config.get_effective_voters() {
+            // 联合配置时需要管理新旧配置中的所有节点
+            if !all_peers.contains(peer) {
+                all_peers.push(peer.clone());
+            }
+        }
+        // 移除自己
+        all_peers.retain(|peer| peer != &self.id);
+
+        for peer in &all_peers {
             self.next_index.insert(peer.clone(), last_log_index + 1);
             self.match_index.insert(peer.clone(), 0);
         }
@@ -3160,6 +3172,8 @@ impl RaftState {
                 if let Ok(new_config) = bincode::deserialize::<ClusterConfig>(&entry.command) {
                     if !new_config.is_valid() {
                         error!("invalid cluster config received, ignoring {:?}", new_config);
+                        // Even if we ignore the config, we need to update last_applied
+                        self.last_applied = entry.index;
                         continue;
                     }
 
@@ -3169,6 +3183,8 @@ impl RaftState {
                             "Node {} received outdated cluster config, ignoring: {:?}",
                             self.id, new_config
                         );
+                        // Even if we ignore the config, we need to update last_applied
+                        self.last_applied = entry.index;
                     } else {
                         info!(
                             "Node {} applying new cluster config: {:?}",
@@ -3201,6 +3217,13 @@ impl RaftState {
                     if self.config.is_joint() {
                         self.check_joint_exit_condition().await;
                     }
+
+                    // 重要：更新 last_applied 索引以避免日志索引不连续
+                    self.last_applied = entry.index;
+                    info!(
+                        "Node {} updated last_applied to {} after config change",
+                        self.id, self.last_applied
+                    );
                 }
             } else {
                 let index = entry.index;
@@ -3478,16 +3501,44 @@ impl RaftState {
             return;
         }
 
-        if self.joint_config_log_index < self.commit_index {
+        // 如果配置变更日志已经被提交，直接退出联合配置
+        if self.joint_config_log_index <= self.commit_index {
             info!(
                 "exiting joint config as it is committed config log index {} committed index {}",
                 self.joint_config_log_index, self.commit_index
             );
             self.exit_joint_config(false).await;
-        } else {
-            // 检查是否超时
-            self.check_joint_timeout().await;
+            return;
         }
+
+        // 配置变更日志还没有被提交，检查是否超时
+        let enter_time = match self.config_change_start_time {
+            Some(t) => t,
+            None => {
+                warn!("No config change start time recorded, clearing config change state");
+                self.config_change_in_progress = false;
+                return;
+            }
+        };
+
+        if enter_time.elapsed() >= self.config_change_timeout {
+            // 超时了，进行超时处理（可能回滚）
+            self.check_joint_timeout().await;
+        } else {
+            // 没有超时，继续等待日志复制，但可以主动推进
+            self.try_advance_joint_config().await;
+        }
+    }
+
+    async fn try_advance_joint_config(&mut self) {
+        // 尝试推进联合配置的日志复制
+        debug!(
+            "Trying to advance joint config: joint_index={}, commit_index={}",
+            self.joint_config_log_index, self.commit_index
+        );
+
+        // 主动发送心跳来推进日志复制
+        self.broadcast_append_entries().await;
     }
 
     fn is_leader_joint_config(&self) -> bool {
@@ -3504,16 +3555,12 @@ impl RaftState {
             return;
         }
 
-        // 检查是否超时
-        let enter_time = self.config_change_start_time.unwrap();
-        if enter_time.elapsed() < self.config_change_timeout {
-            info!(
-                "Joint config not timed out (elapsed: {:?}, timeout: {:?})",
-                enter_time.elapsed(),
-                self.config_change_timeout
-            );
-            return;
-        }
+        // 这个函数只在确实超时时被调用，所以直接进行超时处理
+        warn!(
+            "Joint config timeout reached (elapsed: {:?}, timeout: {:?}), checking for rollback",
+            self.config_change_start_time.unwrap().elapsed(),
+            self.config_change_timeout
+        );
 
         // 安全获取联合配置（避免unwrap恐慌）
         let joint = match &self.config.joint {
