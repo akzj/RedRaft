@@ -1618,13 +1618,14 @@ impl RaftState {
 
     // === 日志同步相关逻辑 ===
     async fn handle_heartbeat_timeout(&mut self) {
+        info!(
+            "Node {}: heartbeat timeout, current role: {:?}, leader_id: {:?}",
+            self.id, self.role, self.leader_id
+        );
         if self.role != Role::Leader {
             return;
         }
         self.broadcast_append_entries().await;
-
-        // 重置心跳定时器
-        self.reset_heartbeat_timer().await;
 
         // 定期检查联合配置状态
         if self.config.joint.is_some() {
@@ -1640,6 +1641,7 @@ impl RaftState {
         let max_batch_size = 100;
         let now = Instant::now();
 
+        self.reset_heartbeat_timer().await;
         // 检查并执行到期的快照探测计划
         self.process_pending_probes(now).await;
 
@@ -1726,7 +1728,7 @@ impl RaftState {
                 request_id: RequestId::new(),
             };
 
-            debug!(
+            info!(
                 "Leader {} sending AppendEntries to {}: req_id={}, prev_log_index={}, entries_count={}, next_index={} -> {}",
                 self.id,
                 peer,
@@ -2274,8 +2276,7 @@ impl RaftState {
                     // 这是过期的响应，忽略所有更新
                     info!(
                         "Node {} Ignoring stale response from {}: matched_index={} <= current={}",
-                        self.id,
-                        peer, match_index, current_match
+                        self.id, peer, match_index, current_match
                     );
                 }
 

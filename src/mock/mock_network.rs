@@ -107,6 +107,23 @@ struct MockNetworkHubInner {
     real_send_rx: Mutex<mpsc::UnboundedReceiver<RealSendItem>>,
 }
 
+impl MockNetworkHubInner {
+    /// 更新节点的网络配置
+    pub async fn update_config(&self, node_id: RaftId, config: MockRaftNetworkConfig) {
+        self.raft_config
+            .write()
+            .await
+            .insert(node_id, Arc::new(config));
+    }
+
+    /// 获取节点的网络配置
+    pub async fn get_config(&self, node_id: &RaftId) -> Option<Arc<MockRaftNetworkConfig>> {
+        self.raft_config.read().await.get(node_id).cloned()
+    }
+}
+
+/// 内部类型，用于通过通道传递实际发送的消息
+
 /// 通过 real_send 通道传递的实际发送项
 type RealSendItem = (RaftId, NetworkEvent); // (target, event)
 
@@ -385,11 +402,7 @@ impl MockNetworkHub {
     }
 
     pub async fn update_config(&self, node_id: RaftId, config: MockRaftNetworkConfig) {
-        self.inner
-            .raft_config
-            .write()
-            .await
-            .insert(node_id, Arc::new(config));
+        self.inner.update_config(node_id, config).await;
     }
 }
 
@@ -417,6 +430,28 @@ pub enum NetworkEvent {
 }
 
 impl MockNodeNetwork {
+    // isolate
+    pub async fn isolate(&self) {
+        info!("Isolating node {:?}", self.node_id);
+        // 清空该节点的发送端，模拟网络隔离
+        let mut config = MockRaftNetworkConfig::default(); // Reset to default config
+        config.drop_rate = 1.0; // 设置丢包率为 100%
+        config.failure_rate = 1.0; // 设置失败率为 100%
+        self.hub_inner
+            .update_config(self.node_id.clone(), config)
+            .await;
+    }
+
+    // restore
+    pub async fn restore(&self) {
+        info!("Restoring node {:?}", self.node_id);
+        // 恢复到默认配置
+        let config = MockRaftNetworkConfig::default();
+        self.hub_inner
+            .update_config(self.node_id.clone(), config)
+            .await;
+    }
+
     /// 内部辅助函数，用于模拟延迟和丢包，然后将消息放入延迟队列
     async fn send_to_target(
         &self,

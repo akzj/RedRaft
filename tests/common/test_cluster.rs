@@ -23,7 +23,6 @@ pub struct TestCluster {
     config: TestClusterConfig,
     hub: MockNetworkHub,
     snapshot_storage: SnapshotStorage,
-    network_config: Arc<Mutex<HashMap<RaftId, MockRaftNetworkConfig>>>,
     nodes: Arc<Mutex<HashMap<RaftId, TestNode>>>,
 }
 
@@ -35,7 +34,6 @@ impl TestCluster {
             driver: MultiRaftDriver::new(),
             config,
             hub,
-            network_config: Arc::new(Mutex::new(HashMap::new())),
             nodes: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -88,6 +86,26 @@ impl TestCluster {
         self.driver.main_loop().await
     }
 
+    // isolate_node
+    pub async fn isolate_node(&self, id: &RaftId) {
+        info!("Isolating node {:?}", id);
+        if let Some(node) = self.get_node(id) {
+            node.isolate().await;
+        } else {
+            warn!("Node {:?} not found for isolation", id);
+        }
+    }
+
+    //restore_node
+    pub async fn restore_node(&self, id: &RaftId) {
+        info!("Restoring node {:?}", id);
+        if let Some(node) = self.get_node(id) {
+            node.restore().await;
+        } else {
+            warn!("Node {:?} not found for restoration", id);
+        }
+    }
+
     // 获取节点
     pub fn get_node(&self, id: &RaftId) -> Option<TestNode> {
         let nodes = self.nodes.lock().unwrap();
@@ -113,12 +131,6 @@ impl TestCluster {
         }
     }
 
-    // 重启节点（模拟恢复）
-    // pub async fn restart_node(&mut self, id: &RaftId) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    //     // 需要重新创建 TestNode
-    //     // ...
-    // }
-
     // 更新网络配置
     pub async fn update_network_config_for_node(
         &self,
@@ -127,10 +139,4 @@ impl TestCluster {
     ) {
         self.hub.update_config(node_id.clone(), new_config).await;
     }
-
-    // 等待选举完成并找到 Leader
-    // pub async fn wait_for_leader(&self, timeout_duration: std::time::Duration) -> Option<RaftId> {
-    //     // 实现一个轮询机制，检查各节点的角色
-    //     // 或者，TestNode 可以在角色变更时通知 TestCluster (通过通道)
-    // }
 }

@@ -147,6 +147,17 @@ impl TestNode {
         self.state_machine.store.read().unwrap().get(key)
     }
 
+    pub async fn isolate(&self) {
+        info!("Isolating node {:?}", self.id);
+        self.network.isolate().await;
+    }
+
+    //restore
+    pub async fn restore(&self) {
+        info!("Restoring node {:?}", self.id);
+        self.network.restore().await;
+    }
+
     pub async fn handle_event(&self, event: raft_lite::Event) {
         info!(
             "Node {:?} handling event: {:?}",

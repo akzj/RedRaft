@@ -158,7 +158,7 @@ async fn test_basic_raft_kv_cluster() {
 
     let mut pipeline_commands = vec![];
 
-    for i in 3..100 {
+    for i in 3..1000 {
         let cmd = KvCommand::Set {
             key: format!("key{}", i),
             value: format!("value{}", i),
@@ -175,14 +175,26 @@ async fn test_basic_raft_kv_cluster() {
             .await;
     }
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-    // 验证管道中的命令
-    for (i, node_id) in [&node1, &node2, &node3].iter().enumerate() {
-        if let Some(node) = cluster.get_node(node_id) {
-            let value = node.get_value(&format!("key{}", i + 3));
-            println!("Node {:?} - Value for key{}: {:?}", node_id, i + 3, value);
-            assert_eq!(value, Some(format!("value{}", i + 3)));
+    // 验证管道中的命令 - 在所有节点上检查所有keys
+    println!("Verifying pipeline commands on all nodes...");
+    
+    // 选择几个关键的key进行验证，而不是全部97个
+    let sample_keys = [3, 10, 25, 50, 75, 99];
+    
+    for &key_num in &sample_keys {
+        let key = format!("key{}", key_num);
+        let expected_value = format!("value{}", key_num);
+        
+        println!("Checking key: {}", key);
+        for node_id in [&node1, &node2, &node3].iter() {
+            if let Some(node) = cluster.get_node(node_id) {
+                let value = node.get_value(&key);
+                println!("  Node {:?} - Value for {}: {:?}", node_id, key, value);
+                assert_eq!(value, Some(expected_value.clone()), 
+                          "Node {:?} should have {}={}", node_id, key, expected_value);
+            }
         }
     }
 
