@@ -69,7 +69,7 @@ async fn test_basic_raft_kv_cluster() {
             let value = node.get_value("key1");
             assert_eq!(value, Some("value1".to_string()), 
                       "Node {:?} should have key1=value1", node_id);
-            println!("✓ Verified consistency on node {:?}", node_id);
+            println!("✓ Verified consistency on node {:?}", node_id);``
         }
     }
 
