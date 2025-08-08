@@ -1635,10 +1635,7 @@ impl RaftState {
 
     // === 日志同步相关逻辑 ===
     async fn handle_heartbeat_timeout(&mut self) {
-        info!(
-            "Node {}: heartbeat timeout, current role: {:?}, leader_id: {:?}",
-            self.id, self.role, self.leader_id
-        );
+        // 移除冗余的心跳日志，只在必要时记录
         if self.role != Role::Leader {
             return;
         }
@@ -1745,16 +1742,18 @@ impl RaftState {
                 request_id: RequestId::new(),
             };
 
-            info!(
-                "Leader {} sending AppendEntries to {}: req_id={}, prev_log_index={}, entries_count={}, next_index={} -> {}",
-                self.id,
-                peer,
-                req.request_id,
-                prev_log_index,
-                entries_len,
-                next_idx,
-                next_idx + entries_len as u64
-            );
+            // 只在发送日志条目时记录，心跳不记录
+            if entries_len > 0 {
+                info!(
+                    "Leader {} sending {} entries to {}: prev_log_index={}, next_index={} -> {}",
+                    self.id,
+                    entries_len,
+                    peer,
+                    prev_log_index,
+                    next_idx,
+                    next_idx + entries_len as u64
+                );
+            }
 
             if let Err(err) = self
                 .callbacks
@@ -1791,15 +1790,17 @@ impl RaftState {
             return;
         }
 
-        info!(
-            "Node {} received AppendEntries from {} (term {}, prev_log_index {}, entries {}, leader_commit {})",
-            self.id,
-            request.leader_id,
-            request.term,
-            request.prev_log_index,
-            request.entries.len(),
-            request.leader_commit
-        );
+        // 只在接收到日志条目时记录，心跳不记录
+        if !request.entries.is_empty() {
+            info!(
+                "Node {} received {} entries from {} (term {}, prev_log_index {})",
+                self.id,
+                request.entries.len(),
+                request.leader_id,
+                request.term,
+                request.prev_log_index
+            );
+        }
 
         let mut success;
         let mut conflict_index = None;
@@ -2160,14 +2161,6 @@ impl RaftState {
         }
 
         // --- 6. 更新提交索引 ---
-        info!(
-            "Node {} commit_index update check: success={}, leader_commit={}, self.commit_index={}, last_log_index={}",
-            self.id,
-            success,
-            request.leader_commit,
-            self.commit_index,
-            self.get_last_log_index().await
-        );
         if success && request.leader_commit > self.commit_index {
             let new_commit_index =
                 std::cmp::min(request.leader_commit, self.get_last_log_index().await);
@@ -2204,7 +2197,7 @@ impl RaftState {
 
         // --- 8. 应用已提交的日志 ---
         if success && self.commit_index > self.last_applied {
-            info!(
+            debug!(
                 "Node {} applying committed logs up to index {}",
                 self.id, self.commit_index
             );
@@ -2312,7 +2305,7 @@ impl RaftState {
                 self.update_commit_index().await;
             } else {
                 // 处理日志冲突
-                info!(
+                warn!(
                     "Node {} received log conflict from {}: index={:?}, term={:?}",
                     self.id, peer, response.conflict_index, response.conflict_term
                 );
@@ -3150,10 +3143,13 @@ impl RaftState {
             self.last_applied + self.options.apply_batch_size,
         );
 
-        info!(
-            "Node {} apply_committed_logs: applying logs from {} to {} (last_applied={}, commit_index={})",
-            self.id, start, end, self.last_applied, self.commit_index
-        );
+        // 只在有大量日志要应用时记录
+        if end - start + 1 > 5 {
+            info!(
+                "Node {} applying {} logs from {} to {}",
+                self.id, end - start + 1, start, end
+            );
+        }
 
         let entries = match self
             .callbacks
@@ -3243,22 +3239,17 @@ impl RaftState {
                 }
             } else {
                 let index = entry.index;
-                info!(
-                    "Node {} applying command to state machine: index={}, term={}, command_len={}",
+                debug!(
+                    "Node {} applying command to state machine: index={}, term={}",
                     self.id,
                     entry.index,
-                    entry.term,
-                    entry.command.len()
+                    entry.term
                 );
                 let _ = self
                     .callbacks
                     .apply_command(self.id.clone(), entry.index, entry.term, entry.command)
                     .await;
                 self.last_applied = index;
-                info!(
-                    "Node {} updated last_applied to {}",
-                    self.id, self.last_applied
-                );
 
                 // 如果是客户端请求，返回响应
                 self.check_client_response(index).await;

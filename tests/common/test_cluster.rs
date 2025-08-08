@@ -244,10 +244,10 @@ impl TestCluster {
 
         // 5. 现在创建新节点（此时配置变更应该已经在进行中）
         // 新节点的初始peers是当前集群中除自己外的所有节点
-        let initial_peers: Vec<RaftId> = {
-            let nodes = self.nodes.lock().unwrap();
-            nodes.keys().cloned().collect()
-        };
+        // let initial_peers: Vec<RaftId> = {
+        //     let nodes = self.nodes.lock().unwrap();
+        //     nodes.keys().cloned().collect()
+        // };
 
         let new_node = TestNode::new(
             new_node_id.clone(),
@@ -255,7 +255,7 @@ impl TestCluster {
             self.driver.get_timer_service(),
             self.snapshot_storage.clone(),
             self.driver.clone(),
-            initial_peers,
+            Vec::new(), // 初始peers为空，配置变更后会自动更新
         )
         .await
         .map_err(|e| format!("Failed to create new node: {}", e))?;
