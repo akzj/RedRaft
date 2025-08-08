@@ -9,6 +9,7 @@ use raft_lite::mutl_raft_driver::MultiRaftDriver;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 use tracing::{info, warn};
 
 #[derive(Clone)]
@@ -138,5 +139,106 @@ impl TestCluster {
         new_config: MockRaftNetworkConfig,
     ) {
         self.hub.update_config(node_id.clone(), new_config).await;
+    }
+
+    // 发送业务命令
+    pub async fn propose_command(&self, leader_id: &RaftId, command: Vec<u8>) -> Result<(), String> {
+        if let Some(node) = self.get_node(leader_id) {
+            let request_id = raft_lite::RequestId::new();
+            let event = raft_lite::Event::ClientPropose {
+                cmd: command,
+                request_id,
+            };
+            node.handle_event(event).await;
+            Ok(())
+        } else {
+            Err(format!("Node {:?} not found", leader_id))
+        }
+    }
+
+    // 获取当前leader
+    pub async fn get_current_leader(&self) -> Vec<RaftId> {
+        let mut leaders = Vec::new();
+        let nodes = self.nodes.lock().unwrap();
+        for node in nodes.values() {
+            if node.get_role() == raft_lite::Role::Leader {
+                leaders.push(node.id.clone());
+            }
+        }
+        leaders
+    }
+
+    // 添加新节点到集群
+    pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+        info!("Adding new node {:?} to cluster", new_node_id);
+        
+        // 获取当前所有节点ID（包括新节点）
+        let all_node_ids: Vec<RaftId> = {
+            let nodes = self.nodes.lock().unwrap();
+            let mut ids: Vec<RaftId> = nodes.keys().cloned().collect();
+            ids.push(new_node_id.clone());
+            ids
+        };
+        
+        // 新节点的初始peers是集群中除自己外的所有节点
+        let initial_peers: Vec<RaftId> = all_node_ids
+            .iter()
+            .filter(|&id| id != new_node_id)
+            .cloned()
+            .collect();
+
+        // 创建新节点
+        let new_node = TestNode::new(
+            new_node_id.clone(),
+            self.hub.clone(),
+            self.driver.get_timer_service(),
+            self.snapshot_storage.clone(),
+            self.driver.clone(),
+            initial_peers,
+        )
+        .await
+        .map_err(|e| format!("Failed to create new node: {}", e))?;
+
+        // 将新节点添加到集群
+        self.nodes.lock().unwrap().insert(new_node_id.clone(), new_node.clone());
+        self.driver.add_raft_group(new_node_id.clone(), Box::new(new_node));
+
+        info!("Successfully added node {:?} to cluster", new_node_id);
+        Ok(())
+    }
+
+    // 移除节点
+    pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+        info!("Removing node {:?} from cluster", node_id);
+        
+        if self.nodes.lock().unwrap().remove(node_id).is_some() {
+            // TODO: 这里可能需要通知其他节点该节点已被移除
+            // 这通常需要通过集群配置变更来实现
+            info!("Successfully removed node {:?} from cluster", node_id);
+            Ok(())
+        } else {
+            Err(format!("Node {:?} not found in cluster", node_id))
+        }
+    }
+
+    // 获取所有节点的状态
+    pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+        let nodes = self.nodes.lock().unwrap();
+        nodes.iter().map(|(id, node)| (id.clone(), node.get_role())).collect()
+    }
+
+    // 等待集群稳定（有一个leader）
+    pub async fn wait_for_leader(&self, timeout: Duration) -> Result<RaftId, String> {
+        let start = std::time::Instant::now();
+        
+        while start.elapsed() < timeout {
+            let leaders = self.get_current_leader().await;
+            if leaders.len() == 1 {
+                return Ok(leaders[0].clone());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        
+        Err("Timeout waiting for leader election".to_string())
     }
 }
