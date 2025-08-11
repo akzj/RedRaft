@@ -642,8 +642,7 @@ mod tests {
         assert_eq!(unchanged.len(), 3);
 
         // 测试获取不存在索引的任期
-        let missing_term = storage.get_log_term(node_id, 100).await.unwrap();
-        assert_eq!(missing_term, 0);
+        assert!(storage.get_log_term(node_id, 100).await.is_err());
     }
 
     #[tokio::test]

@@ -12,7 +12,8 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::info;
+use tokio::sync::Notify;
+use tracing::{info, warn};
 
 pub struct TestNodeInner {
     pub id: RaftId,
@@ -20,6 +21,7 @@ pub struct TestNodeInner {
     pub state_machine: TestStateMachine,
     pub storage: MockStorage,
     pub network: MockNodeNetwork,
+    pub remove_node: Arc<Notify>,
 }
 
 #[derive(Clone)]
@@ -45,6 +47,29 @@ impl TestNode {
         driver: MultiRaftDriver,
         initial_peers: Vec<RaftId>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::new_with_role(id, hub, timer_service, snapshot_storage, driver, initial_peers, true).await
+    }
+
+    pub async fn new_learner(
+        id: RaftId,
+        hub: MockNetworkHub,
+        timer_service: Timers,
+        snapshot_storage: SnapshotStorage,
+        driver: MultiRaftDriver,
+        initial_voters: Vec<RaftId>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::new_with_role(id, hub, timer_service, snapshot_storage, driver, initial_voters, false).await
+    }
+
+    async fn new_with_role(
+        id: RaftId,
+        hub: MockNetworkHub,
+        timer_service: Timers,
+        snapshot_storage: SnapshotStorage,
+        driver: MultiRaftDriver,
+        initial_peers_or_voters: Vec<RaftId>,
+        is_voter: bool,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         info!("Creating TestNode {:?}", id);
 
         let storage = MockStorage::new_with_snapshot_storage(snapshot_storage);
@@ -52,17 +77,26 @@ impl TestNode {
         let driver = driver.clone();
         // 初始化并保存集群配置，避免在 RaftState::new 时读取到 None
         {
-            let voters: std::collections::HashSet<raft_lite::RaftId> = std::iter::once(id.clone())
-                .chain(initial_peers.iter().cloned())
-                .collect();
-            let cluster_config = raft_lite::ClusterConfig::simple(voters, 0);
+            let (voters, learners) = if is_voter {
+                // 如果是 voter，将自己和 initial_peers_or_voters 都添加到 voters
+                let voters: std::collections::HashSet<raft_lite::RaftId> = std::iter::once(id.clone())
+                    .chain(initial_peers_or_voters.iter().cloned())
+                    .collect();
+                (voters, None)
+            } else {
+                // 如果是 learner，initial_peers_or_voters 是现有的 voters，自己是 learner
+                let voters: std::collections::HashSet<raft_lite::RaftId> = initial_peers_or_voters.iter().cloned().collect();
+                let learners: std::collections::HashSet<raft_lite::RaftId> = std::iter::once(id.clone()).collect();
+                (voters, Some(learners))
+            };
+            let cluster_config = raft_lite::ClusterConfig::with_learners(voters, learners, 0);
             storage
                 .save_cluster_config(id.clone(), cluster_config)
                 .await
                 .expect("save_cluster_config before RaftState::new");
         }
         // 注册网络并获取 dispatch 回调
-        let (network) = hub
+        let network = hub
             .register_node_with_dispatch(
                 id.clone(),
                 Box::new(move |event| {
@@ -107,7 +141,7 @@ impl TestNode {
         // 创建 RaftState 选项
         let options = RaftStateOptions {
             id: id.clone(),
-            peers: initial_peers,
+            peers: initial_peers_or_voters,
             ..Default::default()
         };
 
@@ -116,6 +150,7 @@ impl TestNode {
             timers: timer_service,
             state_machine,
             storage,
+            remove_node: Arc::new(Notify::new()),
             network,
         });
 
@@ -124,17 +159,24 @@ impl TestNode {
             .await
             .map_err(|e| format!("Failed to create RaftState: {:?}", e))?;
 
-        // 设置初始选举定时器以开始 Raft 协议
-        let election_timeout = std::time::Duration::from_millis(500 + rand::random::<u64>() % 500); // 500-1000ms
-        let timer_id = inner.timers.add_timer(
-            inner.id.clone(),
-            raft_lite::Event::ElectionTimeout,
-            election_timeout,
-        );
-        info!(
-            "Started initial election timer for node {:?} with id {}",
-            inner.id, timer_id
-        );
+        // 只为 voter 节点设置初始选举定时器
+        if is_voter {
+            let election_timeout = std::time::Duration::from_millis(500 + rand::random::<u64>() % 500); // 500-1000ms
+            let timer_id = inner.timers.add_timer(
+                inner.id.clone(),
+                raft_lite::Event::ElectionTimeout,
+                election_timeout,
+            );
+            info!(
+                "Started initial election timer for node {:?} with id {}",
+                inner.id, timer_id
+            );
+        } else {
+            info!(
+                "Learner node {:?} created without election timer",
+                inner.id
+            );
+        }
 
         Ok(TestNode {
             inner,
@@ -155,6 +197,10 @@ impl TestNode {
     pub async fn isolate(&self) {
         info!("Isolating node {:?}", self.id);
         self.network.isolate().await;
+    }
+
+    pub async fn wait_remove_node(&self){
+        self.remove_node.notified().await;
     }
 
     //restore
@@ -441,6 +487,12 @@ impl RaftCallbacks for TestNodeInner {
     ) -> raft_lite::SnapshotResult<()> {
         self.state_machine
             .install_snapshot(from, index, term, data, request_id)
+    }
+
+    async fn node_removed(&self, node_id: RaftId) -> Result<(), raft_lite::StateChangeError> {
+        warn!("Node removed: {}", node_id);
+        self.remove_node.notify_one();
+        Ok(())
     }
 }
 

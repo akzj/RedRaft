@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use tokio::time::Timeout;
+use tokio::time::timeout;
 use tracing::{info, warn};
 
 #[derive(Clone)]
@@ -291,7 +293,9 @@ impl TestCluster {
         );
 
         // 1. 检查节点是否存在
-        if !self.nodes.lock().unwrap().contains_key(node_id) {
+
+        let node = self.get_node(node_id);
+        if node.is_none() {
             return Err(format!("Node {:?} not found in cluster", node_id));
         }
 
@@ -346,7 +350,13 @@ impl TestCluster {
         }
 
         // 5. 等待配置变更提交
-        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        timeout(
+            Duration::from_secs(5),
+            node.as_ref().unwrap().wait_remove_node(),
+        )
+        .await
+        .ok();
 
         self.driver.del_raft_group(&node_id);
         // 6. 从本地集群管理中移除节点
@@ -455,5 +465,172 @@ impl TestCluster {
     ) -> Option<std::collections::HashMap<String, String>> {
         let nodes = self.nodes.lock().unwrap();
         nodes.get(node_id).map(|node| node.get_all_data())
+    }
+
+    // 添加 learner 到集群
+    pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
+        info!("Adding learner {:?} to cluster", learner_id);
+
+        // 1. 获取当前 leader
+        let leader_id = self
+            .wait_for_leader(Duration::from_secs(5))
+            .await
+            .map_err(|e| format!("No leader available for adding learner: {}", e))?;
+
+        // 2. 通过 leader 添加 learner
+        let request_id = raft_lite::RequestId::new();
+        let add_learner_event = raft_lite::Event::AddLearner {
+            learner: learner_id.clone(),
+            request_id,
+        };
+
+        match self.driver.send_event(leader_id.clone(), add_learner_event) {
+            raft_lite::mutl_raft_driver::SendEventResult::Success => {
+                info!("Add learner event sent to leader {:?}", leader_id);
+            }
+            raft_lite::mutl_raft_driver::SendEventResult::NotFound => {
+                return Err(format!("Leader node {:?} not found", leader_id));
+            }
+            raft_lite::mutl_raft_driver::SendEventResult::SendFailed => {
+                return Err(format!(
+                    "Failed to send add learner event to leader {:?}",
+                    leader_id
+                ));
+            }
+        }
+
+        // 3. 等待配置变更传播
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // 4. 创建新的 learner 节点
+        // 获取当前的 voters 列表作为 learner 的初始配置
+        let current_voters: Vec<RaftId> = self.config.node_ids.clone();
+        let learner_node = TestNode::new_learner(
+            learner_id.clone(),
+            self.hub.clone(),
+            self.driver.get_timer_service(),
+            self.snapshot_storage.clone(),
+            self.driver.clone(),
+            current_voters, // learner 需要知道当前的 voters
+        )
+        .await
+        .map_err(|e| format!("Failed to create learner node: {}", e))?;
+
+        // 5. 将 learner 添加到本地集群管理
+        self.nodes
+            .lock()
+            .unwrap()
+            .insert(learner_id.clone(), learner_node.clone());
+        self.driver
+            .add_raft_group(learner_id.clone(), Box::new(learner_node));
+
+        info!("Successfully added learner {:?} to cluster", learner_id);
+        Ok(())
+    }
+
+    // 从集群中移除 learner
+    pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+        info!("Removing learner {:?} from cluster", learner_id);
+
+        let learner = self.get_node(learner_id);
+
+        // 1. 检查 learner 是否存在
+        if learner.is_none() {
+            return Err(format!("Learner {:?} not found in cluster", learner_id));
+        }
+
+        // 2. 获取当前 leader
+        let leader_id = self
+            .wait_for_leader(Duration::from_secs(5))
+            .await
+            .map_err(|e| format!("No leader available for removing learner: {}", e))?;
+
+        // 3. 通过 leader 移除 learner
+        let request_id = raft_lite::RequestId::new();
+        let remove_learner_event = raft_lite::Event::RemoveLearner {
+            learner: learner_id.clone(),
+            request_id,
+        };
+
+        match self
+            .driver
+            .send_event(leader_id.clone(), remove_learner_event)
+        {
+            raft_lite::mutl_raft_driver::SendEventResult::Success => {
+                info!("Remove learner event sent to leader {:?}", leader_id);
+            }
+            raft_lite::mutl_raft_driver::SendEventResult::NotFound => {
+                return Err(format!("Leader node {:?} not found", leader_id));
+            }
+            raft_lite::mutl_raft_driver::SendEventResult::SendFailed => {
+                return Err(format!(
+                    "Failed to send remove learner event to leader {:?}",
+                    leader_id
+                ));
+            }
+        }
+
+        // 4. 等待配置变更传播
+
+        timeout(
+            Duration::from_secs(5),
+            learner.as_ref().unwrap().wait_remove_node(),
+        )
+        .await
+        .ok();
+
+        // 5. 从本地集群管理中移除 learner
+        self.driver.del_raft_group(learner_id);
+        if self.nodes.lock().unwrap().remove(learner_id).is_some() {
+            info!("Successfully removed learner {:?} from cluster", learner_id);
+            Ok(())
+        } else {
+            Err(format!(
+                "Failed to remove learner {:?} from local cluster management",
+                learner_id
+            ))
+        }
+    }
+
+    // 等待 learner 同步数据
+    pub async fn wait_for_learner_sync(
+        &self,
+        learner_id: &RaftId,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let start = std::time::Instant::now();
+
+        // 获取参考节点的数据（从任意一个 voter 获取）
+        let reference_data = {
+            let nodes = self.nodes.lock().unwrap();
+            let voter_node = nodes.values().find(|node| {
+                let role = node.get_role();
+                role == raft_lite::Role::Leader || role == raft_lite::Role::Follower
+            });
+
+            match voter_node {
+                Some(node) => node.get_all_data(),
+                None => return Err("No voter nodes found for reference".to_string()),
+            }
+        };
+
+        // 等待 learner 的数据与参考数据一致
+        while start.elapsed() < timeout {
+            if let Some(learner_data) = self.get_node_data(learner_id) {
+                if learner_data == reference_data {
+                    info!(
+                        "Learner {:?} has synchronized with cluster data",
+                        learner_id
+                    );
+                    return Ok(());
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        Err(format!(
+            "Learner {:?} failed to synchronize within timeout",
+            learner_id
+        ))
     }
 }
