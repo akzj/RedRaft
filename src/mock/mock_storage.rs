@@ -67,6 +67,12 @@ impl MockStorage {
             inner: Arc::new(inner),
         }
     }
+    
+    /// 保存快照到存储中（用于测试）
+    pub fn save_snapshot_internal(&self, snapshot: Snapshot) {
+        let mut storage_snapshot = self.snapshot.write().unwrap();
+        *storage_snapshot = Some(snapshot);
+    }
 }
 
 impl Deref for MockStorage {
@@ -160,11 +166,46 @@ impl Storage for MockStorage {
         Ok(())
     }
 
-    async fn create_snapshot(&self, _from: RaftId) -> StorageResult<(u64, u64)> {
+    async fn create_snapshot(&self, from: RaftId) -> StorageResult<(u64, u64)> {
         let log = self.log.read().unwrap();
+        let config = self.config.read().unwrap();
+
         if let Some(entry) = log.last() {
+            // 创建快照数据
+            let snapshot = Snapshot {
+                index: entry.index,
+                term: entry.term,
+                config: config.clone().unwrap_or_else(|| {
+                    // 如果没有配置，创建一个默认的单节点配置
+                    ClusterConfig::simple(std::iter::once(from.clone()).collect(), entry.index)
+                }),
+                data: format!("snapshot_data_at_index_{}", entry.index).into_bytes(),
+            };
+
+            // 保存快照
+            {
+                let mut snap = self.snapshot.write().unwrap();
+                *snap = Some(snapshot);
+            }
+
             Ok((entry.index, entry.term))
         } else {
+            // 如果没有日志，创建一个空快照
+            let snapshot = Snapshot {
+                index: 0,
+                term: 0,
+                config: config.clone().unwrap_or_else(|| {
+                    ClusterConfig::simple(std::iter::once(from.clone()).collect(), 0)
+                }),
+                data: b"empty_snapshot".to_vec(),
+            };
+
+            // 保存快照
+            {
+                let mut snap = self.snapshot.write().unwrap();
+                *snap = Some(snapshot);
+            }
+
             Ok((0, 0))
         }
     }
@@ -182,14 +223,14 @@ impl Storage for MockStorage {
         if idx == 0 {
             return Ok(0); // 索引 0 的任期总是 0
         }
-        
+
         let log = self.log.read().unwrap();
         for entry in log.iter() {
             if entry.index == idx {
                 return Ok(entry.term);
             }
         }
-        
+
         // 如果日志条目不存在，返回错误而不是 0
         // 这样可以避免日志一致性检查的混淆
         Err(crate::StorageError::LogNotFound(idx))

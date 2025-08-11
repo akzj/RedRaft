@@ -399,7 +399,29 @@ impl Storage for TestNodeInner {
     }
 
     async fn create_snapshot(&self, from: RaftId) -> StorageResult<(u64, u64)> {
-        self.storage.create_snapshot(from).await
+        // 使用TestStateMachine生成快照数据，它会返回已应用的索引、任期和数据
+        let (snapshot_index, snapshot_term, snapshot_data) = match self.state_machine.create_snapshot(from.clone()) {
+            Ok(data) => data,
+            Err(e) => {
+                return Err(raft_lite::StorageError::SnapshotCreationFailed(format!("State machine snapshot creation failed: {:?}", e)));
+            }
+        };
+        
+        // 获取当前集群配置
+        let config = self.storage.load_cluster_config(from.clone()).await?;
+        
+        // 创建快照对象
+        let snapshot = raft_lite::Snapshot {
+            index: snapshot_index,
+            term: snapshot_term,
+            config,
+            data: snapshot_data,
+        };
+        
+        // 保存快照到存储
+        self.storage.save_snapshot_internal(snapshot);
+        
+        Ok((snapshot_index, snapshot_term))
     }
 
     async fn save_cluster_config(

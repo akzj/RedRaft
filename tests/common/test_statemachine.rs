@@ -61,6 +61,9 @@ impl SimpleKvStore {
 pub struct TestStateMachine {
     id : RaftId,
     pub store: Arc<RwLock<SimpleKvStore>>,
+    // 跟踪已应用的日志索引和任期
+    last_applied_index: Arc<RwLock<u64>>,
+    last_applied_term: Arc<RwLock<u64>>,
 }
 
 impl TestStateMachine {
@@ -68,6 +71,8 @@ impl TestStateMachine {
         Self {
             id,
             store: Arc::new(RwLock::new(SimpleKvStore::new())),
+            last_applied_index: Arc::new(RwLock::new(0)),
+            last_applied_term: Arc::new(RwLock::new(0)),
         }
     }
 
@@ -75,15 +80,15 @@ impl TestStateMachine {
     pub async fn apply_command(
         &self,
         _from: RaftId,
-        _index: u64,
-        _term: u64,
+        index: u64,
+        term: u64,
         cmd: raft_lite::Command,
     ) -> raft_lite::ApplyResult<()> {
         info!(
             "node {:?} TestStateMachine apply_command called: index={}, term={}, cmd_len={}",
             self.id,
-            _index,
-            _term,
+            index,
+            term,
             cmd.len()
         );
 
@@ -100,13 +105,18 @@ impl TestStateMachine {
                 self.store.write().unwrap().set(key.clone(), value.clone());
                 //     println!("Current store state: {:?}", self.store.read().unwrap().data);
             }
-            KvCommand::Get { key } => {
+            KvCommand::Get { key: _ } => {
                 assert!(false, "Get operation not passed to state machine");
             }
             KvCommand::Delete { key } => {
                 self.store.write().unwrap().delete(&key);
             }
         }
+
+        // 更新已应用的索引和任期
+        *self.last_applied_index.write().unwrap() = index;
+        *self.last_applied_term.write().unwrap() = term;
+
         Ok(())
     }
 
@@ -114,12 +124,20 @@ impl TestStateMachine {
     pub fn create_snapshot(
         &self,
         _from: RaftId,
-        _index: u64,
-        _term: u64,
-    ) -> raft_lite::SnapshotResult<Vec<u8>> {
+    ) -> raft_lite::SnapshotResult<(u64, u64, Vec<u8>)> {
+        // 使用已应用的索引和任期创建快照
+        let applied_index = *self.last_applied_index.read().unwrap();
+        let applied_term = *self.last_applied_term.read().unwrap();
+        
         let data = serde_json::to_vec(&self.store.read().unwrap().clone())
             .map_err(|e| raft_lite::SnapshotError::DataCorrupted(e.into()))?;
-        Ok(data)
+        
+        info!(
+            "node {:?} created snapshot at index={}, term={}, data_len={}",
+            _from, applied_index, applied_term, data.len()
+        );
+        
+        Ok((applied_index, applied_term, data))
     }
 
     // Required snapshot processor

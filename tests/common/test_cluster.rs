@@ -172,6 +172,26 @@ impl TestCluster {
         }
     }
 
+    // 发送业务命令
+    pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+        let request_id = raft_lite::RequestId::new();
+        let event = raft_lite::Event::CreateSnapshot {};
+
+        match self.driver.send_event(leader_id.clone(), event) {
+            raft_lite::mutl_raft_driver::SendEventResult::Success => {
+                return Ok(());
+            }
+            raft_lite::mutl_raft_driver::SendEventResult::NotFound => {
+                warn!("Node {:?} not found for command proposal", leader_id);
+                return Err(format!("Node {:?} not found", leader_id));
+            }
+            raft_lite::mutl_raft_driver::SendEventResult::SendFailed => {
+                warn!("Failed to send event to node {:?}", leader_id);
+                return Err(format!("Failed to send event to node {:?}", leader_id));
+            }
+        }
+    }
+
     // 获取当前leader
     pub async fn get_current_leader(&self) -> Vec<RaftId> {
         let mut leaders = Vec::new();
