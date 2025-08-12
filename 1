@@ -1,0 +1,3269 @@
+   Compiling raft-lite v0.1.0 (/home/ubuntu/workspace/raft-lite)
+warning: unused import: `debug`
+  --> src/mock/mock_network.rs:21:15
+   |
+21 | use tracing::{debug, info, warn};
+   |               ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `Channel`
+  --> src/network/mod.rs:12:24
+   |
+12 | use tonic::transport::{Channel, Endpoint};
+   |                        ^^^^^^^
+
+warning: unused variable: `e`
+   --> src/mock/mock_network.rs:327:68
+    |
+327 | ...                   sender.send(event).unwrap_or_else(|e| {
+    |                                                          ^ help: if this is intentional, prefix it with an underscore: `_e`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `client`
+   --> src/network/mod.rs:207:29
+    |
+207 |                     let mut client = match client_result {
+    |                             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_client`
+
+warning: unused variable: `args`
+   --> src/network/mod.rs:224:60
+    |
+224 | ...                   OutgoingMessage::RequestVote { args, .. } => {
+    |                                                      ^^^^-
+    |                                                      |
+    |                                                      help: try removing the field
+
+warning: variable does not need to be mutable
+   --> src/network/mod.rs:207:25
+    |
+207 |                     let mut client = match client_result {
+    |                         ----^^^^^^
+    |                         |
+    |                         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: field `peers` is never read
+    --> src/lib.rs:1108:5
+     |
+1104 | pub struct RaftState {
+     |            --------- field in this struct
+...
+1108 |     peers: Vec<RaftId>,
+     |     ^^^^^
+     |
+     = note: `#[warn(dead_code)]` on by default
+
+warning: method `get_config` is never used
+   --> src/mock/mock_network.rs:120:18
+    |
+110 | impl MockNetworkHubInner {
+    | ------------------------ method in this implementation
+...
+120 |     pub async fn get_config(&self, node_id: &RaftId) -> Option<Arc<MockRaftNetworkConfig>> {
+    |                  ^^^^^^^^^^
+
+warning: field `args` is never read
+  --> src/network/mod.rs:33:9
+   |
+31 |     RequestVoteResponse {
+   |     ------------------- field in this variant
+32 |         target_node: String,
+33 |         args: Box<RequestVoteResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:37:9
+   |
+35 |     AppendEntries {
+   |     ------------- field in this variant
+36 |         target_node: String,
+37 |         args: Box<AppendEntriesRequest>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:41:9
+   |
+39 |     AppendEntriesResponse {
+   |     --------------------- field in this variant
+40 |         target_node: String,
+41 |         args: Box<AppendEntriesResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:45:9
+   |
+43 |     InstallSnapshot {
+   |     --------------- field in this variant
+44 |         target_node: String,
+45 |         args: Box<InstallSnapshotRequest>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:49:9
+   |
+47 |     InstallSnapshotResponse {
+   |     ----------------------- field in this variant
+48 |         target_node: String,
+49 |         args: Box<InstallSnapshotResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: fields `local_node_id`, `clients`, and `grpc_server_addr` are never read
+  --> src/network/mod.rs:56:5
+   |
+55 | pub struct MultiRaftNetwork {
+   |            ---------------- fields in this struct
+56 |     local_node_id: String, // 当前进程的 NodeId
+   |     ^^^^^^^^^^^^^
+...
+63 |     clients: ClientMap,
+   |     ^^^^^^^
+64 |     grpc_server_addr: String, // 本节点 gRPC 服务监听地址
+   |     ^^^^^^^^^^^^^^^^
+
+warning: associated items `get_or_create_client` and `resolve_node_address` are never used
+   --> src/network/mod.rs:90:14
+    |
+67  | impl MultiRaftNetwork {
+    | --------------------- associated items in this implementation
+...
+90  |     async fn get_or_create_client(&self, target_node_id: &str) -> Result<GrpcClient, RpcError> {
+    |              ^^^^^^^^^^^^^^^^^^^^
+...
+135 |     async fn resolve_node_address(
+    |              ^^^^^^^^^^^^^^^^^^^^
+
+warning: `raft-lite` (lib test) generated 15 warnings (2 duplicates) (run `cargo fix --lib -p raft-lite --tests` to apply 2 suggestions)
+warning: `raft-lite` (lib) generated 15 warnings (13 duplicates) (run `cargo fix --lib -p raft-lite` to apply 2 suggestions)
+warning: unused import: `tokio::time::Timeout`
+  --> tests/common/test_cluster.rs:13:5
+   |
+13 | use tokio::time::Timeout;
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `async_trait::async_trait`
+ --> tests/common/test_node.rs:3:5
+  |
+3 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `leader_node`
+   --> tests/common/test_cluster.rs:239:21
+    |
+239 |         if let Some(leader_node) = self.get_node(&leader_id) {
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_leader_node`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `leader_node`
+   --> tests/common/test_cluster.rs:347:21
+    |
+347 |         if let Some(leader_node) = self.get_node(&leader_id) {
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_leader_node`
+
+warning: unused variable: `request_id`
+   --> tests/common/test_cluster.rs:177:13
+    |
+177 |         let request_id = raft_lite::RequestId::new();
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request_id`
+
+warning: unused variable: `config`
+   --> tests/common/test_node.rs:512:9
+    |
+512 |         config: raft_lite::ClusterConfig,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+113 |     pub fn get_node(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+465 |     pub async fn wait_for_data_replication(&self, timeout: Duration) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: methods `get_value`, `isolate`, `wait_remove_node`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:188:12
+    |
+41  | impl TestNode {
+    | ------------- methods in this implementation
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+202 |     pub async fn wait_remove_node(&self){
+    |                  ^^^^^^^^^^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: method `get` is never used
+  --> tests/common/test_statemachine.rs:41:12
+   |
+34 | impl SimpleKvStore {
+   | ------------------ method in this implementation
+...
+41 |     pub fn get(&self, key: &str) -> Option<String> {
+   |            ^^^
+
+warning: method `get_value` is never used
+   --> tests/common/test_statemachine.rs:164:12
+    |
+69  | impl TestStateMachine {
+    | --------------------- method in this implementation
+...
+164 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: methods `get_value`, `isolate`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:188:12
+    |
+41  | impl TestNode {
+    | ------------- methods in this implementation
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:119:12
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+147 |     pub fn propose_command(&self, leader_id: &RaftId, command: Vec<u8>) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+196 |     pub async fn get_current_leader(&self) -> Vec<RaftId> {
+    |                  ^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+407 |     pub async fn wait_for_leader(&self, timeout: Duration) -> Result<RaftId, String> {
+    |                  ^^^^^^^^^^^^^^^
+...
+422 |     pub async fn verify_data_consistency(&self) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^
+...
+465 |     pub async fn wait_for_data_replication(&self, timeout: Duration) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+482 |     pub fn get_node_data(
+    |            ^^^^^^^^^^^^^
+...
+491 |     pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new_learner`, `get_value`, `get_all_data`, `wait_remove_node`, and `handle_event` are never used
+   --> tests/common/test_node.rs:53:18
+    |
+41  | impl TestNode {
+    | ------------- associated items in this implementation
+...
+53  |     pub async fn new_learner(
+    |                  ^^^^^^^^^^^
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+193 |     pub fn get_all_data(&self) -> std::collections::HashMap<String, String> {
+    |            ^^^^^^^^^^^^
+...
+202 |     pub async fn wait_remove_node(&self){
+    |                  ^^^^^^^^^^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: method `encode` is never used
+  --> tests/common/test_statemachine.rs:16:12
+   |
+15 | impl KvCommand {
+   | -------------- method in this implementation
+16 |     pub fn encode(&self) -> Vec<u8> {
+   |            ^^^^^^
+
+warning: methods `get` and `get_all_data` are never used
+  --> tests/common/test_statemachine.rs:41:12
+   |
+34 | impl SimpleKvStore {
+   | ------------------ methods in this implementation
+...
+41 |     pub fn get(&self, key: &str) -> Option<String> {
+   |            ^^^
+...
+54 |     pub fn get_all_data(&self) -> HashMap<String, String> {
+   |            ^^^^^^^^^^^^
+
+warning: methods `get_all_data` and `get_value` are never used
+   --> tests/common/test_statemachine.rs:159:12
+    |
+69  | impl TestStateMachine {
+    | --------------------- methods in this implementation
+...
+159 |     pub fn get_all_data(&self) -> HashMap<String, String> {
+    |            ^^^^^^^^^^^^
+...
+164 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+491 |     pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new_learner`, `get_value`, `isolate`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:53:18
+    |
+41  | impl TestNode {
+    | ------------- associated items in this implementation
+...
+53  |     pub async fn new_learner(
+    |                  ^^^^^^^^^^^
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: method `handle_event` is never used
+   --> tests/common/test_node.rs:212:14
+    |
+41  | impl TestNode {
+    | ------------- method in this implementation
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: `raft-lite` (test "snapshot_test") generated 10 warnings (9 duplicates)
+warning: `raft-lite` (test "network_leader_election_test") generated 11 warnings (5 duplicates)
+warning: `raft-lite` (test "cluster_test") generated 10 warnings (8 duplicates)
+warning: `raft-lite` (test "cluster_learner_test") generated 10 warnings (8 duplicates)
+warning: `raft-lite` (test "integration_tests") generated 7 warnings (6 duplicates)
+warning: `raft-lite` (test "config_snapshot_test") generated 10 warnings (1 duplicate) (run `cargo fix --test "config_snapshot_test"` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.65s
+     Running unittests src/lib.rs (target/debug/deps/raft_lite-6206e611f008b9a5)
+     Running tests/cluster_learner_test.rs (target/debug/deps/cluster_learner_test-f7bd6b39aa0d40de)
+     Running tests/cluster_test.rs (target/debug/deps/cluster_test-29309ce2e334738e)
+     Running tests/config_snapshot_test.rs (target/debug/deps/config_snapshot_test-0e0ab8c0ede8f5a8)
+     Running tests/integration_tests.rs (target/debug/deps/integration_tests-fc54cb77fbb4c1e6)
+     Running tests/network_leader_election_test.rs (target/debug/deps/network_leader_election_test-5cec11d40ac56cac)
+     Running tests/snapshot_test.rs (target/debug/deps/snapshot_test-14d50f52f1962d96)
+   Doc-tests raft_lite
+   Compiling raft-lite v0.1.0 (/home/ubuntu/workspace/raft-lite)
+warning: unused import: `debug`
+  --> src/mock/mock_network.rs:21:15
+   |
+21 | use tracing::{debug, info, warn};
+   |               ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `Channel`
+  --> src/network/mod.rs:12:24
+   |
+12 | use tonic::transport::{Channel, Endpoint};
+   |                        ^^^^^^^
+
+warning: unused variable: `e`
+   --> src/mock/mock_network.rs:327:68
+    |
+327 | ...                   sender.send(event).unwrap_or_else(|e| {
+    |                                                          ^ help: if this is intentional, prefix it with an underscore: `_e`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `client`
+   --> src/network/mod.rs:207:29
+    |
+207 |                     let mut client = match client_result {
+    |                             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_client`
+
+warning: unused variable: `args`
+   --> src/network/mod.rs:224:60
+    |
+224 | ...                   OutgoingMessage::RequestVote { args, .. } => {
+    |                                                      ^^^^-
+    |                                                      |
+    |                                                      help: try removing the field
+
+warning: variable does not need to be mutable
+   --> src/network/mod.rs:207:25
+    |
+207 |                     let mut client = match client_result {
+    |                         ----^^^^^^
+    |                         |
+    |                         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: field `peers` is never read
+    --> src/lib.rs:1108:5
+     |
+1104 | pub struct RaftState {
+     |            --------- field in this struct
+...
+1108 |     peers: Vec<RaftId>,
+     |     ^^^^^
+     |
+     = note: `#[warn(dead_code)]` on by default
+
+warning: method `get_config` is never used
+   --> src/mock/mock_network.rs:120:18
+    |
+110 | impl MockNetworkHubInner {
+    | ------------------------ method in this implementation
+...
+120 |     pub async fn get_config(&self, node_id: &RaftId) -> Option<Arc<MockRaftNetworkConfig>> {
+    |                  ^^^^^^^^^^
+
+warning: field `args` is never read
+  --> src/network/mod.rs:33:9
+   |
+31 |     RequestVoteResponse {
+   |     ------------------- field in this variant
+32 |         target_node: String,
+33 |         args: Box<RequestVoteResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:37:9
+   |
+35 |     AppendEntries {
+   |     ------------- field in this variant
+36 |         target_node: String,
+37 |         args: Box<AppendEntriesRequest>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:41:9
+   |
+39 |     AppendEntriesResponse {
+   |     --------------------- field in this variant
+40 |         target_node: String,
+41 |         args: Box<AppendEntriesResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:45:9
+   |
+43 |     InstallSnapshot {
+   |     --------------- field in this variant
+44 |         target_node: String,
+45 |         args: Box<InstallSnapshotRequest>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:49:9
+   |
+47 |     InstallSnapshotResponse {
+   |     ----------------------- field in this variant
+48 |         target_node: String,
+49 |         args: Box<InstallSnapshotResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: fields `local_node_id`, `clients`, and `grpc_server_addr` are never read
+  --> src/network/mod.rs:56:5
+   |
+55 | pub struct MultiRaftNetwork {
+   |            ---------------- fields in this struct
+56 |     local_node_id: String, // 当前进程的 NodeId
+   |     ^^^^^^^^^^^^^
+...
+63 |     clients: ClientMap,
+   |     ^^^^^^^
+64 |     grpc_server_addr: String, // 本节点 gRPC 服务监听地址
+   |     ^^^^^^^^^^^^^^^^
+
+warning: associated items `get_or_create_client` and `resolve_node_address` are never used
+   --> src/network/mod.rs:90:14
+    |
+67  | impl MultiRaftNetwork {
+    | --------------------- associated items in this implementation
+...
+90  |     async fn get_or_create_client(&self, target_node_id: &str) -> Result<GrpcClient, RpcError> {
+    |              ^^^^^^^^^^^^^^^^^^^^
+...
+135 |     async fn resolve_node_address(
+    |              ^^^^^^^^^^^^^^^^^^^^
+
+warning: `raft-lite` (lib) generated 15 warnings (run `cargo fix --lib -p raft-lite` to apply 4 suggestions)
+warning: unused import: `tokio::time::Timeout`
+  --> tests/common/test_cluster.rs:13:5
+   |
+13 | use tokio::time::Timeout;
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `async_trait::async_trait`
+ --> tests/common/test_node.rs:3:5
+  |
+3 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `leader_node`
+   --> tests/common/test_cluster.rs:239:21
+    |
+239 |         if let Some(leader_node) = self.get_node(&leader_id) {
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_leader_node`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `leader_node`
+   --> tests/common/test_cluster.rs:347:21
+    |
+347 |         if let Some(leader_node) = self.get_node(&leader_id) {
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_leader_node`
+
+warning: unused variable: `request_id`
+   --> tests/common/test_cluster.rs:177:13
+    |
+177 |         let request_id = raft_lite::RequestId::new();
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request_id`
+
+warning: unused variable: `config`
+   --> tests/common/test_node.rs:512:9
+    |
+512 |         config: raft_lite::ClusterConfig,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: methods `get_value`, `isolate`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:188:12
+    |
+41  | impl TestNode {
+    | ------------- methods in this implementation
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: method `get` is never used
+  --> tests/common/test_statemachine.rs:41:12
+   |
+34 | impl SimpleKvStore {
+   | ------------------ method in this implementation
+...
+41 |     pub fn get(&self, key: &str) -> Option<String> {
+   |            ^^^
+
+warning: method `get_value` is never used
+   --> tests/common/test_statemachine.rs:164:12
+    |
+69  | impl TestStateMachine {
+    | --------------------- method in this implementation
+...
+164 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+113 |     pub fn get_node(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+465 |     pub async fn wait_for_data_replication(&self, timeout: Duration) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: methods `get_value`, `isolate`, `wait_remove_node`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:188:12
+    |
+41  | impl TestNode {
+    | ------------- methods in this implementation
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+202 |     pub async fn wait_remove_node(&self){
+    |                  ^^^^^^^^^^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+491 |     pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new_learner`, `get_value`, `isolate`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:53:18
+    |
+41  | impl TestNode {
+    | ------------- associated items in this implementation
+...
+53  |     pub async fn new_learner(
+    |                  ^^^^^^^^^^^
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:119:12
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+147 |     pub fn propose_command(&self, leader_id: &RaftId, command: Vec<u8>) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+196 |     pub async fn get_current_leader(&self) -> Vec<RaftId> {
+    |                  ^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+407 |     pub async fn wait_for_leader(&self, timeout: Duration) -> Result<RaftId, String> {
+    |                  ^^^^^^^^^^^^^^^
+...
+422 |     pub async fn verify_data_consistency(&self) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^
+...
+465 |     pub async fn wait_for_data_replication(&self, timeout: Duration) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+482 |     pub fn get_node_data(
+    |            ^^^^^^^^^^^^^
+...
+491 |     pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new_learner`, `get_value`, `get_all_data`, `wait_remove_node`, and `handle_event` are never used
+   --> tests/common/test_node.rs:53:18
+    |
+41  | impl TestNode {
+    | ------------- associated items in this implementation
+...
+53  |     pub async fn new_learner(
+    |                  ^^^^^^^^^^^
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+193 |     pub fn get_all_data(&self) -> std::collections::HashMap<String, String> {
+    |            ^^^^^^^^^^^^
+...
+202 |     pub async fn wait_remove_node(&self){
+    |                  ^^^^^^^^^^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: method `encode` is never used
+  --> tests/common/test_statemachine.rs:16:12
+   |
+15 | impl KvCommand {
+   | -------------- method in this implementation
+16 |     pub fn encode(&self) -> Vec<u8> {
+   |            ^^^^^^
+
+warning: methods `get` and `get_all_data` are never used
+  --> tests/common/test_statemachine.rs:41:12
+   |
+34 | impl SimpleKvStore {
+   | ------------------ methods in this implementation
+...
+41 |     pub fn get(&self, key: &str) -> Option<String> {
+   |            ^^^
+...
+54 |     pub fn get_all_data(&self) -> HashMap<String, String> {
+   |            ^^^^^^^^^^^^
+
+warning: methods `get_all_data` and `get_value` are never used
+   --> tests/common/test_statemachine.rs:159:12
+    |
+69  | impl TestStateMachine {
+    | --------------------- methods in this implementation
+...
+159 |     pub fn get_all_data(&self) -> HashMap<String, String> {
+    |            ^^^^^^^^^^^^
+...
+164 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: method `handle_event` is never used
+   --> tests/common/test_node.rs:212:14
+    |
+41  | impl TestNode {
+    | ------------- method in this implementation
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: `raft-lite` (lib test) generated 15 warnings (15 duplicates)
+warning: `raft-lite` (test "cluster_test") generated 10 warnings (8 duplicates)
+warning: `raft-lite` (test "snapshot_test") generated 10 warnings (run `cargo fix --test "snapshot_test"` to apply 2 suggestions)
+warning: `raft-lite` (test "config_snapshot_test") generated 10 warnings (8 duplicates)
+warning: `raft-lite` (test "integration_tests") generated 7 warnings (6 duplicates)
+warning: `raft-lite` (test "network_leader_election_test") generated 11 warnings (6 duplicates)
+warning: `raft-lite` (test "cluster_learner_test") generated 10 warnings (9 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.18s
+     Running unittests src/lib.rs (target/debug/deps/raft_lite-6206e611f008b9a5)
+     Running tests/cluster_learner_test.rs (target/debug/deps/cluster_learner_test-f7bd6b39aa0d40de)
+     Running tests/cluster_test.rs (target/debug/deps/cluster_test-29309ce2e334738e)
+     Running tests/config_snapshot_test.rs (target/debug/deps/config_snapshot_test-0e0ab8c0ede8f5a8)
+     Running tests/integration_tests.rs (target/debug/deps/integration_tests-fc54cb77fbb4c1e6)
+     Running tests/network_leader_election_test.rs (target/debug/deps/network_leader_election_test-5cec11d40ac56cac)
+     Running tests/snapshot_test.rs (target/debug/deps/snapshot_test-14d50f52f1962d96)
+   Doc-tests raft_lite
+   Compiling raft-lite v0.1.0 (/home/ubuntu/workspace/raft-lite)
+warning: unused import: `debug`
+  --> src/mock/mock_network.rs:21:15
+   |
+21 | use tracing::{debug, info, warn};
+   |               ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `Channel`
+  --> src/network/mod.rs:12:24
+   |
+12 | use tonic::transport::{Channel, Endpoint};
+   |                        ^^^^^^^
+
+warning: unused variable: `e`
+   --> src/mock/mock_network.rs:327:68
+    |
+327 | ...                   sender.send(event).unwrap_or_else(|e| {
+    |                                                          ^ help: if this is intentional, prefix it with an underscore: `_e`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `client`
+   --> src/network/mod.rs:207:29
+    |
+207 |                     let mut client = match client_result {
+    |                             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_client`
+
+warning: unused variable: `args`
+   --> src/network/mod.rs:224:60
+    |
+224 | ...                   OutgoingMessage::RequestVote { args, .. } => {
+    |                                                      ^^^^-
+    |                                                      |
+    |                                                      help: try removing the field
+
+warning: variable does not need to be mutable
+   --> src/network/mod.rs:207:25
+    |
+207 |                     let mut client = match client_result {
+    |                         ----^^^^^^
+    |                         |
+    |                         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: field `peers` is never read
+    --> src/lib.rs:1108:5
+     |
+1104 | pub struct RaftState {
+     |            --------- field in this struct
+...
+1108 |     peers: Vec<RaftId>,
+     |     ^^^^^
+     |
+     = note: `#[warn(dead_code)]` on by default
+
+warning: method `get_config` is never used
+   --> src/mock/mock_network.rs:120:18
+    |
+110 | impl MockNetworkHubInner {
+    | ------------------------ method in this implementation
+...
+120 |     pub async fn get_config(&self, node_id: &RaftId) -> Option<Arc<MockRaftNetworkConfig>> {
+    |                  ^^^^^^^^^^
+
+warning: field `args` is never read
+  --> src/network/mod.rs:33:9
+   |
+31 |     RequestVoteResponse {
+   |     ------------------- field in this variant
+32 |         target_node: String,
+33 |         args: Box<RequestVoteResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:37:9
+   |
+35 |     AppendEntries {
+   |     ------------- field in this variant
+36 |         target_node: String,
+37 |         args: Box<AppendEntriesRequest>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:41:9
+   |
+39 |     AppendEntriesResponse {
+   |     --------------------- field in this variant
+40 |         target_node: String,
+41 |         args: Box<AppendEntriesResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:45:9
+   |
+43 |     InstallSnapshot {
+   |     --------------- field in this variant
+44 |         target_node: String,
+45 |         args: Box<InstallSnapshotRequest>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:49:9
+   |
+47 |     InstallSnapshotResponse {
+   |     ----------------------- field in this variant
+48 |         target_node: String,
+49 |         args: Box<InstallSnapshotResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: fields `local_node_id`, `clients`, and `grpc_server_addr` are never read
+  --> src/network/mod.rs:56:5
+   |
+55 | pub struct MultiRaftNetwork {
+   |            ---------------- fields in this struct
+56 |     local_node_id: String, // 当前进程的 NodeId
+   |     ^^^^^^^^^^^^^
+...
+63 |     clients: ClientMap,
+   |     ^^^^^^^
+64 |     grpc_server_addr: String, // 本节点 gRPC 服务监听地址
+   |     ^^^^^^^^^^^^^^^^
+
+warning: associated items `get_or_create_client` and `resolve_node_address` are never used
+   --> src/network/mod.rs:90:14
+    |
+67  | impl MultiRaftNetwork {
+    | --------------------- associated items in this implementation
+...
+90  |     async fn get_or_create_client(&self, target_node_id: &str) -> Result<GrpcClient, RpcError> {
+    |              ^^^^^^^^^^^^^^^^^^^^
+...
+135 |     async fn resolve_node_address(
+    |              ^^^^^^^^^^^^^^^^^^^^
+
+warning: `raft-lite` (lib) generated 15 warnings (run `cargo fix --lib -p raft-lite` to apply 4 suggestions)
+warning: unused import: `tokio::time::Timeout`
+  --> tests/common/test_cluster.rs:13:5
+   |
+13 | use tokio::time::Timeout;
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `async_trait::async_trait`
+ --> tests/common/test_node.rs:3:5
+  |
+3 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `leader_node`
+   --> tests/common/test_cluster.rs:239:21
+    |
+239 |         if let Some(leader_node) = self.get_node(&leader_id) {
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_leader_node`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `leader_node`
+   --> tests/common/test_cluster.rs:347:21
+    |
+347 |         if let Some(leader_node) = self.get_node(&leader_id) {
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_leader_node`
+
+warning: unused variable: `request_id`
+   --> tests/common/test_cluster.rs:177:13
+    |
+177 |         let request_id = raft_lite::RequestId::new();
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request_id`
+
+warning: unused variable: `config`
+   --> tests/common/test_node.rs:512:9
+    |
+512 |         config: raft_lite::ClusterConfig,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:119:12
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+147 |     pub fn propose_command(&self, leader_id: &RaftId, command: Vec<u8>) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+196 |     pub async fn get_current_leader(&self) -> Vec<RaftId> {
+    |                  ^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+407 |     pub async fn wait_for_leader(&self, timeout: Duration) -> Result<RaftId, String> {
+    |                  ^^^^^^^^^^^^^^^
+...
+422 |     pub async fn verify_data_consistency(&self) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^
+...
+465 |     pub async fn wait_for_data_replication(&self, timeout: Duration) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+482 |     pub fn get_node_data(
+    |            ^^^^^^^^^^^^^
+...
+491 |     pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new_learner`, `get_value`, `get_all_data`, `wait_remove_node`, and `handle_event` are never used
+   --> tests/common/test_node.rs:53:18
+    |
+41  | impl TestNode {
+    | ------------- associated items in this implementation
+...
+53  |     pub async fn new_learner(
+    |                  ^^^^^^^^^^^
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+193 |     pub fn get_all_data(&self) -> std::collections::HashMap<String, String> {
+    |            ^^^^^^^^^^^^
+...
+202 |     pub async fn wait_remove_node(&self){
+    |                  ^^^^^^^^^^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: method `encode` is never used
+  --> tests/common/test_statemachine.rs:16:12
+   |
+15 | impl KvCommand {
+   | -------------- method in this implementation
+16 |     pub fn encode(&self) -> Vec<u8> {
+   |            ^^^^^^
+
+warning: methods `get` and `get_all_data` are never used
+  --> tests/common/test_statemachine.rs:41:12
+   |
+34 | impl SimpleKvStore {
+   | ------------------ methods in this implementation
+...
+41 |     pub fn get(&self, key: &str) -> Option<String> {
+   |            ^^^
+...
+54 |     pub fn get_all_data(&self) -> HashMap<String, String> {
+   |            ^^^^^^^^^^^^
+
+warning: methods `get_all_data` and `get_value` are never used
+   --> tests/common/test_statemachine.rs:159:12
+    |
+69  | impl TestStateMachine {
+    | --------------------- methods in this implementation
+...
+159 |     pub fn get_all_data(&self) -> HashMap<String, String> {
+    |            ^^^^^^^^^^^^
+...
+164 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: methods `get_value`, `isolate`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:188:12
+    |
+41  | impl TestNode {
+    | ------------- methods in this implementation
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: method `get` is never used
+  --> tests/common/test_statemachine.rs:41:12
+   |
+34 | impl SimpleKvStore {
+   | ------------------ method in this implementation
+...
+41 |     pub fn get(&self, key: &str) -> Option<String> {
+   |            ^^^
+
+warning: method `get_value` is never used
+   --> tests/common/test_statemachine.rs:164:12
+    |
+69  | impl TestStateMachine {
+    | --------------------- method in this implementation
+...
+164 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+113 |     pub fn get_node(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+465 |     pub async fn wait_for_data_replication(&self, timeout: Duration) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: methods `get_value`, `isolate`, `wait_remove_node`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:188:12
+    |
+41  | impl TestNode {
+    | ------------- methods in this implementation
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+202 |     pub async fn wait_remove_node(&self){
+    |                  ^^^^^^^^^^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: method `handle_event` is never used
+   --> tests/common/test_node.rs:212:14
+    |
+41  | impl TestNode {
+    | ------------- method in this implementation
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+491 |     pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new_learner`, `get_value`, `isolate`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:53:18
+    |
+41  | impl TestNode {
+    | ------------- associated items in this implementation
+...
+53  |     pub async fn new_learner(
+    |                  ^^^^^^^^^^^
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: `raft-lite` (lib test) generated 15 warnings (15 duplicates)
+warning: `raft-lite` (test "network_leader_election_test") generated 11 warnings (run `cargo fix --test "network_leader_election_test"` to apply 2 suggestions)
+warning: `raft-lite` (test "integration_tests") generated 7 warnings (6 duplicates)
+warning: `raft-lite` (test "config_snapshot_test") generated 10 warnings (8 duplicates)
+warning: `raft-lite` (test "cluster_test") generated 10 warnings (8 duplicates)
+warning: `raft-lite` (test "snapshot_test") generated 10 warnings (6 duplicates)
+warning: `raft-lite` (test "cluster_learner_test") generated 10 warnings (9 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.31s
+     Running unittests src/lib.rs (target/debug/deps/raft_lite-6206e611f008b9a5)
+     Running tests/cluster_learner_test.rs (target/debug/deps/cluster_learner_test-f7bd6b39aa0d40de)
+     Running tests/cluster_test.rs (target/debug/deps/cluster_test-29309ce2e334738e)
+     Running tests/config_snapshot_test.rs (target/debug/deps/config_snapshot_test-0e0ab8c0ede8f5a8)
+     Running tests/integration_tests.rs (target/debug/deps/integration_tests-fc54cb77fbb4c1e6)
+     Running tests/network_leader_election_test.rs (target/debug/deps/network_leader_election_test-5cec11d40ac56cac)
+     Running tests/snapshot_test.rs (target/debug/deps/snapshot_test-14d50f52f1962d96)
+   Doc-tests raft_lite
+   Compiling raft-lite v0.1.0 (/home/ubuntu/workspace/raft-lite)
+warning: unused import: `debug`
+  --> src/mock/mock_network.rs:21:15
+   |
+21 | use tracing::{debug, info, warn};
+   |               ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `Channel`
+  --> src/network/mod.rs:12:24
+   |
+12 | use tonic::transport::{Channel, Endpoint};
+   |                        ^^^^^^^
+
+warning: unused variable: `e`
+   --> src/mock/mock_network.rs:327:68
+    |
+327 | ...                   sender.send(event).unwrap_or_else(|e| {
+    |                                                          ^ help: if this is intentional, prefix it with an underscore: `_e`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `client`
+   --> src/network/mod.rs:207:29
+    |
+207 |                     let mut client = match client_result {
+    |                             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_client`
+
+warning: unused variable: `args`
+   --> src/network/mod.rs:224:60
+    |
+224 | ...                   OutgoingMessage::RequestVote { args, .. } => {
+    |                                                      ^^^^-
+    |                                                      |
+    |                                                      help: try removing the field
+
+warning: variable does not need to be mutable
+   --> src/network/mod.rs:207:25
+    |
+207 |                     let mut client = match client_result {
+    |                         ----^^^^^^
+    |                         |
+    |                         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: field `peers` is never read
+    --> src/lib.rs:1108:5
+     |
+1104 | pub struct RaftState {
+     |            --------- field in this struct
+...
+1108 |     peers: Vec<RaftId>,
+     |     ^^^^^
+     |
+     = note: `#[warn(dead_code)]` on by default
+
+warning: method `get_config` is never used
+   --> src/mock/mock_network.rs:120:18
+    |
+110 | impl MockNetworkHubInner {
+    | ------------------------ method in this implementation
+...
+120 |     pub async fn get_config(&self, node_id: &RaftId) -> Option<Arc<MockRaftNetworkConfig>> {
+    |                  ^^^^^^^^^^
+
+warning: field `args` is never read
+  --> src/network/mod.rs:33:9
+   |
+31 |     RequestVoteResponse {
+   |     ------------------- field in this variant
+32 |         target_node: String,
+33 |         args: Box<RequestVoteResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:37:9
+   |
+35 |     AppendEntries {
+   |     ------------- field in this variant
+36 |         target_node: String,
+37 |         args: Box<AppendEntriesRequest>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:41:9
+   |
+39 |     AppendEntriesResponse {
+   |     --------------------- field in this variant
+40 |         target_node: String,
+41 |         args: Box<AppendEntriesResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:45:9
+   |
+43 |     InstallSnapshot {
+   |     --------------- field in this variant
+44 |         target_node: String,
+45 |         args: Box<InstallSnapshotRequest>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:49:9
+   |
+47 |     InstallSnapshotResponse {
+   |     ----------------------- field in this variant
+48 |         target_node: String,
+49 |         args: Box<InstallSnapshotResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: fields `local_node_id`, `clients`, and `grpc_server_addr` are never read
+  --> src/network/mod.rs:56:5
+   |
+55 | pub struct MultiRaftNetwork {
+   |            ---------------- fields in this struct
+56 |     local_node_id: String, // 当前进程的 NodeId
+   |     ^^^^^^^^^^^^^
+...
+63 |     clients: ClientMap,
+   |     ^^^^^^^
+64 |     grpc_server_addr: String, // 本节点 gRPC 服务监听地址
+   |     ^^^^^^^^^^^^^^^^
+
+warning: associated items `get_or_create_client` and `resolve_node_address` are never used
+   --> src/network/mod.rs:90:14
+    |
+67  | impl MultiRaftNetwork {
+    | --------------------- associated items in this implementation
+...
+90  |     async fn get_or_create_client(&self, target_node_id: &str) -> Result<GrpcClient, RpcError> {
+    |              ^^^^^^^^^^^^^^^^^^^^
+...
+135 |     async fn resolve_node_address(
+    |              ^^^^^^^^^^^^^^^^^^^^
+
+warning: `raft-lite` (lib) generated 15 warnings (run `cargo fix --lib -p raft-lite` to apply 4 suggestions)
+warning: unused import: `tokio::time::Timeout`
+  --> tests/common/test_cluster.rs:13:5
+   |
+13 | use tokio::time::Timeout;
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `async_trait::async_trait`
+ --> tests/common/test_node.rs:3:5
+  |
+3 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `leader_node`
+   --> tests/common/test_cluster.rs:239:21
+    |
+239 |         if let Some(leader_node) = self.get_node(&leader_id) {
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_leader_node`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `leader_node`
+   --> tests/common/test_cluster.rs:347:21
+    |
+347 |         if let Some(leader_node) = self.get_node(&leader_id) {
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_leader_node`
+
+warning: unused variable: `request_id`
+   --> tests/common/test_cluster.rs:177:13
+    |
+177 |         let request_id = raft_lite::RequestId::new();
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request_id`
+
+warning: unused variable: `config`
+   --> tests/common/test_node.rs:512:9
+    |
+512 |         config: raft_lite::ClusterConfig,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: method `handle_event` is never used
+   --> tests/common/test_node.rs:212:14
+    |
+41  | impl TestNode {
+    | ------------- method in this implementation
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+491 |     pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new_learner`, `get_value`, `isolate`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:53:18
+    |
+41  | impl TestNode {
+    | ------------- associated items in this implementation
+...
+53  |     pub async fn new_learner(
+    |                  ^^^^^^^^^^^
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: method `get` is never used
+  --> tests/common/test_statemachine.rs:41:12
+   |
+34 | impl SimpleKvStore {
+   | ------------------ method in this implementation
+...
+41 |     pub fn get(&self, key: &str) -> Option<String> {
+   |            ^^^
+
+warning: method `get_value` is never used
+   --> tests/common/test_statemachine.rs:164:12
+    |
+69  | impl TestStateMachine {
+    | --------------------- method in this implementation
+...
+164 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+113 |     pub fn get_node(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+465 |     pub async fn wait_for_data_replication(&self, timeout: Duration) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: methods `get_value`, `isolate`, `wait_remove_node`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:188:12
+    |
+41  | impl TestNode {
+    | ------------- methods in this implementation
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+202 |     pub async fn wait_remove_node(&self){
+    |                  ^^^^^^^^^^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:119:12
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+147 |     pub fn propose_command(&self, leader_id: &RaftId, command: Vec<u8>) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+196 |     pub async fn get_current_leader(&self) -> Vec<RaftId> {
+    |                  ^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+407 |     pub async fn wait_for_leader(&self, timeout: Duration) -> Result<RaftId, String> {
+    |                  ^^^^^^^^^^^^^^^
+...
+422 |     pub async fn verify_data_consistency(&self) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^
+...
+465 |     pub async fn wait_for_data_replication(&self, timeout: Duration) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+482 |     pub fn get_node_data(
+    |            ^^^^^^^^^^^^^
+...
+491 |     pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new_learner`, `get_value`, `get_all_data`, `wait_remove_node`, and `handle_event` are never used
+   --> tests/common/test_node.rs:53:18
+    |
+41  | impl TestNode {
+    | ------------- associated items in this implementation
+...
+53  |     pub async fn new_learner(
+    |                  ^^^^^^^^^^^
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+193 |     pub fn get_all_data(&self) -> std::collections::HashMap<String, String> {
+    |            ^^^^^^^^^^^^
+...
+202 |     pub async fn wait_remove_node(&self){
+    |                  ^^^^^^^^^^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: method `encode` is never used
+  --> tests/common/test_statemachine.rs:16:12
+   |
+15 | impl KvCommand {
+   | -------------- method in this implementation
+16 |     pub fn encode(&self) -> Vec<u8> {
+   |            ^^^^^^
+
+warning: methods `get` and `get_all_data` are never used
+  --> tests/common/test_statemachine.rs:41:12
+   |
+34 | impl SimpleKvStore {
+   | ------------------ methods in this implementation
+...
+41 |     pub fn get(&self, key: &str) -> Option<String> {
+   |            ^^^
+...
+54 |     pub fn get_all_data(&self) -> HashMap<String, String> {
+   |            ^^^^^^^^^^^^
+
+warning: methods `get_all_data` and `get_value` are never used
+   --> tests/common/test_statemachine.rs:159:12
+    |
+69  | impl TestStateMachine {
+    | --------------------- methods in this implementation
+...
+159 |     pub fn get_all_data(&self) -> HashMap<String, String> {
+    |            ^^^^^^^^^^^^
+...
+164 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: methods `get_value`, `isolate`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:188:12
+    |
+41  | impl TestNode {
+    | ------------- methods in this implementation
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: `raft-lite` (lib test) generated 15 warnings (15 duplicates)
+warning: `raft-lite` (test "network_leader_election_test") generated 11 warnings (6 duplicates)
+warning: `raft-lite` (test "config_snapshot_test") generated 10 warnings (8 duplicates)
+warning: `raft-lite` (test "snapshot_test") generated 10 warnings (9 duplicates)
+warning: `raft-lite` (test "cluster_test") generated 10 warnings (6 duplicates)
+warning: `raft-lite` (test "integration_tests") generated 7 warnings (run `cargo fix --test "integration_tests"` to apply 2 suggestions)
+warning: `raft-lite` (test "cluster_learner_test") generated 10 warnings (8 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.28s
+     Running unittests src/lib.rs (target/debug/deps/raft_lite-6206e611f008b9a5)
+     Running tests/cluster_learner_test.rs (target/debug/deps/cluster_learner_test-f7bd6b39aa0d40de)
+     Running tests/cluster_test.rs (target/debug/deps/cluster_test-29309ce2e334738e)
+     Running tests/config_snapshot_test.rs (target/debug/deps/config_snapshot_test-0e0ab8c0ede8f5a8)
+     Running tests/integration_tests.rs (target/debug/deps/integration_tests-fc54cb77fbb4c1e6)
+     Running tests/network_leader_election_test.rs (target/debug/deps/network_leader_election_test-5cec11d40ac56cac)
+     Running tests/snapshot_test.rs (target/debug/deps/snapshot_test-14d50f52f1962d96)
+   Doc-tests raft_lite
+   Compiling raft-lite v0.1.0 (/home/ubuntu/workspace/raft-lite)
+warning: unused import: `debug`
+  --> src/mock/mock_network.rs:21:15
+   |
+21 | use tracing::{debug, info, warn};
+   |               ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `Channel`
+  --> src/network/mod.rs:12:24
+   |
+12 | use tonic::transport::{Channel, Endpoint};
+   |                        ^^^^^^^
+
+warning: unused variable: `e`
+   --> src/mock/mock_network.rs:327:68
+    |
+327 | ...                   sender.send(event).unwrap_or_else(|e| {
+    |                                                          ^ help: if this is intentional, prefix it with an underscore: `_e`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `client`
+   --> src/network/mod.rs:207:29
+    |
+207 |                     let mut client = match client_result {
+    |                             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_client`
+
+warning: unused variable: `args`
+   --> src/network/mod.rs:224:60
+    |
+224 | ...                   OutgoingMessage::RequestVote { args, .. } => {
+    |                                                      ^^^^-
+    |                                                      |
+    |                                                      help: try removing the field
+
+warning: variable does not need to be mutable
+   --> src/network/mod.rs:207:25
+    |
+207 |                     let mut client = match client_result {
+    |                         ----^^^^^^
+    |                         |
+    |                         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: field `peers` is never read
+    --> src/lib.rs:1108:5
+     |
+1104 | pub struct RaftState {
+     |            --------- field in this struct
+...
+1108 |     peers: Vec<RaftId>,
+     |     ^^^^^
+     |
+     = note: `#[warn(dead_code)]` on by default
+
+warning: method `get_config` is never used
+   --> src/mock/mock_network.rs:120:18
+    |
+110 | impl MockNetworkHubInner {
+    | ------------------------ method in this implementation
+...
+120 |     pub async fn get_config(&self, node_id: &RaftId) -> Option<Arc<MockRaftNetworkConfig>> {
+    |                  ^^^^^^^^^^
+
+warning: field `args` is never read
+  --> src/network/mod.rs:33:9
+   |
+31 |     RequestVoteResponse {
+   |     ------------------- field in this variant
+32 |         target_node: String,
+33 |         args: Box<RequestVoteResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:37:9
+   |
+35 |     AppendEntries {
+   |     ------------- field in this variant
+36 |         target_node: String,
+37 |         args: Box<AppendEntriesRequest>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:41:9
+   |
+39 |     AppendEntriesResponse {
+   |     --------------------- field in this variant
+40 |         target_node: String,
+41 |         args: Box<AppendEntriesResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:45:9
+   |
+43 |     InstallSnapshot {
+   |     --------------- field in this variant
+44 |         target_node: String,
+45 |         args: Box<InstallSnapshotRequest>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:49:9
+   |
+47 |     InstallSnapshotResponse {
+   |     ----------------------- field in this variant
+48 |         target_node: String,
+49 |         args: Box<InstallSnapshotResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: fields `local_node_id`, `clients`, and `grpc_server_addr` are never read
+  --> src/network/mod.rs:56:5
+   |
+55 | pub struct MultiRaftNetwork {
+   |            ---------------- fields in this struct
+56 |     local_node_id: String, // 当前进程的 NodeId
+   |     ^^^^^^^^^^^^^
+...
+63 |     clients: ClientMap,
+   |     ^^^^^^^
+64 |     grpc_server_addr: String, // 本节点 gRPC 服务监听地址
+   |     ^^^^^^^^^^^^^^^^
+
+warning: associated items `get_or_create_client` and `resolve_node_address` are never used
+   --> src/network/mod.rs:90:14
+    |
+67  | impl MultiRaftNetwork {
+    | --------------------- associated items in this implementation
+...
+90  |     async fn get_or_create_client(&self, target_node_id: &str) -> Result<GrpcClient, RpcError> {
+    |              ^^^^^^^^^^^^^^^^^^^^
+...
+135 |     async fn resolve_node_address(
+    |              ^^^^^^^^^^^^^^^^^^^^
+
+warning: `raft-lite` (lib) generated 15 warnings (run `cargo fix --lib -p raft-lite` to apply 4 suggestions)
+warning: unused import: `tokio::time::Timeout`
+  --> tests/common/test_cluster.rs:13:5
+   |
+13 | use tokio::time::Timeout;
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `async_trait::async_trait`
+ --> tests/common/test_node.rs:3:5
+  |
+3 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `leader_node`
+   --> tests/common/test_cluster.rs:239:21
+    |
+239 |         if let Some(leader_node) = self.get_node(&leader_id) {
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_leader_node`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `leader_node`
+   --> tests/common/test_cluster.rs:347:21
+    |
+347 |         if let Some(leader_node) = self.get_node(&leader_id) {
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_leader_node`
+
+warning: unused variable: `request_id`
+   --> tests/common/test_cluster.rs:177:13
+    |
+177 |         let request_id = raft_lite::RequestId::new();
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request_id`
+
+warning: unused variable: `config`
+   --> tests/common/test_node.rs:512:9
+    |
+512 |         config: raft_lite::ClusterConfig,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: method `handle_event` is never used
+   --> tests/common/test_node.rs:212:14
+    |
+41  | impl TestNode {
+    | ------------- method in this implementation
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:119:12
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+147 |     pub fn propose_command(&self, leader_id: &RaftId, command: Vec<u8>) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+196 |     pub async fn get_current_leader(&self) -> Vec<RaftId> {
+    |                  ^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+407 |     pub async fn wait_for_leader(&self, timeout: Duration) -> Result<RaftId, String> {
+    |                  ^^^^^^^^^^^^^^^
+...
+422 |     pub async fn verify_data_consistency(&self) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^
+...
+465 |     pub async fn wait_for_data_replication(&self, timeout: Duration) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+482 |     pub fn get_node_data(
+    |            ^^^^^^^^^^^^^
+...
+491 |     pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new_learner`, `get_value`, `get_all_data`, `wait_remove_node`, and `handle_event` are never used
+   --> tests/common/test_node.rs:53:18
+    |
+41  | impl TestNode {
+    | ------------- associated items in this implementation
+...
+53  |     pub async fn new_learner(
+    |                  ^^^^^^^^^^^
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+193 |     pub fn get_all_data(&self) -> std::collections::HashMap<String, String> {
+    |            ^^^^^^^^^^^^
+...
+202 |     pub async fn wait_remove_node(&self){
+    |                  ^^^^^^^^^^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: method `encode` is never used
+  --> tests/common/test_statemachine.rs:16:12
+   |
+15 | impl KvCommand {
+   | -------------- method in this implementation
+16 |     pub fn encode(&self) -> Vec<u8> {
+   |            ^^^^^^
+
+warning: methods `get` and `get_all_data` are never used
+  --> tests/common/test_statemachine.rs:41:12
+   |
+34 | impl SimpleKvStore {
+   | ------------------ methods in this implementation
+...
+41 |     pub fn get(&self, key: &str) -> Option<String> {
+   |            ^^^
+...
+54 |     pub fn get_all_data(&self) -> HashMap<String, String> {
+   |            ^^^^^^^^^^^^
+
+warning: methods `get_all_data` and `get_value` are never used
+   --> tests/common/test_statemachine.rs:159:12
+    |
+69  | impl TestStateMachine {
+    | --------------------- methods in this implementation
+...
+159 |     pub fn get_all_data(&self) -> HashMap<String, String> {
+    |            ^^^^^^^^^^^^
+...
+164 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+491 |     pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new_learner`, `get_value`, `isolate`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:53:18
+    |
+41  | impl TestNode {
+    | ------------- associated items in this implementation
+...
+53  |     pub async fn new_learner(
+    |                  ^^^^^^^^^^^
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: method `get` is never used
+  --> tests/common/test_statemachine.rs:41:12
+   |
+34 | impl SimpleKvStore {
+   | ------------------ method in this implementation
+...
+41 |     pub fn get(&self, key: &str) -> Option<String> {
+   |            ^^^
+
+warning: method `get_value` is never used
+   --> tests/common/test_statemachine.rs:164:12
+    |
+69  | impl TestStateMachine {
+    | --------------------- method in this implementation
+...
+164 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: methods `get_value`, `isolate`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:188:12
+    |
+41  | impl TestNode {
+    | ------------- methods in this implementation
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+113 |     pub fn get_node(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+465 |     pub async fn wait_for_data_replication(&self, timeout: Duration) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: methods `get_value`, `isolate`, `wait_remove_node`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:188:12
+    |
+41  | impl TestNode {
+    | ------------- methods in this implementation
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+202 |     pub async fn wait_remove_node(&self){
+    |                  ^^^^^^^^^^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: `raft-lite` (test "cluster_test") generated 10 warnings (4 duplicates) (run `cargo fix --test "cluster_test"` to apply 2 suggestions)
+warning: `raft-lite` (test "network_leader_election_test") generated 11 warnings (6 duplicates)
+warning: `raft-lite` (test "integration_tests") generated 7 warnings (2 duplicates)
+warning: `raft-lite` (test "snapshot_test") generated 10 warnings (9 duplicates)
+warning: `raft-lite` (test "cluster_learner_test") generated 10 warnings (8 duplicates)
+warning: `raft-lite` (test "config_snapshot_test") generated 10 warnings (8 duplicates)
+warning: `raft-lite` (lib test) generated 15 warnings (15 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.29s
+     Running unittests src/lib.rs (target/debug/deps/raft_lite-6206e611f008b9a5)
+     Running tests/cluster_learner_test.rs (target/debug/deps/cluster_learner_test-f7bd6b39aa0d40de)
+     Running tests/cluster_test.rs (target/debug/deps/cluster_test-29309ce2e334738e)
+     Running tests/config_snapshot_test.rs (target/debug/deps/config_snapshot_test-0e0ab8c0ede8f5a8)
+     Running tests/integration_tests.rs (target/debug/deps/integration_tests-fc54cb77fbb4c1e6)
+     Running tests/network_leader_election_test.rs (target/debug/deps/network_leader_election_test-5cec11d40ac56cac)
+     Running tests/snapshot_test.rs (target/debug/deps/snapshot_test-14d50f52f1962d96)
+   Doc-tests raft_lite
+   Compiling raft-lite v0.1.0 (/home/ubuntu/workspace/raft-lite)
+warning: unused import: `debug`
+  --> src/mock/mock_network.rs:21:15
+   |
+21 | use tracing::{debug, info, warn};
+   |               ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `Channel`
+  --> src/network/mod.rs:12:24
+   |
+12 | use tonic::transport::{Channel, Endpoint};
+   |                        ^^^^^^^
+
+warning: unused variable: `e`
+   --> src/mock/mock_network.rs:327:68
+    |
+327 | ...                   sender.send(event).unwrap_or_else(|e| {
+    |                                                          ^ help: if this is intentional, prefix it with an underscore: `_e`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `client`
+   --> src/network/mod.rs:207:29
+    |
+207 |                     let mut client = match client_result {
+    |                             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_client`
+
+warning: unused variable: `args`
+   --> src/network/mod.rs:224:60
+    |
+224 | ...                   OutgoingMessage::RequestVote { args, .. } => {
+    |                                                      ^^^^-
+    |                                                      |
+    |                                                      help: try removing the field
+
+warning: variable does not need to be mutable
+   --> src/network/mod.rs:207:25
+    |
+207 |                     let mut client = match client_result {
+    |                         ----^^^^^^
+    |                         |
+    |                         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: field `peers` is never read
+    --> src/lib.rs:1108:5
+     |
+1104 | pub struct RaftState {
+     |            --------- field in this struct
+...
+1108 |     peers: Vec<RaftId>,
+     |     ^^^^^
+     |
+     = note: `#[warn(dead_code)]` on by default
+
+warning: method `get_config` is never used
+   --> src/mock/mock_network.rs:120:18
+    |
+110 | impl MockNetworkHubInner {
+    | ------------------------ method in this implementation
+...
+120 |     pub async fn get_config(&self, node_id: &RaftId) -> Option<Arc<MockRaftNetworkConfig>> {
+    |                  ^^^^^^^^^^
+
+warning: field `args` is never read
+  --> src/network/mod.rs:33:9
+   |
+31 |     RequestVoteResponse {
+   |     ------------------- field in this variant
+32 |         target_node: String,
+33 |         args: Box<RequestVoteResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:37:9
+   |
+35 |     AppendEntries {
+   |     ------------- field in this variant
+36 |         target_node: String,
+37 |         args: Box<AppendEntriesRequest>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:41:9
+   |
+39 |     AppendEntriesResponse {
+   |     --------------------- field in this variant
+40 |         target_node: String,
+41 |         args: Box<AppendEntriesResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:45:9
+   |
+43 |     InstallSnapshot {
+   |     --------------- field in this variant
+44 |         target_node: String,
+45 |         args: Box<InstallSnapshotRequest>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `args` is never read
+  --> src/network/mod.rs:49:9
+   |
+47 |     InstallSnapshotResponse {
+   |     ----------------------- field in this variant
+48 |         target_node: String,
+49 |         args: Box<InstallSnapshotResponse>,
+   |         ^^^^
+   |
+   = note: `OutgoingMessage` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: fields `local_node_id`, `clients`, and `grpc_server_addr` are never read
+  --> src/network/mod.rs:56:5
+   |
+55 | pub struct MultiRaftNetwork {
+   |            ---------------- fields in this struct
+56 |     local_node_id: String, // 当前进程的 NodeId
+   |     ^^^^^^^^^^^^^
+...
+63 |     clients: ClientMap,
+   |     ^^^^^^^
+64 |     grpc_server_addr: String, // 本节点 gRPC 服务监听地址
+   |     ^^^^^^^^^^^^^^^^
+
+warning: associated items `get_or_create_client` and `resolve_node_address` are never used
+   --> src/network/mod.rs:90:14
+    |
+67  | impl MultiRaftNetwork {
+    | --------------------- associated items in this implementation
+...
+90  |     async fn get_or_create_client(&self, target_node_id: &str) -> Result<GrpcClient, RpcError> {
+    |              ^^^^^^^^^^^^^^^^^^^^
+...
+135 |     async fn resolve_node_address(
+    |              ^^^^^^^^^^^^^^^^^^^^
+
+warning: `raft-lite` (lib) generated 15 warnings (run `cargo fix --lib -p raft-lite` to apply 4 suggestions)
+warning: unused import: `tokio::time::Timeout`
+  --> tests/common/test_cluster.rs:13:5
+   |
+13 | use tokio::time::Timeout;
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `async_trait::async_trait`
+ --> tests/common/test_node.rs:3:5
+  |
+3 | use async_trait::async_trait;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `leader_node`
+   --> tests/common/test_cluster.rs:239:21
+    |
+239 |         if let Some(leader_node) = self.get_node(&leader_id) {
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_leader_node`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `leader_node`
+   --> tests/common/test_cluster.rs:347:21
+    |
+347 |         if let Some(leader_node) = self.get_node(&leader_id) {
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_leader_node`
+
+warning: unused variable: `request_id`
+   --> tests/common/test_cluster.rs:177:13
+    |
+177 |         let request_id = raft_lite::RequestId::new();
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request_id`
+
+warning: unused variable: `config`
+   --> tests/common/test_node.rs:512:9
+    |
+512 |         config: raft_lite::ClusterConfig,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+113 |     pub fn get_node(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+465 |     pub async fn wait_for_data_replication(&self, timeout: Duration) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: methods `get_value`, `isolate`, `wait_remove_node`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:188:12
+    |
+41  | impl TestNode {
+    | ------------- methods in this implementation
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+202 |     pub async fn wait_remove_node(&self){
+    |                  ^^^^^^^^^^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: method `get` is never used
+  --> tests/common/test_statemachine.rs:41:12
+   |
+34 | impl SimpleKvStore {
+   | ------------------ method in this implementation
+...
+41 |     pub fn get(&self, key: &str) -> Option<String> {
+   |            ^^^
+
+warning: method `get_value` is never used
+   --> tests/common/test_statemachine.rs:164:12
+    |
+69  | impl TestStateMachine {
+    | --------------------- method in this implementation
+...
+164 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: methods `get_value`, `isolate`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:188:12
+    |
+41  | impl TestNode {
+    | ------------- methods in this implementation
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: method `handle_event` is never used
+   --> tests/common/test_node.rs:212:14
+    |
+41  | impl TestNode {
+    | ------------- method in this implementation
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:119:12
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+147 |     pub fn propose_command(&self, leader_id: &RaftId, command: Vec<u8>) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+196 |     pub async fn get_current_leader(&self) -> Vec<RaftId> {
+    |                  ^^^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+398 |     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft_lite::Role> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+407 |     pub async fn wait_for_leader(&self, timeout: Duration) -> Result<RaftId, String> {
+    |                  ^^^^^^^^^^^^^^^
+...
+422 |     pub async fn verify_data_consistency(&self) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^
+...
+465 |     pub async fn wait_for_data_replication(&self, timeout: Duration) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+482 |     pub fn get_node_data(
+    |            ^^^^^^^^^^^^^
+...
+491 |     pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new_learner`, `get_value`, `get_all_data`, `wait_remove_node`, and `handle_event` are never used
+   --> tests/common/test_node.rs:53:18
+    |
+41  | impl TestNode {
+    | ------------- associated items in this implementation
+...
+53  |     pub async fn new_learner(
+    |                  ^^^^^^^^^^^
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+193 |     pub fn get_all_data(&self) -> std::collections::HashMap<String, String> {
+    |            ^^^^^^^^^^^^
+...
+202 |     pub async fn wait_remove_node(&self){
+    |                  ^^^^^^^^^^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: method `encode` is never used
+  --> tests/common/test_statemachine.rs:16:12
+   |
+15 | impl KvCommand {
+   | -------------- method in this implementation
+16 |     pub fn encode(&self) -> Vec<u8> {
+   |            ^^^^^^
+
+warning: methods `get` and `get_all_data` are never used
+  --> tests/common/test_statemachine.rs:41:12
+   |
+34 | impl SimpleKvStore {
+   | ------------------ methods in this implementation
+...
+41 |     pub fn get(&self, key: &str) -> Option<String> {
+   |            ^^^
+...
+54 |     pub fn get_all_data(&self) -> HashMap<String, String> {
+   |            ^^^^^^^^^^^^
+
+warning: methods `get_all_data` and `get_value` are never used
+   --> tests/common/test_statemachine.rs:159:12
+    |
+69  | impl TestStateMachine {
+    | --------------------- methods in this implementation
+...
+159 |     pub fn get_all_data(&self) -> HashMap<String, String> {
+    |            ^^^^^^^^^^^^
+...
+164 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+491 |     pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+...
+552 |     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^^^^
+...
+616 |     pub async fn wait_for_learner_sync(
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `new_learner`, `get_value`, `isolate`, `restore`, and `handle_event` are never used
+   --> tests/common/test_node.rs:53:18
+    |
+41  | impl TestNode {
+    | ------------- associated items in this implementation
+...
+53  |     pub async fn new_learner(
+    |                  ^^^^^^^^^^^
+...
+188 |     pub fn get_value(&self, key: &str) -> Option<String> {
+    |            ^^^^^^^^^
+...
+197 |     pub async fn isolate(&self) {
+    |                  ^^^^^^^
+...
+207 |     pub async fn restore(&self) {
+    |                  ^^^^^^^
+...
+212 |     async fn handle_event(&self, event: raft_lite::Event) {
+    |              ^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> tests/common/test_cluster.rs:93:18
+    |
+32  | impl TestCluster {
+    | ---------------- methods in this implementation
+...
+93  |     pub async fn isolate_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+103 |     pub async fn restore_node(&self, id: &RaftId) {
+    |                  ^^^^^^^^^^^^
+...
+119 |     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
+    |            ^^^^^^^^^^^^
+...
+125 |     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
+    |                  ^^^^^^^^^
+...
+138 |     pub async fn update_network_config_for_node(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+176 |     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+208 |     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^
+...
+309 |     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
+    |                  ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: `raft-lite` (lib test) generated 15 warnings (15 duplicates)
+warning: `raft-lite` (test "network_leader_election_test") generated 11 warnings (6 duplicates)
+warning: `raft-lite` (test "snapshot_test") generated 10 warnings (6 duplicates) (run `cargo fix --test "snapshot_test"` to apply 2 suggestions)
+warning: `raft-lite` (test "integration_tests") generated 7 warnings (6 duplicates)
+warning: `raft-lite` (test "config_snapshot_test") generated 10 warnings (2 duplicates)
+warning: `raft-lite` (test "cluster_test") generated 10 warnings (8 duplicates)
+warning: `raft-lite` (test "cluster_learner_test") generated 10 warnings (9 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.15s
+     Running unittests src/lib.rs (target/debug/deps/raft_lite-6206e611f008b9a5)
+     Running tests/cluster_learner_test.rs (target/debug/deps/cluster_learner_test-f7bd6b39aa0d40de)
+     Running tests/cluster_test.rs (target/debug/deps/cluster_test-29309ce2e334738e)
+     Running tests/config_snapshot_test.rs (target/debug/deps/config_snapshot_test-0e0ab8c0ede8f5a8)
+     Running tests/integration_tests.rs (target/debug/deps/integration_tests-fc54cb77fbb4c1e6)
+     Running tests/network_leader_election_test.rs (target/debug/deps/network_leader_election_test-5cec11d40ac56cac)
+     Running tests/snapshot_test.rs (target/debug/deps/snapshot_test-14d50f52f1962d96)
+   Doc-tests raft_lite
+error: unexpected closing delimiter: `}`
+    --> src/lib.rs:1217:1
+     |
+1192 | pub struct RaftStateOptions {
+     |                             - this opening brace...
+...
+1216 | }
+     | - ...matches this closing brace
+1217 | }
+     | ^ unexpected closing delimiter
+
+error: aborting due to 1 previous error
+
+error: doctest failed, to rerun pass `--doc`
+
+Caused by:
+  process didn't exit successfully: `rustdoc --edition=2024 --crate-type lib --color auto --crate-name raft_lite --test src/lib.rs --test-run-directory /home/ubuntu/workspace/raft-lite -L dependency=/home/ubuntu/workspace/raft-lite/target/debug/deps -L dependency=/home/ubuntu/workspace/raft-lite/target/debug/deps --test-args --nocapture --extern anyhow=/home/ubuntu/workspace/raft-lite/target/debug/deps/libanyhow-2ecb53f997002bdc.rlib --extern async_trait=/home/ubuntu/workspace/raft-lite/target/debug/deps/libasync_trait-5df8609c20598470.so --extern futures=/home/ubuntu/workspace/raft-lite/target/debug/deps/libfutures-85e837f7dcff8559.rlib --extern log=/home/ubuntu/workspace/raft-lite/target/debug/deps/liblog-1b57271858998716.rlib --extern parking_lot=/home/ubuntu/workspace/raft-lite/target/debug/deps/libparking_lot-edd5649d69520b73.rlib --extern prost=/home/ubuntu/workspace/raft-lite/target/debug/deps/libprost-797324ebbeb0b552.rlib --extern raft_lite=/home/ubuntu/workspace/raft-lite/target/debug/deps/libraft_lite-236c8929378c3947.rlib --extern rand=/home/ubuntu/workspace/raft-lite/target/debug/deps/librand-9ff9417beb7fff78.rlib --extern serde=/home/ubuntu/workspace/raft-lite/target/debug/deps/libserde-2d228cfd11b613f2.rlib --extern serde_json=/home/ubuntu/workspace/raft-lite/target/debug/deps/libserde_json-bdf1057e4cbacce9.rlib --extern thiserror=/home/ubuntu/workspace/raft-lite/target/debug/deps/libthiserror-e2699dc63d25a7e1.rlib --extern tokio=/home/ubuntu/workspace/raft-lite/target/debug/deps/libtokio-e447bc0f39716d06.rlib --extern tonic=/home/ubuntu/workspace/raft-lite/target/debug/deps/libtonic-fa727acbc7c4c1b1.rlib --extern tonic_prost=/home/ubuntu/workspace/raft-lite/target/debug/deps/libtonic_prost-f4a3e4689f633bbb.rlib --extern tracing=/home/ubuntu/workspace/raft-lite/target/debug/deps/libtracing-a21e20ff8883c242.rlib --extern tracing_subscriber=/home/ubuntu/workspace/raft-lite/target/debug/deps/libtracing_subscriber-fda047159cfc9002.rlib -C embed-bitcode=no --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' --error-format human` (exit status: 1)

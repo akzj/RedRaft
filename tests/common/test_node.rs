@@ -138,11 +138,29 @@ impl TestNode {
         // 创建状态机回调
         let state_machine = TestStateMachine::new(id.clone());
 
-        // 创建 RaftState 选项
+        // 创建 RaftState 选项，使用超快的超时参数
         let options = RaftStateOptions {
             id: id.clone(),
             peers: initial_peers_or_voters,
-            ..Default::default()
+            election_timeout_min: 150,      // 更快的选举超时
+            election_timeout_max: 300,
+            heartbeat_interval: 25,         // 更频繁的心跳  
+            apply_interval: 10,             // 更快的应用间隔
+            config_change_timeout: Duration::from_secs(1),
+            leader_transfer_timeout: Duration::from_secs(1),
+            apply_batch_size: 50,
+            schedule_snapshot_probe_interval: Duration::from_secs(5),
+            schedule_snapshot_probe_retries: 3,
+            max_inflight_requests: 100,     // 调整InFlight限制
+            initial_batch_size: 10,
+            max_batch_size: 100,
+            min_batch_size: 1,
+            feedback_window_size: 10,
+            // 超极速智能超时配置 - 最激进的快速超时和重发
+            base_request_timeout: Duration::from_millis(25),    // 基础超时25ms 
+            max_request_timeout: Duration::from_millis(100),    // 最大超时100ms
+            min_request_timeout: Duration::from_millis(10),     // 最小超时10ms
+            timeout_response_factor: 2.0,                       // 响应时间因子2.0倍
         };
 
         let inner = Arc::new(TestNodeInner {
@@ -239,6 +257,11 @@ impl TestNode {
         }
         // If still can't get lock after retries, return Follower as fallback
         raft_lite::Role::Follower
+    }
+
+    pub async fn get_inflight_request_count(&self) -> usize {
+        let state = self.raft_state.lock().await;
+        state.get_inflight_request_count()
     }
 }
 
