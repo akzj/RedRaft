@@ -1020,6 +1020,7 @@ mod tests {
             last_included_index: 1,
             last_included_term: 1,
             data: vec![1, 2, 3],
+            config: ClusterConfig::simple(vec![sender.clone()].into_iter().collect(), 0),
             request_id: RequestId::new(),
             is_probe: false,
         };

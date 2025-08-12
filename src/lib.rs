@@ -732,6 +732,7 @@ pub trait RaftCallbacks: Network + Storage + TimerService + Send + Sync {
         index: u64,
         term: u64,
         data: Vec<u8>,
+        config: ClusterConfig, // 添加配置信息参数
         request_id: RequestId,
     ) -> SnapshotResult<()>;
 
@@ -1004,6 +1005,7 @@ pub struct InstallSnapshotRequest {
     pub last_included_index: u64,
     pub last_included_term: u64,
     pub data: Vec<u8>,
+    pub config: ClusterConfig, // 快照包含的集群配置信息
     pub request_id: RequestId,
     // 空消息标记 - 用于探测安装状态
     pub is_probe: bool,
@@ -2683,6 +2685,7 @@ impl RaftState {
             last_included_index: snap.index,
             last_included_term: snap.term,
             data: snap.data.clone(),
+            config: snap.config.clone(), // 包含快照中的配置信息
             request_id: RequestId::new(),
             is_probe: false,
         };
@@ -2764,6 +2767,7 @@ impl RaftState {
             last_included_index: last_snap_index,
             last_included_term: 0, // 探测消息不需要实际任期
             data: vec![],          // 空数据
+            config: self.config.clone(), // 探测请求使用当前配置
             request_id: RequestId::new(),
             is_probe: true,
         };
@@ -2946,6 +2950,7 @@ impl RaftState {
                         request.last_included_index,
                         request.last_included_term,
                         request.data,
+                        request.config.clone(), // 传递配置信息
                         request.request_id,
                     )
                     .await,
@@ -4817,6 +4822,7 @@ mod tests {
             _index: u64,
             _term: u64,
             _data: Vec<u8>,
+            _config: ClusterConfig, // 添加配置参数
             _request_id: RequestId,
         ) -> SnapshotResult<()> {
             Ok(())
@@ -5191,6 +5197,7 @@ mod tests {
             last_included_index: 10,
             last_included_term: 1,
             data: vec![1, 2, 3, 4, 5],
+            config: ClusterConfig::empty(), // 测试用空配置
             request_id: RequestId::new(),
             is_probe: false,
         };
@@ -5974,6 +5981,7 @@ mod tests {
             last_included_index: 10,
             last_included_term: 1,
             data: snapshot_data,
+            config: snap_config, // 使用测试配置
             request_id: RequestId::new(), // 使用特定 ID 以便验证
             is_probe: false,
         };
@@ -6059,6 +6067,7 @@ mod tests {
             last_included_index: 5,
             last_included_term: 1,
             data: vec![], // 探测请求通常数据为空
+            config: ClusterConfig::empty(), // 测试用空配置
             request_id: RequestId::new(),
             is_probe: true, // 标记为探测
         };
@@ -6610,6 +6619,7 @@ mod tests {
             last_included_index: 5,
             last_included_term: 1,
             data: vec![],
+            config: ClusterConfig::empty(), // 测试用空配置
             request_id: installing_request_id, // 使用相同的请求ID进行探测
             is_probe: true,
         };
@@ -6675,6 +6685,7 @@ mod tests {
             last_included_index: 5,
             last_included_term: 1,
             data: vec![],
+            config: ClusterConfig::empty(), // 测试用空配置
             request_id: RequestId::new(), // 使用不同的request_id
             is_probe: true,
         };
@@ -6736,6 +6747,7 @@ mod tests {
             last_included_index: 10,
             last_included_term: 2,
             data: vec![1, 2, 3],
+            config: ClusterConfig::empty(), // 测试用空配置
             request_id: RequestId::new(),
             is_probe: false,
         };
@@ -6802,6 +6814,7 @@ mod tests {
             last_included_index: 10, // Older snapshot index
             last_included_term: 1,
             data: vec![1, 2, 3],
+            config: ClusterConfig::empty(), // 测试用空配置
             request_id: RequestId::new(),
             is_probe: false,
         };
@@ -7687,6 +7700,7 @@ mod tests {
             last_included_index,
             last_included_term,
             data: snapshot_data.clone(),
+            config: ClusterConfig::empty(), // 测试用空配置
             request_id,
             is_probe: false, // 关键：非探测
         };

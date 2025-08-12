@@ -230,11 +230,15 @@ impl TestNode {
     }
 
     pub fn get_role(&self) -> raft_lite::Role {
-        // 使用 try_lock 来避免阻塞，如果锁被占用就返回 Follower
-        match self.raft_state.try_lock() {
-            Ok(state) => state.get_role(),
-            Err(_) => raft_lite::Role::Follower, // 默认返回 Follower
+        // Retry with try_lock to handle temporary contention
+        for _ in 0..10 {
+            if let Ok(state) = self.raft_state.try_lock() {
+                return state.get_role();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        // If still can't get lock after retries, return Follower as fallback
+        raft_lite::Role::Follower
     }
 }
 
@@ -505,6 +509,7 @@ impl RaftCallbacks for TestNodeInner {
         index: u64,
         term: u64,
         data: Vec<u8>,
+        config: raft_lite::ClusterConfig,
         request_id: RequestId,
     ) -> raft_lite::SnapshotResult<()> {
         self.state_machine

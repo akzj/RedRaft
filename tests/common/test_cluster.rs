@@ -452,7 +452,7 @@ impl TestCluster {
         println!("✓ Data consistency verified across {} nodes", nodes.len());
         if let Some(data) = reference_data {
             if !data.is_empty() {
-                println!("  Shared data: {:?}", data);
+                //println!("  Shared data: {:?}", data);
             } else {
                 println!("  All nodes have empty data (expected initially)");
             }
