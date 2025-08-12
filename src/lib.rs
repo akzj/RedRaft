@@ -284,7 +284,9 @@ impl ErrorHandler for StorageError {
             StorageError::DataCorruption(idx) => format!("Data corruption at index {}", idx),
             StorageError::StorageFull => "Storage full".to_string(),
             StorageError::ConfigNotFound => "Configuration not found".to_string(),
-            StorageError::SnapshotCreationFailed(msg) => format!("Snapshot creation failed: {}", msg),
+            StorageError::SnapshotCreationFailed(msg) => {
+                format!("Snapshot creation failed: {}", msg)
+            }
             StorageError::Consistency(msg) => format!("Consistency check failed: {}", msg),
         }
     }
@@ -517,7 +519,7 @@ pub enum Event {
         new_voters: HashSet<RaftId>,
         request_id: RequestId,
     },
-    
+
     // Learner 管理事件
     AddLearner {
         learner: RaftId,
@@ -807,7 +809,11 @@ impl ClusterConfig {
         }
     }
 
-    pub fn with_learners(voters: HashSet<RaftId>, learners: Option<HashSet<RaftId>>, log_index: u64) -> Self {
+    pub fn with_learners(
+        voters: HashSet<RaftId>,
+        learners: Option<HashSet<RaftId>>,
+        log_index: u64,
+    ) -> Self {
         Self {
             learners,
             voters,
@@ -1232,7 +1238,7 @@ impl RaftState {
         let snap = match callbacks.load_snapshot(options.id.clone()).await {
             Ok(Some(s)) => s,
             Ok(None) => {
-                error!("No snapshot found");
+                info!("Node {} No snapshot found", options.id);
                 // 如果没有快照，初始化为索引0，任期0的空快照
                 Snapshot {
                     index: 0,
@@ -1345,10 +1351,16 @@ impl RaftState {
                 new_voters,
                 request_id,
             } => self.handle_change_config(new_voters, request_id).await,
-            Event::AddLearner { learner, request_id } => {
+            Event::AddLearner {
+                learner,
+                request_id,
+            } => {
                 self.handle_add_learner(learner, request_id).await;
             }
-            Event::RemoveLearner { learner, request_id } => {
+            Event::RemoveLearner {
+                learner,
+                request_id,
+            } => {
                 self.handle_remove_learner(learner, request_id).await;
             }
             Event::LeaderTransfer { target, request_id } => {
@@ -1717,7 +1729,9 @@ impl RaftState {
         self.snapshot_probe_schedules.clear();
 
         // 收集所有需要管理的节点（voters + learners）
-        let all_peers: Vec<RaftId> = self.config.get_all_nodes()
+        let all_peers: Vec<RaftId> = self
+            .config
+            .get_all_nodes()
             .into_iter()
             .filter(|peer| *peer != self.id)
             .collect();
@@ -2067,7 +2081,7 @@ impl RaftState {
                 Some(local_term) => local_term == request.prev_log_term,
                 None => {
                     // 获取本地日志任期失败，为安全起见，拒绝请求
-                    error!(
+                    warn!(
                         "Node {} failed to get local log term for index {} during consistency check, rejecting AppendEntries",
                         self.id, request.prev_log_index
                     );
@@ -2525,7 +2539,7 @@ impl RaftState {
                             info!("Index {} returned empty entries for peer {}", i, peer);
                         }
                         Err(e) => {
-                            error!(
+                            warn!(
                                 "Failed to get log entry at index {} for peer {}: {:?}",
                                 i, peer, e
                             );
@@ -2765,8 +2779,8 @@ impl RaftState {
             term: self.current_term,
             leader_id: self.id.clone(),
             last_included_index: last_snap_index,
-            last_included_term: 0, // 探测消息不需要实际任期
-            data: vec![],          // 空数据
+            last_included_term: 0,       // 探测消息不需要实际任期
+            data: vec![],                // 空数据
             config: self.config.clone(), // 探测请求使用当前配置
             request_id: RequestId::new(),
             is_probe: true,
@@ -2976,6 +2990,7 @@ impl RaftState {
         _reason: Option<String>,
         index: u64,
         term: u64,
+        config: Option<ClusterConfig>,
     ) {
         // 检查是否是当前正在处理的快照
         if self.current_snapshot_request_id != Some(request_id) {
@@ -2990,6 +3005,68 @@ impl RaftState {
             self.last_snapshot_term = term;
             self.commit_index = self.commit_index.max(index);
             self.last_applied = self.last_applied.max(index);
+
+            // 应用快照中的配置信息到当前RaftState
+            if let Some(snapshot_config) = config {
+                info!(
+                    "Node {} applying snapshot config: old_config={:?}, new_config={:?}",
+                    self.id, self.config, snapshot_config
+                );
+                self.config = snapshot_config;
+
+                // 如果节点在新配置中不是voter，且当前是leader或candidate，需要转为follower
+                if !self.config.voters_contains(&self.id)
+                    && (self.role == Role::Leader || self.role == Role::Candidate)
+                {
+                    warn!(
+                        "Node {} is no longer a voter in snapshot config, stepping down to follower",
+                        self.id
+                    );
+                    self.role = Role::Follower;
+                    self.voted_for = None;
+                    self.leader_id = None;
+
+                    // 持久化状态变更
+                    let _ = self
+                        .error_handler
+                        .handle_void(
+                            self.callbacks
+                                .save_hard_state(
+                                    self.id.clone(),
+                                    self.current_term,
+                                    self.voted_for.clone(),
+                                )
+                                .await,
+                            "save_hard_state",
+                            None,
+                        )
+                        .await;
+
+                    // 通知状态变更
+                    let _ = self
+                        .error_handler
+                        .handle_void(
+                            self.callbacks
+                                .state_changed(self.id.clone(), self.role)
+                                .await,
+                            "state_changed",
+                            None,
+                        )
+                        .await;
+                }
+
+                // 持久化新的配置
+                let _ = self
+                    .error_handler
+                    .handle_void(
+                        self.callbacks
+                            .save_cluster_config(self.id.clone(), self.config.clone())
+                            .await,
+                        "save_cluster_config",
+                        None,
+                    )
+                    .await;
+            }
         }
 
         // 清除当前处理标记
@@ -3306,7 +3383,9 @@ impl RaftState {
             if entry.is_config {
                 if let Ok(new_config) = serde_json::from_slice::<ClusterConfig>(&entry.command) {
                     // 使用增强的配置变更安全验证
-                    if let Err(validation_error) = self.validate_config_change_safety(&new_config, entry.index) {
+                    if let Err(validation_error) =
+                        self.validate_config_change_safety(&new_config, entry.index)
+                    {
                         error!(
                             "Configuration change validation failed for entry {}: {}. Config: {:?}",
                             entry.index, validation_error, new_config
@@ -3320,11 +3399,14 @@ impl RaftState {
                     if self.config.log_index() > new_config.log_index() {
                         warn!(
                             "Node {} received outdated cluster config (current: {}, received: {}), ignoring to prevent rollback: {:?}",
-                            self.id, self.config.log_index(), new_config.log_index(), new_config
+                            self.id,
+                            self.config.log_index(),
+                            new_config.log_index(),
+                            new_config
                         );
                         // 即使忽略配置，也需要更新last_applied以保持日志应用的连续性
                         self.last_applied = entry.index;
-                        
+
                         // 对于Leader，记录潜在的配置冲突警告
                         if self.role == Role::Leader {
                             error!(
@@ -3338,52 +3420,94 @@ impl RaftState {
                             "Node {} applying new cluster config: {:?}",
                             self.id, new_config
                         );
-                        
+
                         // 在应用新配置前，检查是否有节点被移除
                         let old_config = &self.config;
-                        
+
                         // 检查 learner 删除
-                        let old_learners = old_config.learners.as_ref().cloned().unwrap_or_default();
-                        let new_learners = new_config.learners.as_ref().cloned().unwrap_or_default();
-                        let removed_learners: Vec<RaftId> = old_learners.difference(&new_learners).cloned().collect();
-                        
+                        let old_learners =
+                            old_config.learners.as_ref().cloned().unwrap_or_default();
+                        let new_learners =
+                            new_config.learners.as_ref().cloned().unwrap_or_default();
+                        let removed_learners: Vec<RaftId> =
+                            old_learners.difference(&new_learners).cloned().collect();
+
                         // 检查 voter 删除
-                        let old_voters = old_config.get_effective_voters().iter().cloned().collect::<HashSet<_>>();
-                        let new_voters = new_config.get_effective_voters().iter().cloned().collect::<HashSet<_>>();
-                        let removed_voters: Vec<RaftId> = old_voters.difference(&new_voters).cloned().collect();
-                        
+                        let old_voters = old_config
+                            .get_effective_voters()
+                            .iter()
+                            .cloned()
+                            .collect::<HashSet<_>>();
+                        let new_voters = new_config
+                            .get_effective_voters()
+                            .iter()
+                            .cloned()
+                            .collect::<HashSet<_>>();
+                        let removed_voters: Vec<RaftId> =
+                            old_voters.difference(&new_voters).cloned().collect();
+
                         // 检查当前节点是否被删除（voter 或 learner）
-                        let current_node_removed = removed_voters.contains(&self.id) || removed_learners.contains(&self.id);
-                        
+                        let current_node_removed = removed_voters.contains(&self.id)
+                            || removed_learners.contains(&self.id);
+
                         // 应用新配置
                         self.config = new_config;
-                        
+
                         // 清理被移除的 learner 的复制状态（仅 Leader）
                         if self.role == Role::Leader {
                             for removed_learner in &removed_learners {
                                 self.cleanup_learner_replication_state(removed_learner);
-                                info!("Cleaned up replication state for removed learner: {}", removed_learner);
+                                info!(
+                                    "Cleaned up replication state for removed learner: {}",
+                                    removed_learner
+                                );
                             }
-                            
+
                             // 清理被移除的 voter 的复制状态
                             for removed_voter in &removed_voters {
                                 self.next_index.remove(removed_voter);
                                 self.match_index.remove(removed_voter);
-                                info!("Cleaned up replication state for removed voter: {}", removed_voter);
+                                info!(
+                                    "Cleaned up replication state for removed voter: {}",
+                                    removed_voter
+                                );
                             }
                         }
-                        
+
                         // 如果当前节点被删除，准备优雅退出
                         if current_node_removed {
-                            warn!("Current node {} has been removed from cluster, initiating graceful shutdown", self.id);
-                            
+                            warn!(
+                                "Current node {} has been removed from cluster, initiating graceful shutdown",
+                                self.id
+                            );
+
+                            // 清理定时器
+                            if let Some(timer_id) = self.election_timer.take() {
+                                self.callbacks.del_timer(self.id.clone(), timer_id);
+                            }
+                            if let Some(timer_id) = self.heartbeat_interval_timer_id.take() {
+                                self.callbacks.del_timer(self.id.clone(), timer_id);
+                            }
+                            if let Some(timer_id) = self.apply_interval_timer.take() {
+                                self.callbacks.del_timer(self.id.clone(), timer_id);
+                            }
+                            if let Some(timer_id) = self.config_change_timer.take() {
+                                self.callbacks.del_timer(self.id.clone(), timer_id);
+                            }
+                            if let Some(timer_id) = self.leader_transfer_timer.take() {
+                                self.callbacks.del_timer(self.id.clone(), timer_id);
+                            }
+
                             // 通知业务层节点已被删除
-                            let _ = self.error_handler.handle_void(
-                                self.callbacks.node_removed(self.id.clone()).await,
-                                "node_removed",
-                                None,
-                            ).await;
-                            
+                            let _ = self
+                                .error_handler
+                                .handle_void(
+                                    self.callbacks.node_removed(self.id.clone()).await,
+                                    "node_removed",
+                                    None,
+                                )
+                                .await;
+
                             // 注意：这里不直接停止Raft状态机，由业务层决定如何处理
                             // 业务层可能需要完成一些清理工作后再停止节点
                         }
@@ -3931,14 +4055,21 @@ impl RaftState {
 
     // === Learner 管理方法 ===
     async fn handle_add_learner(&mut self, learner: RaftId, request_id: RequestId) {
-        self.handle_learner_operation(learner, request_id, true).await;
+        self.handle_learner_operation(learner, request_id, true)
+            .await;
     }
 
     async fn handle_remove_learner(&mut self, learner: RaftId, request_id: RequestId) {
-        self.handle_learner_operation(learner, request_id, false).await;
+        self.handle_learner_operation(learner, request_id, false)
+            .await;
     }
 
-    async fn handle_learner_operation(&mut self, learner: RaftId, request_id: RequestId, is_add: bool) {
+    async fn handle_learner_operation(
+        &mut self,
+        learner: RaftId,
+        request_id: RequestId,
+        is_add: bool,
+    ) {
         // 1. 检查是否为 Leader
         if !self.validate_leader_for_config_change(request_id).await {
             return;
@@ -3958,14 +4089,21 @@ impl RaftState {
         if let Err(e) = operation_result {
             self.send_client_error(
                 request_id,
-                ClientError::BadRequest(anyhow::anyhow!("{} learner failed: {}", 
-                    if is_add { "Add" } else { "Remove" }, e)),
-            ).await;
+                ClientError::BadRequest(anyhow::anyhow!(
+                    "{} learner failed: {}",
+                    if is_add { "Add" } else { "Remove" },
+                    e
+                )),
+            )
+            .await;
             return;
         }
 
         // 3. 创建并追加配置变更日志（使用验证过的配置）
-        if !self.create_and_append_config_log(&temp_config, index, request_id).await {
+        if !self
+            .create_and_append_config_log(&temp_config, index, request_id)
+            .await
+        {
             return;
         }
 
@@ -3985,17 +4123,18 @@ impl RaftState {
         // 6. 广播日志
         self.broadcast_append_entries().await;
 
-        info!("Initiated {} learner {} (will take effect after commit)", 
-            if is_add { "add" } else { "remove" }, learner);
+        info!(
+            "Initiated {} learner {} (will take effect after commit)",
+            if is_add { "add" } else { "remove" },
+            learner
+        );
     }
 
     // === 辅助方法 ===
     async fn validate_leader_for_config_change(&mut self, request_id: RequestId) -> bool {
         if self.role != Role::Leader {
-            self.send_client_error(
-                request_id,
-                ClientError::NotLeader(self.leader_id.clone()),
-            ).await;
+            self.send_client_error(request_id, ClientError::NotLeader(self.leader_id.clone()))
+                .await;
             return false;
         }
 
@@ -4003,7 +4142,8 @@ impl RaftState {
             self.send_client_error(
                 request_id,
                 ClientError::Conflict(anyhow::anyhow!("Configuration change in progress")),
-            ).await;
+            )
+            .await;
             return false;
         }
 
@@ -4023,10 +4163,10 @@ impl RaftState {
     }
 
     async fn create_and_append_config_log(
-        &mut self, 
-        config: &ClusterConfig, 
-        index: u64, 
-        request_id: RequestId
+        &mut self,
+        config: &ClusterConfig,
+        index: u64,
+        request_id: RequestId,
     ) -> bool {
         // 序列化配置
         let config_data = match serde_json::to_vec(config) {
@@ -4035,7 +4175,8 @@ impl RaftState {
                 self.send_client_error(
                     request_id,
                     ClientError::Internal(anyhow::anyhow!("Failed to serialize config: {}", e)),
-                ).await;
+                )
+                .await;
                 return false;
             }
         };
@@ -4050,7 +4191,8 @@ impl RaftState {
         };
 
         // 追加日志
-        if !self.error_handler
+        if !self
+            .error_handler
             .handle_void(
                 self.callbacks
                     .append_log_entries(self.id.clone(), &[entry])
@@ -4063,7 +4205,8 @@ impl RaftState {
             self.send_client_error(
                 request_id,
                 ClientError::Internal(anyhow::anyhow!("Failed to append log")),
-            ).await;
+            )
+            .await;
             return false;
         }
 
@@ -4083,7 +4226,11 @@ impl RaftState {
     }
 
     /// 验证配置变更的安全性，防止配置回滚
-    fn validate_config_change_safety(&self, new_config: &ClusterConfig, entry_index: u64) -> Result<(), String> {
+    fn validate_config_change_safety(
+        &self,
+        new_config: &ClusterConfig,
+        entry_index: u64,
+    ) -> Result<(), String> {
         // 1. 基本有效性检查
         if !new_config.is_valid() {
             return Err("Invalid cluster configuration".to_string());
@@ -4135,9 +4282,10 @@ impl RaftState {
 
     /// 计算配置变更中被删除的voter数量
     fn calculate_voter_removal_count(&self, new_config: &ClusterConfig) -> Option<usize> {
-        let current_voters: HashSet<_> = self.config.get_effective_voters().iter().cloned().collect();
+        let current_voters: HashSet<_> =
+            self.config.get_effective_voters().iter().cloned().collect();
         let new_voters: HashSet<_> = new_config.get_effective_voters().iter().cloned().collect();
-        
+
         let removed_count = current_voters.difference(&new_voters).count();
         if removed_count > 0 {
             Some(removed_count)
@@ -4149,7 +4297,8 @@ impl RaftState {
     // === 辅助方法 ===
     fn get_effective_peers(&self) -> Vec<RaftId> {
         // 包含所有 voters 和 learners (排除自己)
-        self.config.get_all_nodes()
+        self.config
+            .get_all_nodes()
             .into_iter()
             .filter(|id| *id != self.id)
             .collect()
@@ -4361,7 +4510,7 @@ impl RaftState {
         }
         if snap_term != snapshot_term {
             warn!(
-                "Snapshot term mismatch: expected {}, got {}, using expected value", 
+                "Snapshot term mismatch: expected {}, got {}, using expected value",
                 snapshot_term, snap_term
             );
         }
@@ -4391,7 +4540,9 @@ impl RaftState {
         // 允许快照包含比当前配置更新的信息，这在某些场景下是正常的
         info!(
             "Snapshot validation passed: index={}, term={}, config_valid={}",
-            snap.index, snap.term, snap.config.is_valid()
+            snap.index,
+            snap.term,
+            snap.config.is_valid()
         );
 
         // 8. 截断日志前缀（基于实际快照的索引）
@@ -4854,10 +5005,7 @@ mod tests {
         // 初始化集群配置
         let mut all_nodes = vec![node_id.clone()];
         all_nodes.extend(peers.clone());
-        let cluster_config = ClusterConfig::simple(
-            all_nodes.into_iter().collect(),
-            0,
-        );
+        let cluster_config = ClusterConfig::simple(all_nodes.into_iter().collect(), 0);
         storage
             .save_cluster_config(node_id.clone(), cluster_config)
             .await
@@ -4872,16 +5020,24 @@ mod tests {
     }
 
     #[allow(dead_code)]
-    async fn create_simple_test_raft() -> Result<(RaftState, Arc<MockStorage>, Arc<TestCallbacks>, RaftId, RaftId, RaftId), String> {
+    async fn create_simple_test_raft() -> Result<
+        (
+            RaftState,
+            Arc<MockStorage>,
+            Arc<TestCallbacks>,
+            RaftId,
+            RaftId,
+            RaftId,
+        ),
+        String,
+    > {
         let node_id = create_test_raft_id("test_group", "node1");
         let peer1 = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
-        
-        let (raft_state, storage, callbacks) = create_test_raft_setup(
-            node_id.clone(),
-            vec![peer1.clone(), peer2.clone()],
-        ).await?;
-        
+
+        let (raft_state, storage, callbacks) =
+            create_test_raft_setup(node_id.clone(), vec![peer1.clone(), peer2.clone()]).await?;
+
         Ok((raft_state, storage, callbacks, node_id, peer1, peer2))
     }
 
@@ -4904,7 +5060,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_raft_state_initialization() {
-        let (raft_state, _storage, _callbacks, node_id, _peer1, _peer2) = 
+        let (raft_state, _storage, _callbacks, node_id, _peer1, _peer2) =
             create_simple_test_raft().await.unwrap();
 
         assert_eq!(raft_state.get_role(), Role::Follower);
@@ -4913,7 +5069,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_election_timeout_triggers_candidate() {
-        let (mut raft_state, _storage, callbacks, node_id, _peer1, _peer2) = 
+        let (mut raft_state, _storage, callbacks, node_id, _peer1, _peer2) =
             create_simple_test_raft().await.unwrap();
 
         // 触发选举超时
@@ -4934,10 +5090,10 @@ mod tests {
         let candidate_id = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
 
-        let (mut raft_state, storage, _callbacks) = create_test_raft_setup(
-            node_id.clone(),
-            vec![candidate_id.clone(), peer2],
-        ).await.unwrap();
+        let (mut raft_state, storage, _callbacks) =
+            create_test_raft_setup(node_id.clone(), vec![candidate_id.clone(), peer2])
+                .await
+                .unwrap();
 
         // 创建投票请求
         let vote_request = RequestVoteRequest {
@@ -4970,10 +5126,10 @@ mod tests {
         let leader_id = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
 
-        let (mut raft_state, storage, callbacks) = create_test_raft_setup(
-            node_id.clone(),
-            vec![leader_id.clone(), peer2],
-        ).await.unwrap();
+        let (mut raft_state, storage, callbacks) =
+            create_test_raft_setup(node_id.clone(), vec![leader_id.clone(), peer2])
+                .await
+                .unwrap();
 
         // 创建日志条目
         let log_entry = LogEntry {
@@ -5021,7 +5177,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_leader_election_success() {
-        let (mut raft_state, _storage, callbacks, node1, node2, node3) = 
+        let (mut raft_state, _storage, callbacks, node1, node2, node3) =
             create_simple_test_raft().await.unwrap();
 
         // 触发选举
@@ -5185,10 +5341,10 @@ mod tests {
         let leader_id = create_test_raft_id("test_group", "node2");
         let peer2 = create_test_raft_id("test_group", "node3");
 
-        let (mut raft_state, _storage, _callbacks) = create_test_raft_setup(
-            node_id.clone(),
-            vec![leader_id.clone(), peer2],
-        ).await.unwrap();
+        let (mut raft_state, _storage, _callbacks) =
+            create_test_raft_setup(node_id.clone(), vec![leader_id.clone(), peer2])
+                .await
+                .unwrap();
 
         // 创建快照安装请求
         let snapshot_request = InstallSnapshotRequest {
@@ -5218,6 +5374,7 @@ mod tests {
                 None,
                 snapshot_request.last_included_index,
                 snapshot_request.last_included_term,
+                Some(snapshot_request.config.clone()),
             )
             .await;
 
@@ -5981,7 +6138,7 @@ mod tests {
             last_included_index: 10,
             last_included_term: 1,
             data: snapshot_data,
-            config: snap_config, // 使用测试配置
+            config: snap_config,          // 使用测试配置
             request_id: RequestId::new(), // 使用特定 ID 以便验证
             is_probe: false,
         };
@@ -6010,6 +6167,7 @@ mod tests {
                 None, // snapshot_data (如果需要)
                 new_last_applied_index,
                 new_last_applied_term,
+                Some(snapshot_request.config.clone()),
             )
             .await;
 
@@ -6066,7 +6224,7 @@ mod tests {
             leader_id: leader_id.clone(),
             last_included_index: 5,
             last_included_term: 1,
-            data: vec![], // 探测请求通常数据为空
+            data: vec![],                   // 探测请求通常数据为空
             config: ClusterConfig::empty(), // 测试用空配置
             request_id: RequestId::new(),
             is_probe: true, // 标记为探测
@@ -6619,7 +6777,7 @@ mod tests {
             last_included_index: 5,
             last_included_term: 1,
             data: vec![],
-            config: ClusterConfig::empty(), // 测试用空配置
+            config: ClusterConfig::empty(),    // 测试用空配置
             request_id: installing_request_id, // 使用相同的请求ID进行探测
             is_probe: true,
         };
@@ -6686,7 +6844,7 @@ mod tests {
             last_included_term: 1,
             data: vec![],
             config: ClusterConfig::empty(), // 测试用空配置
-            request_id: RequestId::new(), // 使用不同的request_id
+            request_id: RequestId::new(),   // 使用不同的request_id
             is_probe: true,
         };
 
@@ -7729,6 +7887,7 @@ mod tests {
                 Some(String::from_utf8_lossy(&snapshot_data).to_string()),
                 last_included_index,
                 last_included_term,
+                Some(ClusterConfig::empty()),
             )
             .await;
 
@@ -8057,7 +8216,7 @@ mod tests {
 
         // 在日志提交前，配置还没有更新
         assert!(raft_state.config.get_learners().is_none());
-        
+
         // 但是复制状态已经初始化（可以开始同步日志）
         assert!(raft_state.next_index.contains_key(&learner_id));
         assert!(raft_state.match_index.contains_key(&learner_id));
@@ -8065,10 +8224,10 @@ mod tests {
         // 模拟日志提交：将 commit_index 设置为 learner 配置变更的日志索引
         let config_log_index = raft_state.get_last_log_index();
         raft_state.commit_index = config_log_index;
-        
+
         // 应用已提交的日志
         raft_state.apply_committed_logs().await;
-        
+
         // 现在配置应该更新了
         assert!(raft_state.config.get_learners().is_some());
         assert!(raft_state.config.learners_contains(&learner_id));
@@ -8090,10 +8249,10 @@ mod tests {
         // 模拟日志提交：将 commit_index 设置为移除 learner 配置变更的日志索引
         let remove_config_log_index = raft_state.get_last_log_index();
         raft_state.commit_index = remove_config_log_index;
-        
+
         // 应用已提交的日志
         raft_state.apply_committed_logs().await;
-        
+
         // 现在 learner 应该被移除，复制状态也被清理
         assert!(!raft_state.config.learners_contains(&learner_id));
         assert!(!raft_state.next_index.contains_key(&learner_id));
@@ -8235,14 +8394,14 @@ mod tests {
         // 创建node2的Raft状态，应用相同的配置变更
         let (network2, _rx2) = hub.register_node(node2.clone()).await;
         let callbacks2 = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network2)));
-        
+
         let options2 = create_test_options(node2.clone(), vec![node1.clone(), node3.clone()]);
         let mut raft_state2 = RaftState::new(options2, callbacks2.clone()).await.unwrap();
-        
+
         // 设置node2为Follower状态
         raft_state2.role = Role::Follower;
         raft_state2.current_term = 1;
-        
+
         // 同步相同的日志状态
         raft_state2.last_log_index = config_entry.index;
         raft_state2.last_log_term = config_entry.term;
@@ -8278,9 +8437,15 @@ mod tests {
 
         // 初始化5节点集群
         let cluster_config = ClusterConfig::simple(
-            vec![node1.clone(), node2.clone(), node3.clone(), node4.clone(), node5.clone()]
-                .into_iter()
-                .collect(),
+            vec![
+                node1.clone(),
+                node2.clone(),
+                node3.clone(),
+                node4.clone(),
+                node5.clone(),
+            ]
+            .into_iter()
+            .collect(),
             0,
         );
         storage
@@ -8289,8 +8454,8 @@ mod tests {
             .unwrap();
 
         let options = create_test_options(
-            node1.clone(), 
-            vec![node2.clone(), node3.clone(), node4.clone(), node5.clone()]
+            node1.clone(),
+            vec![node2.clone(), node3.clone(), node4.clone(), node5.clone()],
         );
         let mut raft_state = RaftState::new(options, callbacks.clone()).await.unwrap();
 
@@ -8315,7 +8480,8 @@ mod tests {
 
         // 配置变更：删除node3和node5，保留node1、node2、node4
         let new_voters = vec![node1.clone(), node2.clone(), node4.clone()]
-            .into_iter().collect();
+            .into_iter()
+            .collect();
         let new_config = ClusterConfig::simple(new_voters, raft_state.get_last_log_index() + 1);
 
         let config_data = serde_json::to_vec(&new_config).unwrap();
@@ -8419,10 +8585,8 @@ mod tests {
             .unwrap();
 
         // 创建一个更新的配置 (版本 3)
-        let updated_config = ClusterConfig::simple(
-            vec![node1.clone(), node2.clone()].into_iter().collect(),
-            3,
-        );
+        let updated_config =
+            ClusterConfig::simple(vec![node1.clone(), node2.clone()].into_iter().collect(), 3);
 
         // 应用更新的配置
         let updated_config_data = serde_json::to_vec(&updated_config).unwrap();
@@ -8443,10 +8607,10 @@ mod tests {
         raft_state.last_log_term = 1;
         raft_state.commit_index = 3;
         raft_state.last_applied = 0; // 确保从正确的位置开始应用
-        
+
         // 应用更新的配置
         raft_state.apply_committed_logs().await;
-        
+
         // 验证配置已更新
         assert_eq!(raft_state.config.log_index(), 3);
         assert_eq!(raft_state.config.get_effective_voters().len(), 2);
@@ -8499,10 +8663,7 @@ mod tests {
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
 
         // 初始化5节点集群
-        let initial_config = ClusterConfig::simple(
-            nodes.iter().cloned().collect(),
-            0,
-        );
+        let initial_config = ClusterConfig::simple(nodes.iter().cloned().collect(), 0);
         storage
             .save_cluster_config(nodes[0].clone(), initial_config)
             .await
@@ -8520,25 +8681,23 @@ mod tests {
         raft_state.last_log_term = 1;
 
         // 创建一个危险的配置变更：从5个节点删除到只剩1个节点
-        let dangerous_config = ClusterConfig::simple(
-            vec![nodes[0].clone()].into_iter().collect(),
-            1,
-        );
+        let dangerous_config =
+            ClusterConfig::simple(vec![nodes[0].clone()].into_iter().collect(), 1);
 
         // 测试配置验证
         let validation_result = raft_state.validate_config_change_safety(&dangerous_config, 1);
-        
+
         // 应该检测到危险的配置变更
         assert!(validation_result.is_err());
         let error_msg = validation_result.unwrap_err();
-        assert!(error_msg.contains("Dangerous configuration change"), 
-                "Expected 'Dangerous configuration change' in error message, got: {}", error_msg);
+        assert!(
+            error_msg.contains("Dangerous configuration change"),
+            "Expected 'Dangerous configuration change' in error message, got: {}",
+            error_msg
+        );
 
         // 创建一个相对安全的配置变更：从5个节点删除到3个节点
-        let safe_config = ClusterConfig::simple(
-            nodes[0..3].iter().cloned().collect(),
-            1,
-        );
+        let safe_config = ClusterConfig::simple(nodes[0..3].iter().cloned().collect(), 1);
 
         // 这个配置应该通过验证
         let validation_result = raft_state.validate_config_change_safety(&safe_config, 1);
@@ -8557,10 +8716,8 @@ mod tests {
         let (network, _rx) = hub.register_node(node1.clone()).await;
         let callbacks = Arc::new(TestCallbacks::new(storage.clone(), Arc::new(network)));
 
-        let initial_config = ClusterConfig::simple(
-            vec![node1.clone(), node2.clone()].into_iter().collect(),
-            0,
-        );
+        let initial_config =
+            ClusterConfig::simple(vec![node1.clone(), node2.clone()].into_iter().collect(), 0);
         storage
             .save_cluster_config(node1.clone(), initial_config)
             .await
@@ -8577,9 +8734,13 @@ mod tests {
 
         // 测试在日志条目index为3时的验证
         let validation_result = raft_state.validate_config_change_safety(&mismatched_config, 3);
-        
+
         // 应该检测到log_index不匹配
         assert!(validation_result.is_err());
-        assert!(validation_result.unwrap_err().contains("log_index mismatch"));
+        assert!(
+            validation_result
+                .unwrap_err()
+                .contains("log_index mismatch")
+        );
     }
 }

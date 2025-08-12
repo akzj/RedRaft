@@ -132,7 +132,18 @@ async fn test_basic_raft_kv_cluster() {
         "Sending second SET command for key2=value2, request_id: {:?}",
         request_id2
     );
-    cluster.propose_command(&leader_node.id, set_cmd2_data.clone()).unwrap();
+    
+    // 重新检查当前的 leader，确保发送到正确的节点
+    let current_leader = wait_for_leader(&cluster, &[&node1, &node2, &node3])
+        .await
+        .expect("Should have a stable leader");
+    println!(
+        "Current leader for second command: {:?} with role: {:?}",
+        current_leader.id,
+        current_leader.get_role()
+    );
+    
+    cluster.propose_command(&current_leader.id, set_cmd2_data.clone()).unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
@@ -150,6 +161,13 @@ async fn test_basic_raft_kv_cluster() {
     // 10. pipeline 测试
     // 发送多个命令，验证 pipeline 行为
 
+    // 重新检测当前leader，以防leader在之前的测试中发生了变化
+    sleep(tokio::time::Duration::from_millis(50)).await; // 给leader选举一点时间稳定
+    let current_leader_for_pipeline = wait_for_leader(&cluster, &[&node1, &node2, &node3])
+        .await
+        .expect("Should have a leader for pipeline");
+    println!("Current leader for pipeline: {:?}", current_leader_for_pipeline.id);
+
     let mut pipeline_commands = vec![];
 
     for i in 3..1000 {
@@ -162,7 +180,7 @@ async fn test_basic_raft_kv_cluster() {
 
     for cmd in pipeline_commands {
         sleep(tokio::time::Duration::from_micros(100)).await; // 每个命令间隔 1ms
-        cluster.propose_command(&leader_node.id, cmd.clone().encode()).unwrap();
+        cluster.propose_command(&current_leader_for_pipeline.id, cmd.clone().encode()).unwrap();
         //println!("Sent pipeline command for {:?}", cmd);
     }
 

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{Notify, mpsc};
-use tracing::info;
+use tracing::{info, warn};
 
 // Raft组状态枚举（原子操作安全）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,6 +12,7 @@ pub enum RaftNodeStatus {
     Idle,    // 空闲状态（无未处理消息，未被Worker处理）
     Pending, // 待处理状态（有未处理消息，已加入active_map）
     Active,  // 活跃状态（正在被Worker处理）
+    Stop,    // 停止状态
 }
 
 // Raft事件类型（示例）
@@ -32,6 +33,7 @@ impl AtomicRaftNodeStatus {
             0 => RaftNodeStatus::Idle,
             1 => RaftNodeStatus::Pending,
             2 => RaftNodeStatus::Active,
+            3 => RaftNodeStatus::Stop,
             _ => panic!("Invalid RaftGroupStatus value"),
         }
     }
@@ -55,12 +57,14 @@ impl AtomicRaftNodeStatus {
                 0 => RaftNodeStatus::Idle,
                 1 => RaftNodeStatus::Pending,
                 2 => RaftNodeStatus::Active,
+                3 => RaftNodeStatus::Stop,
                 _ => panic!("Invalid RaftGroupStatus value"),
             }),
             Err(val) => Err(match val {
                 0 => RaftNodeStatus::Idle,
                 1 => RaftNodeStatus::Pending,
                 2 => RaftNodeStatus::Active,
+                3 => RaftNodeStatus::Stop,
                 _ => panic!("Invalid RaftGroupStatus value"),
             }),
         }
@@ -183,6 +187,11 @@ impl Timers {
         timer_heap.retain(|timer_event| timer_event.timer_id != timer_id);
     }
 
+    pub fn del_all_timers_for_node(&self, node_id: &RaftId) {
+        let mut timer_heap = self.timer_heap.lock().unwrap();
+        timer_heap.retain(|timer_event| &timer_event.node_id != node_id);
+    }
+
     fn process_expired_timers(&self) -> (Vec<TimerEvent>, Option<Duration>) {
         let now = Instant::now();
         let mut events = Vec::new();
@@ -242,6 +251,8 @@ impl MultiRaftDriver {
         let mut groups = self.groups.lock().unwrap();
         if let Some(_core) = groups.remove(group_id) {
             info!("Removed Raft group: {}", group_id);
+            // 清理该节点的所有定时器
+            self.timer_service.del_all_timers_for_node(group_id);
         }
     }
 
@@ -249,14 +260,27 @@ impl MultiRaftDriver {
         let (events, duration) = self.timer_service.process_expired_timers();
         for event in events {
             let result = self.send_event(event.node_id.clone(), event.event.clone());
-            if !matches!(result, SendEventResult::Success) {
-                log::error!(
-                    "send timer event failed {:?}, node_id: {}, event: {:?}, delay: {:?}",
-                    result,
-                    event.node_id,
-                    event.event,
-                    event.delay
-                );
+            match result {
+                SendEventResult::Success => {
+                    // 正常情况，不记录日志
+                }
+                SendEventResult::NotFound => {
+                    // 节点已被移除，这是正常情况，使用debug级别记录
+                    log::debug!(
+                        "Timer event for removed node ignored: node_id: {}, event: {:?}",
+                        event.node_id,
+                        event.event
+                    );
+                }
+                SendEventResult::SendFailed => {
+                    // 发送失败，这可能是一个问题
+                    log::warn!(
+                        "Failed to send timer event: node_id: {}, event: {:?}, delay: {:?}",
+                        event.node_id,
+                        event.event,
+                        event.delay
+                    );
+                }
             }
         }
         duration
@@ -299,6 +323,10 @@ impl MultiRaftDriver {
             }
             RaftNodeStatus::Pending | RaftNodeStatus::Active => {
                 //info!("target is active")
+            }
+            RaftNodeStatus::Stop => {
+                warn!("Target node {} is in Stop status, event not sent", target);
+                return SendEventResult::NotFound;
             }
         }
         SendEventResult::Success
@@ -393,9 +421,12 @@ impl MultiRaftDriver {
         loop {
             match rx.try_recv() {
                 Ok(event) => {
-                    //        info!("Processing event for node {}: {:?}", node_id, event);
+                    // check raftState is stop
+                    if core.status.load(Ordering::Acquire) == RaftNodeStatus::Stop {
+                        warn!("Node {} is stopped, ignoring event: {:?}", node_id, event);
+                        return;
+                    }
                     handle_event.handle_event(event).await;
-                    //      info!("Completed processing event for node {}", node_id);
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                     // info!(
