@@ -1,8 +1,8 @@
 use raft_lite::{RaftId, RequestId};
 use serde::{Deserialize, Serialize};
-use tracing::info;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use tracing::{debug, info};
 
 // --- 业务命令定义 ---
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -59,7 +59,7 @@ impl SimpleKvStore {
 // --- 实现 RaftCallbacks ---
 // TestStateMachine 将包含 KvStore 和与 Raft 交互所需的其他组件
 pub struct TestStateMachine {
-    id : RaftId,
+    id: RaftId,
     pub store: Arc<RwLock<SimpleKvStore>>,
     // 跟踪已应用的日志索引和任期
     last_applied_index: Arc<RwLock<u64>>,
@@ -84,7 +84,7 @@ impl TestStateMachine {
         term: u64,
         cmd: raft_lite::Command,
     ) -> raft_lite::ApplyResult<()> {
-        info!(
+        debug!(
             "node {:?} TestStateMachine apply_command called: index={}, term={}, cmd_len={}",
             self.id,
             index,
@@ -97,11 +97,11 @@ impl TestStateMachine {
             raft_lite::ApplyError::internal_err(format!("Failed to decode command: {}", e))
         })?;
 
-        info!("node {:?} Applying command: {:?}", self.id, kv_cmd);
+        debug!("node {:?} Applying command: {:?}", self.id, kv_cmd);
 
         match kv_cmd {
             KvCommand::Set { key, value } => {
-                info!("node {:?} Setting key={}, value={}",self.id, key, value);
+                debug!("node {:?} Setting key={}, value={}", self.id, key, value);
                 self.store.write().unwrap().set(key.clone(), value.clone());
                 //     println!("Current store state: {:?}", self.store.read().unwrap().data);
             }
@@ -121,22 +121,22 @@ impl TestStateMachine {
     }
 
     // create snapshot
-    pub fn create_snapshot(
-        &self,
-        _from: RaftId,
-    ) -> raft_lite::SnapshotResult<(u64, u64, Vec<u8>)> {
+    pub fn create_snapshot(&self, _from: RaftId) -> raft_lite::SnapshotResult<(u64, u64, Vec<u8>)> {
         // 使用已应用的索引和任期创建快照
         let applied_index = *self.last_applied_index.read().unwrap();
         let applied_term = *self.last_applied_term.read().unwrap();
-        
+
         let data = serde_json::to_vec(&self.store.read().unwrap().clone())
             .map_err(|e| raft_lite::SnapshotError::DataCorrupted(e.into()))?;
-        
-        info!(
+
+        debug!(
             "node {:?} created snapshot at index={}, term={}, data_len={}",
-            _from, applied_index, applied_term, data.len()
+            _from,
+            applied_index,
+            applied_term,
+            data.len()
         );
-        
+
         Ok((applied_index, applied_term, data))
     }
 
@@ -160,7 +160,7 @@ impl TestStateMachine {
         self.store.read().unwrap().get_all_data()
     }
 
-    // Get a specific key value for verification  
+    // Get a specific key value for verification
     pub fn get_value(&self, key: &str) -> Option<String> {
         self.store.read().unwrap().get(key)
     }

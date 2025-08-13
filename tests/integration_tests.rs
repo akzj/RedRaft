@@ -184,7 +184,7 @@ async fn test_basic_raft_kv_cluster() {
         //println!("Sent pipeline command for {:?}", cmd);
     }
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // 验证管道中的命令 - 在所有节点上检查所有keys
     println!("Verifying pipeline commands on all nodes...");
