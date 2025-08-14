@@ -430,7 +430,7 @@ impl Storage for TestNodeInner {
         let (snapshot_index, snapshot_term, snapshot_data) = match self.state_machine.create_snapshot(from.clone()) {
             Ok(data) => data,
             Err(e) => {
-                return Err(raft_lite::StorageError::SnapshotCreationFailed(format!("State machine snapshot creation failed: {:?}", e)));
+                return Err(raft_lite::error::StorageError::SnapshotCreationFailed(format!("State machine snapshot creation failed: {:?}", e)));
             }
         };
         
@@ -510,7 +510,7 @@ impl RaftCallbacks for TestNodeInner {
         &self,
         _from: RaftId,
         _role: raft_lite::Role,
-    ) -> Result<(), raft_lite::StateChangeError> {
+    ) -> Result<(), raft_lite::error::StateChangeError> {
         Ok(())
     }
 
@@ -539,7 +539,7 @@ impl RaftCallbacks for TestNodeInner {
             .install_snapshot(from, index, term, data, request_id)
     }
 
-    async fn node_removed(&self, node_id: RaftId) -> Result<(), raft_lite::StateChangeError> {
+    async fn node_removed(&self, node_id: RaftId) -> Result<(), raft_lite::error::StateChangeError> {
         warn!("Node removed: {}", node_id);
         self.remove_node.notify_one();
         Ok(())

@@ -94,7 +94,7 @@ impl TestStateMachine {
 
         // Decode and execute KV command
         let kv_cmd = KvCommand::decode(&cmd).map_err(|e| {
-            raft_lite::ApplyError::internal_err(format!("Failed to decode command: {}", e))
+            raft_lite::error::ApplyError::internal_err(format!("Failed to decode command: {}", e))
         })?;
 
         debug!("node {:?} Applying command: {:?}", self.id, kv_cmd);
@@ -127,7 +127,7 @@ impl TestStateMachine {
         let applied_term = *self.last_applied_term.read().unwrap();
 
         let data = serde_json::to_vec(&self.store.read().unwrap().clone())
-            .map_err(|e| raft_lite::SnapshotError::DataCorrupted(e.into()))?;
+            .map_err(|e| raft_lite::error::SnapshotError::DataCorrupted(e.into()))?;
 
         debug!(
             "node {:?} created snapshot at index={}, term={}, data_len={}",
@@ -150,7 +150,7 @@ impl TestStateMachine {
         _request_id: RequestId,
     ) -> raft_lite::SnapshotResult<()> {
         let store: SimpleKvStore = serde_json::from_slice(&data)
-            .map_err(|e| raft_lite::SnapshotError::DataCorrupted(e.into()))?;
+            .map_err(|e| raft_lite::error::SnapshotError::DataCorrupted(e.into()))?;
         self.store.write().unwrap().data = store.data;
         Ok(())
     }
