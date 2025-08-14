@@ -2,7 +2,7 @@ use raft_lite::{RaftId, RequestId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use tracing::{debug, info};
+use tracing::debug;
 
 // --- 业务命令定义 ---
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -83,7 +83,7 @@ impl TestStateMachine {
         index: u64,
         term: u64,
         cmd: raft_lite::Command,
-    ) -> raft_lite::ApplyResult<()> {
+    ) -> raft_lite::traits::ApplyResult<()> {
         debug!(
             "node {:?} TestStateMachine apply_command called: index={}, term={}, cmd_len={}",
             self.id,
@@ -121,7 +121,10 @@ impl TestStateMachine {
     }
 
     // create snapshot
-    pub fn create_snapshot(&self, _from: RaftId) -> raft_lite::SnapshotResult<(u64, u64, Vec<u8>)> {
+    pub fn create_snapshot(
+        &self,
+        _from: RaftId,
+    ) -> raft_lite::traits::SnapshotResult<(u64, u64, Vec<u8>)> {
         // 使用已应用的索引和任期创建快照
         let applied_index = *self.last_applied_index.read().unwrap();
         let applied_term = *self.last_applied_term.read().unwrap();
@@ -148,7 +151,7 @@ impl TestStateMachine {
         _term: u64,
         data: Vec<u8>,
         _request_id: RequestId,
-    ) -> raft_lite::SnapshotResult<()> {
+    ) -> raft_lite::traits::SnapshotResult<()> {
         let store: SimpleKvStore = serde_json::from_slice(&data)
             .map_err(|e| raft_lite::error::SnapshotError::DataCorrupted(e.into()))?;
         self.store.write().unwrap().data = store.data;

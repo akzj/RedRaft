@@ -432,3 +432,21 @@ impl CallbackErrorHandler {
         self.readonly_mode
     }
 }
+
+impl RpcError {
+    pub fn network_err<S: Into<String>>(msg: S) -> Self {
+        RpcError::Network(msg.into())
+    }
+}
+
+impl StorageError {
+    pub fn consistency_err<S: Into<String>>(msg: S) -> Self {
+        StorageError::Consistency(msg.into())
+    }
+}
+
+impl ApplyError {
+    pub fn internal_err<S: Into<String>>(msg: S) -> Self {
+        ApplyError::Internal(msg.into())
+    }
+}
