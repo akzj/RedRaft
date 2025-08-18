@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{cluster_config::ClusterConfig, Command, RaftId, RequestId};
+use crate::{Command, RaftId, RequestId, cluster_config::ClusterConfig};
 
 // === 网络接口 ===
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +30,7 @@ pub struct InstallSnapshotResponse {
     pub term: u64,
     pub request_id: RequestId,
     pub state: InstallSnapshotState,
+    pub error_message: String, // 错误信息，如果有的话
 }
 
 // #[derive(Debug, Clone)]

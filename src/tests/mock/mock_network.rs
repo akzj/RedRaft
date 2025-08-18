@@ -1033,6 +1033,7 @@ mod tests {
             term: 1,
             request_id: RequestId::new(),
             state: crate::InstallSnapshotState::Success,
+            error_message: "".into(),
         };
         network
             .send_install_snapshot_response(sender, receiver, install_resp)

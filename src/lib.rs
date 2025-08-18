@@ -18,7 +18,6 @@ pub mod error;
 pub mod message;
 pub mod mutl_raft_driver;
 pub mod network;
-pub mod pb;
 pub mod pipeline;
 pub mod tests;
 pub mod traits;
@@ -32,7 +31,7 @@ pub type NodeId = String;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RaftId {
     pub group: GroupId,
-    node: NodeId,
+    pub node: NodeId,
 }
 
 impl Display for RaftId {
@@ -60,6 +59,12 @@ impl RequestId {
 impl fmt::Display for RequestId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl Into<u64> for RequestId {
+    fn into(self) -> u64 {
+        self.0
     }
 }
 
@@ -1898,6 +1903,7 @@ impl RaftState {
                 term: self.current_term,
                 request_id: request.request_id,
                 state: InstallSnapshotState::Failed("Term too low".into()),
+                error_message: "Term too low".into(),
             };
             self.error_handler
                 .handle_void(
@@ -1952,6 +1958,7 @@ impl RaftState {
                 term: self.current_term,
                 request_id: request.request_id,
                 state: current_state,
+                error_message: "".into(),
             };
             self.error_handler
                 .handle_void(
@@ -1975,6 +1982,7 @@ impl RaftState {
                 term: self.current_term,
                 request_id: request.request_id,
                 state: InstallSnapshotState::Success,
+                error_message: "".into(),
             };
             self.error_handler
                 .handle_void(
@@ -2000,6 +2008,7 @@ impl RaftState {
                 state: InstallSnapshotState::Failed(
                     "Snapshot config incompatible with current config".into(),
                 ),
+                error_message: "Snapshot config incompatible with current config".into(),
             };
             self.error_handler
                 .handle_void(
@@ -2025,6 +2034,7 @@ impl RaftState {
             term: self.current_term,
             request_id: request.request_id,
             state: InstallSnapshotState::Installing,
+            error_message: "".into(),
         };
         self.error_handler
             .handle_void(

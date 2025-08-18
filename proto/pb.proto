@@ -127,7 +127,7 @@ message BatchResponse {
 
 /// 统一 RPC 消息包装（包含所有可能的 RPC 类型）
 message RpcMessage {
-  oneof message_type {
+  oneof message {
     RequestVoteRequest request_vote = 1;
     RequestVoteResponse request_vote_response = 2;
     AppendEntriesRequest append_entries = 3;
@@ -135,7 +135,8 @@ message RpcMessage {
     InstallSnapshotRequest install_snapshot = 5;
     InstallSnapshotResponse install_snapshot_response = 6;
   }
-  RaftId to = 7; // 目标节点 ID
+  RaftId from = 7; // 来源节点 ID
+  RaftId target = 8; // 目标节点
 }
 
 // Raft 核心 RPC 服务定义

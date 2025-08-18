@@ -1,15 +1,28 @@
+use crate::network::pb::raft_service_client::RaftServiceClient;
+use crate::network::pb::raft_service_server::RaftServiceServer;
 // network.rs
 use crate::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
-    Network, RaftId, RequestVoteRequest, RequestVoteResponse, RpcError, RpcResult,
+    Network, NodeId, RaftId, RequestVoteRequest, RequestVoteResponse, RpcError, RpcResult,
 };
+use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration as StdDuration;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 use tonic::transport::{Channel, Endpoint};
+
+pub mod pb;
+
+#[async_trait]
+pub trait ResolveNodeAddress {
+    fn resolve_node_address(
+        &self,
+        node_id: &str,
+    ) -> impl std::future::Future<Output = Result<String>> + Send;
+}
 
 // 假设这是由 Protobuf 生成的 gRPC 客户端和服务 trait
 // use your_crate::raft_service_client::RaftServiceClient;
@@ -25,60 +38,77 @@ type ClientMap = Arc<RwLock<HashMap<String, GrpcClient>>>;
 #[derive(Debug)]
 enum OutgoingMessage {
     RequestVote {
-        target_node: String,
-        args: Box<RequestVoteRequest>,
+        from: RaftId,
+        target: RaftId,
+        args: RequestVoteRequest,
     },
     RequestVoteResponse {
-        target_node: String,
-        args: Box<RequestVoteResponse>,
+        from: RaftId,
+        target: RaftId,
+        args: RequestVoteResponse,
     },
     AppendEntries {
-        target_node: String,
-        args: Box<AppendEntriesRequest>,
+        from: RaftId,
+        target: RaftId,
+        args: AppendEntriesRequest,
     },
     AppendEntriesResponse {
-        target_node: String,
-        args: Box<AppendEntriesResponse>,
+        from: RaftId,
+        target: RaftId,
+        args: AppendEntriesResponse,
     },
     InstallSnapshot {
-        target_node: String,
-        args: Box<InstallSnapshotRequest>,
+        from: RaftId,
+        target: RaftId,
+        args: InstallSnapshotRequest,
     },
     InstallSnapshotResponse {
-        target_node: String,
-        args: Box<InstallSnapshotResponse>,
+        from: RaftId,
+        target: RaftId,
+        args: InstallSnapshotResponse,
     },
 }
 
-// --- Network 实现 ---
+pub struct MultiRaftNetworkOptions {
+    node_id: String,
+    grpc_server_addr: String,
+    node_map: HashMap<NodeId, String>,
+    connect_timeout: Duration,
+    batch_size: usize,
+}
+
+impl ResolveNodeAddress for MultiRaftNetworkOptions {
+    async fn resolve_node_address(&self, node_id: &str) -> Result<String> {
+        self.node_map
+            .get(node_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Node ID not found: {}", node_id))
+    }
+}
 
 pub struct MultiRaftNetwork {
-    local_node_id: String, // 当前进程的 NodeId
+    options: MultiRaftNetworkOptions,
     // sender 用于将消息从 RaftState 发送到网络层的发送任务
-    outgoing_tx: mpsc::UnboundedSender<OutgoingMessage>,
+    outgoing_tx: Arc<RwLock<HashMap<NodeId, mpsc::UnboundedSender<OutgoingMessage>>>>,
     // receiver 用于接收来自 gRPC 服务的消息并分发
     // 注意：这个 receiver 可能需要被 Network 实例持有，或者通过其他方式传递给分发逻辑
     // 这里为了简化，假设它在初始化时被取出并用于启动分发任务
     // incoming_rx: Option<mpsc::UnboundedReceiver<(RaftId, Event)>>,
     clients: ClientMap,
-    grpc_server_addr: String, // 本节点 gRPC 服务监听地址
 }
 
 impl MultiRaftNetwork {
-    pub fn new(local_node_id: String, grpc_server_addr: String) -> Self {
-        let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
+    pub fn new(config: MultiRaftNetworkOptions) -> Self {
         let clients: ClientMap = Arc::new(RwLock::new(HashMap::new()));
 
         let network = Self {
-            local_node_id,
-            outgoing_tx,
-            // incoming_rx: None, // 初始化时取出
+            options: config,
+            outgoing_tx: Arc::new(RwLock::new(HashMap::new())),
             clients: clients.clone(),
-            grpc_server_addr,
         };
 
         // 启动 gRPC 消息发送任务
-        tokio::spawn(Self::run_message_sender(outgoing_rx, clients.clone()));
+        //tokio::spawn(Self::run_message_sender(outgoing_rx, clients.clone()));
 
         // 启动 gRPC 服务端 (这通常在应用启动时调用一次)
         // tokio::spawn(Self::run_grpc_server(network.grpc_server_addr.clone(), /* 需要传入消息分发通道 */));
@@ -86,11 +116,15 @@ impl MultiRaftNetwork {
         network
     }
 
+    fn get_outgoing_tx(&self, node_id: &NodeId) -> Option<mpsc::UnboundedSender<OutgoingMessage>> {
+        self.outgoing_tx.read().unwrap().get(node_id).cloned()
+    }
+
     // 获取或创建到远程节点的 gRPC 客户端
     async fn get_or_create_client(&self, target_node_id: &str) -> Result<GrpcClient, RpcError> {
         // 1. 尝试从缓存读取
         {
-            let clients_read = self.clients.read().await;
+            let clients_read = self.clients.read().unwrap();
             if let Some(client) = clients_read.get(target_node_id) {
                 return Ok(client.clone());
             }
@@ -98,7 +132,8 @@ impl MultiRaftNetwork {
 
         // 2. 如果没有，尝试创建 (需要知道 target_node_id 对应的 gRPC 地址)
         // 这里假设有一个方法可以根据 NodeId 获取地址
-        let target_addr = Self::resolve_node_address(target_node_id)
+        let target_addr = self
+            .resolve_node_address(target_node_id)
             .await
             .map_err(|e| {
                 RpcError::Network(format!(
@@ -111,8 +146,7 @@ impl MultiRaftNetwork {
             .map_err(|e| {
                 RpcError::Network(format!("Invalid endpoint for {}: {}", target_node_id, e))
             })?
-            .connect_timeout(StdDuration::from_secs(5))
-            .timeout(StdDuration::from_secs(10));
+            .connect_timeout(self.options.connect_timeout);
 
         let channel = endpoint.connect().await.map_err(|e| {
             RpcError::Network(format!("Failed to connect to {}: {}", target_node_id, e))
@@ -120,7 +154,7 @@ impl MultiRaftNetwork {
 
         // 3. 写入缓存
         {
-            let mut clients_write = self.clients.write().await;
+            let mut clients_write = self.clients.write().unwrap();
             // 再次检查，防止竞态
             if let Some(client) = clients_write.get(target_node_id) {
                 Ok(client.clone())
@@ -131,38 +165,47 @@ impl MultiRaftNetwork {
         }
     }
 
-    // 根据 NodeId 解析 gRPC 地址 (需要你实现)
-    async fn resolve_node_address(
-        node_id: &str,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // 示例：从配置、服务发现等获取地址
-        // 这里硬编码示例
-        match node_id {
-            "node1" => Ok("http://127.0.0.1:50051".to_string()),
-            "node2" => Ok("http://127.0.0.1:50052".to_string()),
-            "node3" => Ok("http://127.0.0.1:50053".to_string()),
-            _ => Err(format!("Unknown node ID: {}", node_id).into()),
-        }
+    async fn resolve_node_address(&self, node_id: &str) -> Result<String> {
+        self.options.resolve_node_address(node_id).await
     }
 
     // 运行异步任务，批量发送消息到远程节点
     async fn run_message_sender(
+        &self,
         mut rx: mpsc::UnboundedReceiver<OutgoingMessage>,
-        clients: ClientMap,
-    ) {
-        const BATCH_SIZE: usize = 10; // 批量大小
-        const BATCH_TIMEOUT: Duration = Duration::from_millis(10); // 批量超时
+        rpc_client: GrpcClient,
+    ) -> Result<(), RpcError> {
+        let batch_size = self.options.batch_size; // 批量大小
 
-        let mut batch: Vec<OutgoingMessage> = Vec::with_capacity(BATCH_SIZE);
+        let mut batch: Vec<OutgoingMessage> = Vec::with_capacity(batch_size);
+        let mut client = RaftServiceClient::new(rpc_client.clone());
 
         loop {
             // 收集一批消息
             let collect_fut = async {
-                while batch.len() < BATCH_SIZE {
-                    match timeout(BATCH_TIMEOUT, rx.recv()).await {
-                        Ok(Some(msg)) => batch.push(msg),
-                        Ok(None) => return, // Channel closed
-                        Err(_) => break,    // Timeout, send current batch
+                match rx.recv().await {
+                    Some(msg) => batch.push(msg),
+                    None => {
+                        log::warn!("Outgoing message channel closed, stopping sender task");
+                        return;
+                    }
+                }
+
+                while batch.len() < batch_size {
+                    match rx.try_recv() {
+                        Ok(msg) => batch.push(msg),
+                        Err(err) => {
+                            // check err is closed
+                            if err == mpsc::error::TryRecvError::Empty {
+                                log::debug!("Outgoing message channel empty");
+                                break; // 没有更多消息，退出循环
+                            } else if err == mpsc::error::TryRecvError::Disconnected {
+                                log::warn!(
+                                    "Outgoing message channel disconnected, stopping sender task"
+                                );
+                                return;
+                            }
+                        }
                     }
                 }
             };
@@ -174,89 +217,64 @@ impl MultiRaftNetwork {
             }
 
             // 按目标节点分组消息
-            let mut messages_by_node: HashMap<String, Vec<OutgoingMessage>> = HashMap::new();
+            let mut batch_requests = pb::BatchRequest {
+                node_id: self.options.node_id.clone(),
+                messages: Vec::with_capacity(batch.len()),
+            };
             for msg in batch.drain(..) {
-                let target_node = match &msg {
-                    OutgoingMessage::RequestVote { target_node, .. } => target_node.clone(),
-                    OutgoingMessage::RequestVoteResponse { target_node, .. } => target_node.clone(),
-                    OutgoingMessage::AppendEntries { target_node, .. } => target_node.clone(),
-                    OutgoingMessage::AppendEntriesResponse { target_node, .. } => {
-                        target_node.clone()
-                    }
-                    OutgoingMessage::InstallSnapshot { target_node, .. } => target_node.clone(),
-                    OutgoingMessage::InstallSnapshotResponse { target_node, .. } => {
-                        target_node.clone()
-                    }
-                };
-                messages_by_node
-                    .entry(target_node)
-                    .or_insert_with(Vec::new)
-                    .push(msg);
+                batch_requests.messages.push(msg.into());
             }
 
-            // 为每个目标节点启动一个任务发送消息
-            for (target_node_id, msgs) in messages_by_node {
-                let clients_clone = clients.clone();
-                tokio::spawn(async move {
-                    // 获取客户端
-                    let client_result = {
-                        let clients_read = clients_clone.read().await;
-                        clients_read.get(&target_node_id).cloned() // 简化处理，实际可能需要重新获取
-                    };
+            //
 
-                    let mut client = match client_result {
-                        Some(c) => c, // 假设 Channel 可以被克隆
-                        None => {
-                            // 如果没有客户端，尝试获取或创建
-                            // 注意：这里简化了，实际可能需要更复杂的重试逻辑
-                            // 并且需要处理 get_or_create_client 的错误
-                            eprintln!(
-                                "No client found for {} when trying to send batch",
-                                target_node_id
-                            );
-                            return; // 或者尝试重新连接
-                        }
-                    };
+            // Send batch with retry logic
+            let mut retries = 0;
+            const MAX_RETRIES: usize = 3;
+            const RETRY_DELAY: Duration = Duration::from_millis(100);
 
-                    // 发送消息 (这里以 RequestVote 为例，需要为其他类型添加逻辑)
-                    for msg in msgs {
-                        let send_result: RpcResult<()> = match msg {
-                            OutgoingMessage::RequestVote { args, .. } => {
-                                // let grpc_req = your_crate::RaftRpcRequest {
-                                //     payload: Some(your_crate::raft_rpc_request::Payload::RequestVoteRequest(
-                                //         args.into() // 需要实现转换
-                                //     )),
-                                // };
-                                // let grpc_client = RaftServiceClient::new(client.clone());
-                                // grpc_client.handle_rpc(grpc_req).await
-                                // 模拟发送成功
-                                println!("Sending RequestVote to {}", target_node_id);
-                                Ok(())
+            loop {
+                match client.send_batch(batch_requests.clone()).await {
+                    Ok(response) => {
+                        if response.get_ref().success {
+                            log::info!("Batch sent successfully");
+                            break;
+                        } else {
+                            log::error!("Failed to send batch: {:?}", response.get_ref().error);
+                            if retries >= MAX_RETRIES {
+                                log::error!("Max retries reached, giving up");
+                                break;
                             }
-                            // ... 为其他消息类型添加发送逻辑 ...
-                            _ => {
-                                eprintln!("Sending logic for message type not implemented yet");
-                                Ok(())
-                            }
-                        };
-
-                        if let Err(e) = send_result {
-                            eprintln!("Failed to send message to {}: {:?}", target_node_id, e);
-                            // 可能需要从缓存中移除失效的客户端
-                            // let mut clients_write = clients_clone.write().await;
-                            // clients_write.remove(&target_node_id);
                         }
                     }
-                });
+                    Err(err) => {
+                        log::error!("Failed to send batch: {}", err);
+                        if retries >= MAX_RETRIES {
+                            log::error!("Max retries reached, giving up");
+                            break;
+                        }
+                    }
+                }
+
+                retries += 1;
+                log::warn!("Retrying batch send, attempt {}/{}", retries, MAX_RETRIES);
+                tokio::time::sleep(RETRY_DELAY * retries as u32).await;
             }
         }
+
+        Ok(())
     }
 
-    // 启动 gRPC 服务端 (通常在应用主函数中调用)
-    // pub async fn run_grpc_server(addr: String, dispatch_tx: mpsc::UnboundedSender<(RaftId, Event)>) -> Result<(), Box<dyn std::error::Error>> {
+    // // 启动 gRPC 服务端 (通常在应用主函数中调用)
+    // pub async fn run_grpc_server(
+    //     addr: String,
+    //     dispatch_tx: mpsc::UnboundedSender<(RaftId, Event)>,
+    // ) -> Result<(), Box<dyn std::error::Error>> {
     //     let addr = addr.parse()?;
     //     let service = RaftGrpcService::new(dispatch_tx); // 需要实现这个服务
-    //     Server::builder().add_service(RaftServiceServer::new(service)).serve(addr).await?;
+    //     Server::builder()
+    //         .add_service(RaftServiceServer::new(service))
+    //         .serve(addr)
+    //         .await?;
     //     Ok(())
     // }
 }
@@ -265,122 +283,158 @@ impl MultiRaftNetwork {
 impl Network for MultiRaftNetwork {
     async fn send_request_vote_request(
         &self,
-        _from: RaftId, // 本地 RaftId，可能用于日志
+        from: RaftId, // 本地 RaftId，可能用于日志
         target: RaftId,
         args: RequestVoteRequest,
     ) -> RpcResult<()> {
         // 注意：args 中应该已经包含了 from 和 target 信息
-        if self
-            .outgoing_tx
-            .send(OutgoingMessage::RequestVote {
-                target_node: target.node.clone(), // 使用 node 进行路由
-                args: Box::new(args),
-            })
-            .is_err()
-        {
-            Err(RpcError::Network("Network channel closed".into()))
+        if let Some(tx) = self.get_outgoing_tx(&target.node) {
+            if tx
+                .send(OutgoingMessage::RequestVote {
+                    from: from,
+                    target: target,
+                    args: args,
+                })
+                .is_err()
+            {
+                Err(RpcError::Network("Network channel closed".into()))
+            } else {
+                Ok(())
+            }
         } else {
-            Ok(())
+            Err(RpcError::Network(
+                "No outgoing channel found for target node".into(),
+            ))
         }
     }
 
     async fn send_request_vote_response(
         &self,
-        _from: RaftId,
+        from: RaftId,
         target: RaftId,
         args: RequestVoteResponse,
     ) -> RpcResult<()> {
-        if self
-            .outgoing_tx
-            .send(OutgoingMessage::RequestVoteResponse {
-                target_node: target.node.clone(),
-                args: Box::new(args),
-            })
-            .is_err()
-        {
-            Err(RpcError::Network("Network channel closed".into()))
+        if let Some(tx) = self.get_outgoing_tx(&target.node) {
+            if tx
+                .send(OutgoingMessage::RequestVoteResponse {
+                    from: from,
+                    target: target,
+                    args: args,
+                })
+                .is_err()
+            {
+                Err(RpcError::Network("Network channel closed".into()))
+            } else {
+                Ok(())
+            }
         } else {
-            Ok(())
+            Err(RpcError::Network(
+                "No outgoing channel found for target node".into(),
+            ))
         }
     }
 
     async fn send_append_entries_request(
         &self,
-        _from: RaftId,
+        from: RaftId,
         target: RaftId,
         args: AppendEntriesRequest,
     ) -> RpcResult<()> {
-        if self
-            .outgoing_tx
-            .send(OutgoingMessage::AppendEntries {
-                target_node: target.node.clone(),
-                args: Box::new(args),
-            })
-            .is_err()
-        {
-            Err(RpcError::Network("Network channel closed".into()))
+        if let Some(tx) = self.get_outgoing_tx(&target.node) {
+            if tx
+                .send(OutgoingMessage::AppendEntries {
+                    from: from,
+                    target: target,
+                    args: args,
+                })
+                .is_err()
+            {
+                Err(RpcError::Network("Network channel closed".into()))
+            } else {
+                Ok(())
+            }
         } else {
-            Ok(())
+            Err(RpcError::Network(
+                "No outgoing channel found for target node".into(),
+            ))
         }
     }
 
     async fn send_append_entries_response(
         &self,
-        _from: RaftId,
+        from: RaftId,
         target: RaftId,
         args: AppendEntriesResponse,
     ) -> RpcResult<()> {
-        if self
-            .outgoing_tx
-            .send(OutgoingMessage::AppendEntriesResponse {
-                target_node: target.node.clone(),
-                args: Box::new(args),
-            })
-            .is_err()
-        {
-            Err(RpcError::Network("Network channel closed".into()))
+        if let Some(tx) = self.get_outgoing_tx(&target.node) {
+            if tx
+                .send(OutgoingMessage::AppendEntriesResponse {
+                    from: from,
+                    target: target,
+                    args: args,
+                })
+                .is_err()
+            {
+                Err(RpcError::Network("Network channel closed".into()))
+            } else {
+                Ok(())
+            }
         } else {
-            Ok(())
+            Err(RpcError::Network(
+                "No outgoing channel found for target node".into(),
+            ))
         }
     }
 
     async fn send_install_snapshot_request(
         &self,
-        _from: RaftId,
+        from: RaftId,
         target: RaftId,
         args: InstallSnapshotRequest,
     ) -> RpcResult<()> {
-        if self
-            .outgoing_tx
-            .send(OutgoingMessage::InstallSnapshot {
-                target_node: target.node.clone(),
-                args: Box::new(args),
-            })
-            .is_err()
-        {
-            Err(RpcError::Network("Network channel closed".into()))
+        if let Some(tx) = self.get_outgoing_tx(&target.node) {
+            if tx
+                .send(OutgoingMessage::InstallSnapshot {
+                    from: from,
+                    target: target,
+                    args: args,
+                })
+                .is_err()
+            {
+                Err(RpcError::Network("Network channel closed".into()))
+            } else {
+                Ok(())
+            }
         } else {
-            Ok(())
+            Err(RpcError::Network(
+                "No outgoing channel found for target node".into(),
+            ))
         }
     }
 
     async fn send_install_snapshot_response(
         &self,
-        _from: RaftId,
+        from: RaftId,
         target: RaftId,
         args: InstallSnapshotResponse,
     ) -> RpcResult<()> {
-        if self
-            .outgoing_tx
-            .send(OutgoingMessage::InstallSnapshotResponse {
-                target_node: target.node.clone(),
-                args: Box::new(args),
-            })
-            .is_err()
-        {
-            Err(RpcError::Network("Network channel closed".into()))
+        if let Some(tx) = self.get_outgoing_tx(&target.node) {
+            if tx
+                .send(OutgoingMessage::InstallSnapshotResponse {
+                    from: from,
+                    target: target,
+                    args: args,
+                })
+                .is_err()
+            {
+                Err(RpcError::Network("Network channel closed".into()))
+            } else {
+                Ok(())
+            }
         } else {
-            Ok(())
+            Err(RpcError::Network(
+                "No outgoing channel found for target node".into(),
+            ))
         }
     }
 }
