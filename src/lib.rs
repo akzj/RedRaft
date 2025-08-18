@@ -136,7 +136,6 @@ pub struct RaftState {
     // 节点标识与配置
     id: RaftId,
     leader_id: Option<RaftId>,
-    peers: Vec<RaftId>,
     config: ClusterConfig,
 
     // 核心状态
@@ -333,7 +332,6 @@ impl RaftState {
             leader_transfer_target: None,
             leader_transfer_timeout: options.leader_transfer_timeout,
             id: options.id.clone(),
-            peers: options.peers.clone(),
             config: loaded_config,
             role: Role::Follower,
             current_term,
