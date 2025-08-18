@@ -1,9 +1,5 @@
-// integration_tests.rs
-// 假设这个文件在 tests/ 目录下，或者在 src/bin/ 下作为示例
-
 pub mod common;
-
-use raft_lite::mock::mock_network::MockNetworkHubConfig;
+use raft_lite::tests::mock::mock_network::MockNetworkHubConfig;
 use raft_lite::{RaftId, RequestId};
 use tokio::time::sleep;
 use tracing_subscriber;
@@ -72,14 +68,18 @@ async fn test_basic_raft_kv_cluster() {
 
         let final_role = new_leader.get_role();
         println!("Final leader role before sending command: {:?}", final_role);
-        cluster.propose_command(&new_leader.id, set_cmd_data.clone()).unwrap();
+        cluster
+            .propose_command(&new_leader.id, set_cmd_data.clone())
+            .unwrap();
         println!(
             "Sent SET command for key1=value1 to new leader, request_id: {:?}",
             request_id
         );
     } else {
         // 如果 Leader 状态正常，直接发送命令
-        cluster.propose_command(&leader_node.id, set_cmd_data.clone()).unwrap();
+        cluster
+            .propose_command(&leader_node.id, set_cmd_data.clone())
+            .unwrap();
 
         println!(
             "Sent SET command for key1=value1, request_id: {:?}",
@@ -132,7 +132,7 @@ async fn test_basic_raft_kv_cluster() {
         "Sending second SET command for key2=value2, request_id: {:?}",
         request_id2
     );
-    
+
     // 重新检查当前的 leader，确保发送到正确的节点
     let current_leader = wait_for_leader(&cluster, &[&node1, &node2, &node3])
         .await
@@ -142,8 +142,10 @@ async fn test_basic_raft_kv_cluster() {
         current_leader.id,
         current_leader.get_role()
     );
-    
-    cluster.propose_command(&current_leader.id, set_cmd2_data.clone()).unwrap();
+
+    cluster
+        .propose_command(&current_leader.id, set_cmd2_data.clone())
+        .unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
@@ -166,7 +168,10 @@ async fn test_basic_raft_kv_cluster() {
     let current_leader_for_pipeline = wait_for_leader(&cluster, &[&node1, &node2, &node3])
         .await
         .expect("Should have a leader for pipeline");
-    println!("Current leader for pipeline: {:?}", current_leader_for_pipeline.id);
+    println!(
+        "Current leader for pipeline: {:?}",
+        current_leader_for_pipeline.id
+    );
 
     let mut pipeline_commands = vec![];
 
@@ -180,7 +185,9 @@ async fn test_basic_raft_kv_cluster() {
 
     for cmd in pipeline_commands {
         sleep(tokio::time::Duration::from_micros(100)).await; // 每个命令间隔 1ms
-        cluster.propose_command(&current_leader_for_pipeline.id, cmd.clone().encode()).unwrap();
+        cluster
+            .propose_command(&current_leader_for_pipeline.id, cmd.clone().encode())
+            .unwrap();
         //println!("Sent pipeline command for {:?}", cmd);
     }
 

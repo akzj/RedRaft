@@ -1,9 +1,9 @@
 // test_node.rs
 use crate::common::test_statemachine::TestStateMachine;
 use raft_lite::message::LogEntry;
-use raft_lite::mock::mock_network::{MockNetworkHub, MockNodeNetwork, NetworkEvent};
-use raft_lite::mock::mock_storage::{MockStorage, SnapshotStorage};
 use raft_lite::mutl_raft_driver::{HandleEventTrait, MultiRaftDriver, Timers};
+use raft_lite::tests::mock::mock_network::{MockNetworkHub, MockNodeNetwork, NetworkEvent};
+use raft_lite::tests::mock::mock_storage::{MockStorage, SnapshotStorage};
 use raft_lite::traits::*;
 use raft_lite::*;
 use std::ops::Deref;

@@ -1195,7 +1195,7 @@ mod tests {
 #[cfg(test)]
 mod additional_tests {
     use super::*;
-    use crate::mock::mock_network::tests::{create_test_raft_id, create_test_request_vote};
+    use crate::tests::mock::mock_network::tests::{create_test_raft_id, create_test_request_vote};
     use tokio::time::{Instant, timeout};
 
     /// 测试发送失败率（failure_rate）生效

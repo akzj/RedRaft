@@ -1,4 +1,4 @@
-use raft_lite::{RaftId, mock::mock_network::MockNetworkHubConfig};
+use raft_lite::{RaftId, tests::mock::mock_network::MockNetworkHubConfig};
 use std::time::Duration;
 use tokio;
 

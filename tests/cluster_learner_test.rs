@@ -1,4 +1,4 @@
-use raft_lite::{RaftId, mock::mock_network::MockNetworkHubConfig};
+use raft_lite::{RaftId, tests::mock::mock_network::MockNetworkHubConfig};
 use std::time::Duration;
 use tokio;
 
@@ -96,10 +96,10 @@ async fn test_cluster_learner_operate() {
 
     for i in 1..=10 {
         println!("\n--- Testing learner {} ---", i);
-        
+
         // 添加 learner
         let learner_id = RaftId::new("test_group".to_string(), format!("learner{}", i));
-        
+
         println!("Adding learner: {:?}", learner_id);
         match cluster.add_learner(learner_id.clone()).await {
             Ok(()) => println!("✓ Successfully added learner: {:?}", learner_id),
@@ -111,7 +111,10 @@ async fn test_cluster_learner_operate() {
 
         // 等待 learner 同步数据
         println!("Waiting for learner {:?} to catch up...", learner_id);
-        match cluster.wait_for_learner_sync(&learner_id, Duration::from_secs(5)).await {
+        match cluster
+            .wait_for_learner_sync(&learner_id, Duration::from_secs(5))
+            .await
+        {
             Ok(()) => println!("✓ Learner {:?} successfully synchronized", learner_id),
             Err(e) => println!("⚠️ Learner {:?} sync issue: {}", learner_id, e),
         }
@@ -120,15 +123,18 @@ async fn test_cluster_learner_operate() {
         println!("Checking data consistency including learner...");
         if let Some(learner_data) = cluster.get_node_data(&learner_id) {
             println!("Learner {:?} data: {:?}", learner_id, learner_data);
-            
+
             // 验证 learner 是否为 Follower 角色（learner 应该是 Follower）
             if let Some(learner_node) = cluster.get_node(&learner_id) {
                 let role = learner_node.get_role();
                 println!("Learner {:?} role: {:?}", learner_id, role);
-                
+
                 // Learner 应该是 Follower，但不参与选举
                 if role != raft_lite::Role::Follower {
-                    println!("⚠️ Learner {:?} has unexpected role: {:?}", learner_id, role);
+                    println!(
+                        "⚠️ Learner {:?} has unexpected role: {:?}",
+                        learner_id, role
+                    );
                 }
             }
         } else {
@@ -145,9 +151,15 @@ async fn test_cluster_learner_operate() {
         // 验证 learner 已被移除
         tokio::time::sleep(Duration::from_millis(200)).await;
         if cluster.get_node(&learner_id).is_none() {
-            println!("✓ Learner {:?} successfully removed from cluster", learner_id);
+            println!(
+                "✓ Learner {:?} successfully removed from cluster",
+                learner_id
+            );
         } else {
-            println!("⚠️ Learner {:?} still exists in cluster after removal", learner_id);
+            println!(
+                "⚠️ Learner {:?} still exists in cluster after removal",
+                learner_id
+            );
         }
 
         // 验证核心集群的数据一致性未受影响
@@ -163,10 +175,10 @@ async fn test_cluster_learner_operate() {
 
     // ===== 3. 最终验证 =====
     println!("\n=== Final verification ===");
-    
+
     // 确保原始集群仍然正常工作
     println!("Verifying original cluster is still functional...");
-    
+
     // 发送一些最终的业务命令
     for i in 21..=25 {
         let command = KvCommand::Set {
@@ -183,7 +195,10 @@ async fn test_cluster_learner_operate() {
     }
 
     // 最终数据一致性检查
-    match cluster.wait_for_data_replication(Duration::from_secs(3)).await {
+    match cluster
+        .wait_for_data_replication(Duration::from_secs(3))
+        .await
+    {
         Ok(()) => println!("✓ Final data consistency verified"),
         Err(e) => println!("⚠️ Final data consistency issue: {}", e),
     }
@@ -191,9 +206,13 @@ async fn test_cluster_learner_operate() {
     // 检查集群状态
     let cluster_status = cluster.get_cluster_status();
     println!("Final cluster status: {:?}", cluster_status);
-    
+
     // 验证只有原始的3个节点
-    assert_eq!(cluster_status.len(), 3, "Should have exactly 3 nodes in final cluster");
-    
+    assert_eq!(
+        cluster_status.len(),
+        3,
+        "Should have exactly 3 nodes in final cluster"
+    );
+
     println!("✓ All tests completed successfully!");
 }
