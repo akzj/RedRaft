@@ -1,5 +1,5 @@
 use crate::network::pb::raft_service_client::RaftServiceClient;
-use crate::network::pb::raft_service_server::RaftServiceServer;
+use crate::network::pb::raft_service_server::{RaftService, RaftServiceServer};
 // network.rs
 use crate::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
@@ -12,7 +12,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration as StdDuration;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Channel, Endpoint, Server};
+use tracing::{debug, error, info, warn};
 
 pub mod pb;
 
@@ -24,6 +25,11 @@ pub trait ResolveNodeAddress {
     ) -> impl std::future::Future<Output = Result<String>> + Send;
 }
 
+#[async_trait]
+pub trait MessageDispatcher: Send + Sync {
+    async fn dispatch(&self, msg: OutgoingMessage) -> Result<()>;
+}
+
 // 假设这是由 Protobuf 生成的 gRPC 客户端和服务 trait
 // use your_crate::raft_service_client::RaftServiceClient;
 // use your_crate::{RaftRpcRequest, RaftRpcResponse, ...};
@@ -32,11 +38,10 @@ pub trait ResolveNodeAddress {
 
 // 用于存储到远程节点的 gRPC 客户端
 type GrpcClient = tonic::transport::Channel; // 简化，实际可能需要包装
-type ClientMap = Arc<RwLock<HashMap<String, GrpcClient>>>;
 
 // 用于将消息从 Network 实例发送到 gRPC 发送任务
 #[derive(Debug)]
-enum OutgoingMessage {
+pub enum OutgoingMessage {
     RequestVote {
         from: RaftId,
         target: RaftId,
@@ -69,12 +74,15 @@ enum OutgoingMessage {
     },
 }
 
+#[derive(Debug, Clone)]
 pub struct MultiRaftNetworkOptions {
     node_id: String,
     grpc_server_addr: String,
     node_map: HashMap<NodeId, String>,
     connect_timeout: Duration,
     batch_size: usize,
+    send_retry_count: usize,
+    send_retry_delay: StdDuration,
 }
 
 impl ResolveNodeAddress for MultiRaftNetworkOptions {
@@ -86,6 +94,7 @@ impl ResolveNodeAddress for MultiRaftNetworkOptions {
     }
 }
 
+#[derive(Clone)]
 pub struct MultiRaftNetwork {
     options: MultiRaftNetworkOptions,
     // sender 用于将消息从 RaftState 发送到网络层的发送任务
@@ -94,17 +103,18 @@ pub struct MultiRaftNetwork {
     // 注意：这个 receiver 可能需要被 Network 实例持有，或者通过其他方式传递给分发逻辑
     // 这里为了简化，假设它在初始化时被取出并用于启动分发任务
     // incoming_rx: Option<mpsc::UnboundedReceiver<(RaftId, Event)>>,
-    clients: ClientMap,
+    clients: Arc<RwLock<HashMap<String, GrpcClient>>>,
+
+    dispatch: Option<Arc<dyn MessageDispatcher>>,
 }
 
 impl MultiRaftNetwork {
     pub fn new(config: MultiRaftNetworkOptions) -> Self {
-        let clients: ClientMap = Arc::new(RwLock::new(HashMap::new()));
-
         let network = Self {
+            dispatch: None,
             options: config,
             outgoing_tx: Arc::new(RwLock::new(HashMap::new())),
-            clients: clients.clone(),
+            clients: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // 启动 gRPC 消息发送任务
@@ -121,45 +131,33 @@ impl MultiRaftNetwork {
     }
 
     // 获取或创建到远程节点的 gRPC 客户端
-    async fn get_or_create_client(&self, target_node_id: &str) -> Result<GrpcClient, RpcError> {
-        // 1. 尝试从缓存读取
+    async fn get_or_create_client(&self, node_id: &str) -> Result<GrpcClient, RpcError> {
         {
             let clients_read = self.clients.read().unwrap();
-            if let Some(client) = clients_read.get(target_node_id) {
+            if let Some(client) = clients_read.get(node_id) {
                 return Ok(client.clone());
             }
         }
 
-        // 2. 如果没有，尝试创建 (需要知道 target_node_id 对应的 gRPC 地址)
-        // 这里假设有一个方法可以根据 NodeId 获取地址
-        let target_addr = self
-            .resolve_node_address(target_node_id)
-            .await
-            .map_err(|e| {
-                RpcError::Network(format!(
-                    "Failed to resolve address for {}: {}",
-                    target_node_id, e
-                ))
-            })?;
-
-        let endpoint = Endpoint::from_shared(target_addr)
-            .map_err(|e| {
-                RpcError::Network(format!("Invalid endpoint for {}: {}", target_node_id, e))
-            })?
-            .connect_timeout(self.options.connect_timeout);
-
-        let channel = endpoint.connect().await.map_err(|e| {
-            RpcError::Network(format!("Failed to connect to {}: {}", target_node_id, e))
+        let target_addr = self.resolve_node_address(node_id).await.map_err(|e| {
+            RpcError::Network(format!("Failed to resolve address for {}: {}", node_id, e))
         })?;
 
-        // 3. 写入缓存
+        let endpoint = Endpoint::from_shared(target_addr)
+            .map_err(|e| RpcError::Network(format!("Invalid endpoint for {}: {}", node_id, e)))?
+            .connect_timeout(self.options.connect_timeout);
+
+        let channel = endpoint
+            .connect()
+            .await
+            .map_err(|e| RpcError::Network(format!("Failed to connect to {}: {}", node_id, e)))?;
+
         {
             let mut clients_write = self.clients.write().unwrap();
-            // 再次检查，防止竞态
-            if let Some(client) = clients_write.get(target_node_id) {
+            if let Some(client) = clients_write.get(node_id) {
                 Ok(client.clone())
             } else {
-                clients_write.insert(target_node_id.to_string(), channel.clone());
+                clients_write.insert(node_id.to_string(), channel.clone());
                 Ok(channel)
             }
         }
@@ -182,13 +180,11 @@ impl MultiRaftNetwork {
 
         loop {
             // 收集一批消息
-            let collect_fut = async {
-                match rx.recv().await {
-                    Some(msg) => batch.push(msg),
-                    None => {
-                        log::warn!("Outgoing message channel closed, stopping sender task");
-                        return;
-                    }
+            async {
+                let size = rx.recv_many(&mut batch, batch_size).await;
+                if size == 0 {
+                    warn!("No messages received, exiting sender task");
+                    return;
                 }
 
                 while batch.len() < batch_size {
@@ -197,20 +193,16 @@ impl MultiRaftNetwork {
                         Err(err) => {
                             // check err is closed
                             if err == mpsc::error::TryRecvError::Empty {
-                                log::debug!("Outgoing message channel empty");
-                                break; // 没有更多消息，退出循环
+                                debug!("Outgoing message channel empty");
                             } else if err == mpsc::error::TryRecvError::Disconnected {
-                                log::warn!(
-                                    "Outgoing message channel disconnected, stopping sender task"
-                                );
-                                return;
+                                warn!("Outgoing message channel disconnected");
                             }
+                            break;
                         }
                     }
                 }
-            };
-
-            collect_fut.await;
+            }
+            .await;
 
             if batch.is_empty() {
                 continue;
@@ -229,8 +221,6 @@ impl MultiRaftNetwork {
 
             // Send batch with retry logic
             let mut retries = 0;
-            const MAX_RETRIES: usize = 3;
-            const RETRY_DELAY: Duration = Duration::from_millis(100);
 
             loop {
                 match client.send_batch(batch_requests.clone()).await {
@@ -240,15 +230,18 @@ impl MultiRaftNetwork {
                             break;
                         } else {
                             log::error!("Failed to send batch: {:?}", response.get_ref().error);
-                            if retries >= MAX_RETRIES {
-                                log::error!("Max retries reached, giving up");
+                            if retries >= self.options.send_retry_count {
+                                log::error!(
+                                    "Max retries reached, giving up. messages {}",
+                                    batch_requests.messages.len()
+                                );
                                 break;
                             }
                         }
                     }
                     Err(err) => {
                         log::error!("Failed to send batch: {}", err);
-                        if retries >= MAX_RETRIES {
+                        if retries >= self.options.send_retry_count {
                             log::error!("Max retries reached, giving up");
                             break;
                         }
@@ -256,27 +249,63 @@ impl MultiRaftNetwork {
                 }
 
                 retries += 1;
-                log::warn!("Retrying batch send, attempt {}/{}", retries, MAX_RETRIES);
-                tokio::time::sleep(RETRY_DELAY * retries as u32).await;
+                log::warn!(
+                    "Retrying batch send, attempt {}/{}",
+                    retries,
+                    self.options.send_retry_count
+                );
+                tokio::time::sleep(self.options.send_retry_delay * retries as u32).await;
             }
         }
 
         Ok(())
     }
 
-    // // 启动 gRPC 服务端 (通常在应用主函数中调用)
-    // pub async fn run_grpc_server(
-    //     addr: String,
-    //     dispatch_tx: mpsc::UnboundedSender<(RaftId, Event)>,
-    // ) -> Result<(), Box<dyn std::error::Error>> {
-    //     let addr = addr.parse()?;
-    //     let service = RaftGrpcService::new(dispatch_tx); // 需要实现这个服务
-    //     Server::builder()
-    //         .add_service(RaftServiceServer::new(service))
-    //         .serve(addr)
-    //         .await?;
-    //     Ok(())
-    // }
+    // 启动 gRPC 服务端 (通常在应用主函数中调用)
+    async fn run_grpc_server(&mut self, dispatch: Arc<dyn MessageDispatcher>) -> Result<()> {
+        assert!(self.dispatch.is_none(), "gRPC server already running");
+        self.dispatch = Some(dispatch);
+        let server_addr = self.options.grpc_server_addr.clone();
+        Server::builder()
+            .add_service(RaftServiceServer::new(self.clone()))
+            .serve(server_addr.parse()?)
+            .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl RaftService for MultiRaftNetwork {
+    async fn send_batch(
+        &self,
+        request: tonic::Request<pb::BatchRequest>,
+    ) -> std::result::Result<tonic::Response<pb::BatchResponse>, tonic::Status> {
+        let response = pb::BatchResponse {
+            success: true,
+            error: "".into(),
+        };
+
+        // Consume the incoming request so we can take ownership of the messages
+        // and avoid cloning each message.
+        let batch = request.into_inner();
+        for message in batch.messages {
+            // Convert protobuf message into internal OutgoingMessage first.
+            let outgoing: OutgoingMessage = match message.into() {
+                Ok(msg) => msg,
+                Err(err) => {
+                    log::error!("Failed to convert message: {}", err);
+                    continue;
+                }
+            };
+            self.dispatch
+                .as_ref()
+                .unwrap()
+                .dispatch(outgoing)
+                .await
+                .map_err(|e| tonic::Status::internal(format!("Failed to dispatch batch: {}", e)))?;
+        }
+        Ok(tonic::Response::new(response))
+    }
 }
 
 #[async_trait]

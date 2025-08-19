@@ -8,6 +8,29 @@ message RaftId {
   string node = 2;  // 节点 ID
 }
 
+
+// 集群配置
+message ClusterConfig {
+  uint64 epoch = 1;                // 配置版本号
+  uint64 log_index = 2;            // 最后一次配置变更的日志索引
+  repeated RaftId voters = 3;      // 具有投票权的节点集合
+  repeated RaftId learners = 4;    // 不具有投票权的学习者节点（可选）
+  JointConfig joint = 5;           // 联合配置（可选）
+}
+
+// 联合配置，用于配置变更过程中的过渡状态
+message JointConfig {
+  uint64 log_index = 1;                   // 最后一次配置变更的日志索引
+  
+  repeated RaftId old_voters = 2;         // 旧配置中的投票节点
+  repeated RaftId new_voters = 3;         // 新配置中的投票节点
+  
+  repeated RaftId old_learners = 4;       // 旧配置中的学习者节点（可选）
+  repeated RaftId new_learners = 5;       // 新配置中的学习者节点（可选）
+}
+    
+
+
 /// 日志条目（对应 Rust 中的 LogEntry）
 message LogEntry {
   uint64 term = 1;    // 日志产生的任期
@@ -17,20 +40,6 @@ message LogEntry {
   optional uint64 client_request_id = 5; // 关联的客户端请求 ID（用于去重）
 }
 
-/// 集群配置（对应 Rust 中的 ClusterConfig）
-message ClusterConfig {
-  uint64 epoch = 1;           // 配置版本号
-  uint64 log_index = 2;       // 最后一次配置变更的日志索引
-  repeated RaftId voters = 3; // 投票节点集合（对应 HashSet<RaftId>）
-  optional JointConfig joint = 4; // 联合配置（仅在配置变更过程中存在）
-}
-
-/// 联合配置（对应 Rust 中的 JointConfig）
-message JointConfig {
-  repeated RaftId old = 1; // 旧配置的投票节点
-  repeated RaftId new = 2; // 新配置的投票节点
-  uint64 log_index = 3;    // 联合配置创建时的日志索引
-}
 
 /// 快照数据（对应 Rust 中的 Snapshot）
 message Snapshot {
@@ -103,7 +112,8 @@ message InstallSnapshotRequest {
   uint64 last_included_term = 4;  // 快照包含的最后日志任期
   bytes data = 5;                 // 快照数据
   uint64 request_id = 6;          // 请求 ID（用于匹配响应）
-  bool is_probe = 7; // 是否为探测请求（检查安装状态）
+  bool is_probe = 7;              // 是否为探测请求（检查安装状态）
+  ClusterConfig config = 8;       // config
 }
 
 /// 安装快照响应（对应 Rust 中的 InstallSnapshotResponse）

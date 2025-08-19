@@ -157,7 +157,7 @@ impl TestCluster {
         //     Err(format!("Node {:?} not found", leader_id))
         // }
 
-        match self.driver.send_event(leader_id.clone(), event) {
+        match self.driver.dispatch_event(leader_id.clone(), event) {
             raft_lite::mutl_raft_driver::SendEventResult::Success => {
                 return Ok(());
             }
@@ -177,7 +177,7 @@ impl TestCluster {
         let request_id = raft_lite::RequestId::new();
         let event = raft_lite::Event::CreateSnapshot {};
 
-        match self.driver.send_event(leader_id.clone(), event) {
+        match self.driver.dispatch_event(leader_id.clone(), event) {
             raft_lite::mutl_raft_driver::SendEventResult::Success => {
                 return Ok(());
             }
@@ -241,7 +241,7 @@ impl TestCluster {
 
             match self
                 .driver
-                .send_event(leader_id.clone(), config_change_event)
+                .dispatch_event(leader_id.clone(), config_change_event)
             {
                 raft_lite::mutl_raft_driver::SendEventResult::Success => {
                     info!("Config change event sent to leader {:?}", leader_id);
@@ -349,7 +349,7 @@ impl TestCluster {
 
             match self
                 .driver
-                .send_event(leader_id.clone(), config_change_event)
+                .dispatch_event(leader_id.clone(), config_change_event)
             {
                 raft_lite::mutl_raft_driver::SendEventResult::Success => {
                     info!("Config change event sent to leader {:?}", leader_id);
@@ -504,7 +504,7 @@ impl TestCluster {
             request_id,
         };
 
-        match self.driver.send_event(leader_id.clone(), add_learner_event) {
+        match self.driver.dispatch_event(leader_id.clone(), add_learner_event) {
             raft_lite::mutl_raft_driver::SendEventResult::Success => {
                 info!("Add learner event sent to leader {:?}", leader_id);
             }
@@ -574,7 +574,7 @@ impl TestCluster {
 
         match self
             .driver
-            .send_event(leader_id.clone(), remove_learner_event)
+            .dispatch_event(leader_id.clone(), remove_learner_event)
         {
             raft_lite::mutl_raft_driver::SendEventResult::Success => {
                 info!("Remove learner event sent to leader {:?}", leader_id);

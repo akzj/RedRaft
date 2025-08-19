@@ -1,4 +1,5 @@
 use crate::cluster_config::ClusterConfig;
+use crate::cluster_config::JointConfig;
 use crate::cluster_config::QuorumRequirement;
 use crate::error::*;
 use crate::traits::*;
@@ -65,6 +66,12 @@ impl fmt::Display for RequestId {
 impl Into<u64> for RequestId {
     fn into(self) -> u64 {
         self.0
+    }
+}
+
+impl From<u64> for RequestId {
+    fn from(value: u64) -> Self {
+        Self(value)
     }
 }
 

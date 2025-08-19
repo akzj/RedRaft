@@ -259,7 +259,7 @@ impl MultiRaftDriver {
     async fn process_expired_timers(&self) -> Option<Duration> {
         let (events, duration) = self.timer_service.process_expired_timers();
         for event in events {
-            let result = self.send_event(event.node_id.clone(), event.event.clone());
+            let result = self.dispatch_event(event.node_id.clone(), event.event.clone());
             match result {
                 SendEventResult::Success => {
                     // 正常情况，不记录日志
@@ -287,7 +287,7 @@ impl MultiRaftDriver {
     }
 
     // 向指定Raft组发送事件
-    pub fn send_event(&self, target: RaftId, event: Event) -> SendEventResult {
+    pub fn dispatch_event(&self, target: RaftId, event: Event) -> SendEventResult {
         let groups = self.groups.lock().unwrap();
         let Some(core) = groups.get(&target) else {
             return SendEventResult::NotFound; // 组不存在
@@ -552,7 +552,7 @@ mod tests {
         manager.add_raft_group(group_id.clone(), Box::new(mock_handler.clone()));
 
         assert!(matches!(
-            manager.send_event(group_id.clone(), Event::HeartbeatTimeout),
+            manager.dispatch_event(group_id.clone(), Event::HeartbeatTimeout),
             SendEventResult::Success
         )); // 应该成功，说明组存在
 
@@ -577,7 +577,7 @@ mod tests {
 
         let test_event = Event::HeartbeatTimeout; // 使用一个简单的事件进行测试
 
-        let result = manager.send_event(group_id.clone(), test_event.clone());
+        let result = manager.dispatch_event(group_id.clone(), test_event.clone());
 
         assert!(
             matches!(result, SendEventResult::Success),
@@ -616,11 +616,11 @@ mod tests {
         let event1 = Event::HeartbeatTimeout;
         let event2 = Event::ElectionTimeout; // 发送两个事件以测试 Pending 状态的持续
         assert!(matches!(
-            manager.send_event(group_id.clone(), event1.clone()),
+            manager.dispatch_event(group_id.clone(), event1.clone()),
             SendEventResult::Success
         ));
         assert!(matches!(
-            manager.send_event(group_id.clone(), event2.clone()),
+            manager.dispatch_event(group_id.clone(), event2.clone()),
             SendEventResult::Success
         )); // 快速连续发送
         // 4. 验证事件被处理

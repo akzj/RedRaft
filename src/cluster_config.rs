@@ -16,16 +16,16 @@ pub enum QuorumRequirement {
 // === 集群配置 ===
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterConfig {
-    epoch: u64,     // 配置版本号
-    log_index: u64, // 最后一次配置变更的日志索引
-    voters: HashSet<RaftId>,
-    learners: Option<HashSet<RaftId>>, // 不具有投票权的学习者节点
-    joint: Option<JointConfig>,
+    pub epoch: u64,     // 配置版本号
+    pub log_index: u64, // 最后一次配置变更的日志索引
+    pub voters: HashSet<RaftId>,
+    pub learners: Option<HashSet<RaftId>>, // 不具有投票权的学习者节点
+    pub joint: Option<JointConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JointConfig {
-    log_index: u64, // 最后一次配置变更的日志索引
+    pub log_index: u64, // 最后一次配置变更的日志索引
 
     pub old_voters: HashSet<RaftId>,
     pub new_voters: HashSet<RaftId>,

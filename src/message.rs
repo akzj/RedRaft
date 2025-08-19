@@ -33,9 +33,6 @@ pub struct InstallSnapshotResponse {
     pub error_message: String, // 错误信息，如果有的话
 }
 
-// #[derive(Debug, Clone)]
-// pub struct Error(pub String);
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub index: u64,
