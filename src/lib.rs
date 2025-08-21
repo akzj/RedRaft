@@ -22,6 +22,7 @@ pub mod network;
 pub mod pipeline;
 pub mod tests;
 pub mod traits;
+pub mod wal;
 // 类型定义
 
 pub type GroupId = String;
