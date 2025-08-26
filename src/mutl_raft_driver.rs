@@ -120,7 +120,7 @@ pub struct MultiRaftDriverInner {
     timer_service: Timers,
     groups: Mutex<HashMap<RaftId, Arc<RaftGroupCore>>>, // 所有Raft组
     active_map: Mutex<HashSet<RaftId>>,                 // 待处理组集合
-    notify: Notify,                                     // Worker唤醒信号
+    notify: Arc<Notify>,                                // Worker唤醒信号
     stop: AtomicBool,                                   // 停止标志
 }
 
@@ -146,11 +146,13 @@ pub struct TimerInner {
 #[derive(Clone)]
 pub struct Timers {
     inner: Arc<TimerInner>,
+    notify: Arc<Notify>,
 }
 
 impl Timers {
-    pub fn new() -> Self {
+    pub fn new(notify: Arc<Notify>) -> Self {
         Self {
+            notify: notify,
             inner: Arc::new(TimerInner {
                 timer_id_counter: AtomicU64::new(0),
                 timer_heap: Mutex::new(BinaryHeap::new()),
@@ -168,17 +170,19 @@ impl Deref for Timers {
 }
 
 impl Timers {
-    pub fn add_timer(&self, node_id: RaftId, event: Event, delay: Duration) -> TimerId {
+    pub fn add_timer(&self, node_id: &RaftId, event: Event, delay: Duration) -> TimerId {
         let timer_id = self.timer_id_counter.fetch_add(1, Ordering::Relaxed);
         let trigger_time = Instant::now() + delay;
         let timer_event = TimerEvent {
             timer_id,
-            node_id,
             event,
-            trigger_time,
             delay,
+            trigger_time,
+            node_id: node_id.clone(),
         };
         self.timer_heap.lock().unwrap().push(timer_event);
+        // notify timer queue change
+        self.notify.notify_one();
         timer_id
     }
 
@@ -220,12 +224,13 @@ pub enum SendEventResult {
 impl MultiRaftDriver {
     // 创建新的MultiRaftDriver
     pub fn new() -> Self {
+        let notify = Arc::new(Notify::new());
         Self {
             inner: Arc::new(MultiRaftDriverInner {
-                timer_service: Timers::new(),
+                timer_service: Timers::new(notify.clone()),
                 groups: Mutex::new(HashMap::new()),
                 active_map: Mutex::new(HashSet::new()),
-                notify: Notify::new(),
+                notify: notify,
                 stop: AtomicBool::new(false),
             }),
         }
@@ -660,7 +665,7 @@ mod tests {
         let delay = Duration::from_millis(100);
 
         let timers = manager.get_timer_service();
-        timers.add_timer(group_id, test_event, delay);
+        timers.add_timer(&group_id, test_event, delay);
 
         tokio::time::sleep(Duration::from_millis(150)).await;
 
