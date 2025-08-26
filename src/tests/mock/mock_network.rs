@@ -16,7 +16,7 @@ use rand::{Rng, SeedableRng};
 use std::collections::{HashMap, VecDeque}; // Changed from BinaryHeap
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -301,7 +301,7 @@ impl MockNetworkHub {
 
                     // let mut rng = rand::thread_rng(); // [!code --]
                     let mut rng = rand::rngs::StdRng::from_os_rng(); // [!code ++]
-                    // if rng.gen::<f64>() < failure_rate { // [!code --]
+                                                                     // if rng.gen::<f64>() < failure_rate { // [!code --]
                     if rng.random::<f64>() < failure_rate {
                         // [!code ++]
                         info!(
@@ -464,7 +464,7 @@ impl MockNodeNetwork {
         let config = self.hub_inner.raft_config.read().await;
         let config = config.get(&from).cloned().unwrap_or_default();
         let mut rng = rand::rngs::StdRng::from_os_rng(); // [!code ++]
-        // 1. 模拟丢包 (在入队前就决定是否丢弃)
+                                                         // 1. 模拟丢包 (在入队前就决定是否丢弃)
 
         if rng.random::<f64>() < config.drop_rate {
             // [!code ++]
@@ -515,84 +515,84 @@ impl MockNodeNetwork {
 impl Network for MockNodeNetwork {
     async fn send_request_vote_request(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target:& RaftId,
         args: RequestVoteRequest,
     ) -> RpcResult<()> {
         self.send_to_target(
             from.clone(),
             target.clone(),
-            NetworkEvent::RequestVote(from, target, args),
+            NetworkEvent::RequestVote(from.clone(), target.clone(), args),
         )
         .await
     }
 
     async fn send_request_vote_response(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: RequestVoteResponse,
     ) -> RpcResult<()> {
         self.send_to_target(
             from.clone(),
             target.clone(),
-            NetworkEvent::RequestVoteResponse(from, target, args),
+            NetworkEvent::RequestVoteResponse(from.clone(), target.clone(), args),
         )
         .await
     }
 
     async fn send_append_entries_request(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: AppendEntriesRequest,
     ) -> RpcResult<()> {
         self.send_to_target(
             from.clone(),
             target.clone(),
-            NetworkEvent::AppendEntriesRequest(from, target, args),
+            NetworkEvent::AppendEntriesRequest(from.clone(), target.clone(), args),
         )
         .await
     }
 
     async fn send_append_entries_response(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target:& RaftId,
         args: AppendEntriesResponse,
     ) -> RpcResult<()> {
         self.send_to_target(
             from.clone(),
             target.clone(),
-            NetworkEvent::AppendEntriesResponse(from, target, args),
+            NetworkEvent::AppendEntriesResponse(from.clone(), target.clone(), args),
         )
         .await
     }
 
     async fn send_install_snapshot_request(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target:& RaftId,
         args: InstallSnapshotRequest,
     ) -> RpcResult<()> {
         self.send_to_target(
             from.clone(),
             target.clone(),
-            NetworkEvent::InstallSnapshotRequest(from, target, args),
+            NetworkEvent::InstallSnapshotRequest(from.clone(), target.clone(), args),
         )
         .await
     }
 
     async fn send_install_snapshot_response(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target:& RaftId,
         args: InstallSnapshotResponse,
     ) -> RpcResult<()> {
         self.send_to_target(
             from.clone(),
             target.clone(),
-            NetworkEvent::InstallSnapshotResponse(from, target, args),
+            NetworkEvent::InstallSnapshotResponse(from.clone(), target.clone(), args),
         )
         .await
     }
@@ -725,7 +725,7 @@ mod tests {
         // Send a request vote from node1 to node2
         let vote_req = create_test_request_vote();
         let result = network1
-            .send_request_vote_request(node1.clone(), node2.clone(), vote_req.clone())
+            .send_request_vote_request(&node1, &node2, vote_req.clone())
             .await;
         assert!(result.is_ok());
 
@@ -757,7 +757,7 @@ mod tests {
 
         let append_req = create_test_append_entries();
         let result = network_leader
-            .send_append_entries_request(leader.clone(), follower.clone(), append_req.clone())
+            .send_append_entries_request(&leader, &follower, append_req.clone())
             .await;
         assert!(result.is_ok());
 
@@ -789,14 +789,14 @@ mod tests {
         // Node1 -> Node2
         let vote_req = create_test_request_vote();
         network1
-            .send_request_vote_request(node1.clone(), node2.clone(), vote_req)
+            .send_request_vote_request(&node1, &node2, vote_req)
             .await
             .unwrap();
 
         // Node2 -> Node1
         let append_req = create_test_append_entries();
         network2
-            .send_append_entries_request(node2.clone(), node1.clone(), append_req)
+            .send_append_entries_request(&node2, &node1, append_req)
             .await
             .unwrap();
 
@@ -835,7 +835,7 @@ mod tests {
             let mut vote_req = create_test_request_vote();
             vote_req.term = i; // Use term to track order
             network_sender
-                .send_request_vote_request(sender.clone(), receiver.clone(), vote_req)
+                .send_request_vote_request(&sender, &receiver, vote_req)
                 .await
                 .unwrap();
         }
@@ -883,7 +883,7 @@ mod tests {
         let start = Instant::now();
         let vote_req = create_test_request_vote();
         network
-            .send_request_vote_request(sender, receiver, vote_req)
+            .send_request_vote_request(&sender, &receiver, vote_req)
             .await
             .unwrap();
 
@@ -915,7 +915,7 @@ mod tests {
             let mut vote_req = create_test_request_vote();
             vote_req.term = i;
             network
-                .send_request_vote_request(sender.clone(), receiver.clone(), vote_req)
+                .send_request_vote_request(&sender, &receiver, vote_req)
                 .await
                 .unwrap();
         }
@@ -950,7 +950,7 @@ mod tests {
         // Send message to nonexistent node should succeed (no immediate error)
         let vote_req = create_test_request_vote();
         let result = network
-            .send_request_vote_request(sender, nonexistent, vote_req)
+            .send_request_vote_request(&sender, &nonexistent, vote_req)
             .await;
         assert!(result.is_ok());
 
@@ -974,7 +974,7 @@ mod tests {
         // Test all message types
         let vote_req = create_test_request_vote();
         network
-            .send_request_vote_request(sender.clone(), receiver.clone(), vote_req)
+            .send_request_vote_request(&sender, &receiver, vote_req)
             .await
             .unwrap();
 
@@ -984,13 +984,13 @@ mod tests {
             request_id: RequestId::new(),
         };
         network
-            .send_request_vote_response(sender.clone(), receiver.clone(), vote_resp)
+            .send_request_vote_response(&sender, &receiver, vote_resp)
             .await
             .unwrap();
 
         let append_req = create_test_append_entries();
         network
-            .send_append_entries_request(sender.clone(), receiver.clone(), append_req)
+            .send_append_entries_request(&sender, &receiver, append_req)
             .await
             .unwrap();
 
@@ -1003,7 +1003,7 @@ mod tests {
             matched_index: 0,
         };
         network
-            .send_append_entries_response(sender.clone(), receiver.clone(), append_resp)
+            .send_append_entries_response(&sender, &receiver, append_resp)
             .await
             .unwrap();
 
@@ -1025,7 +1025,7 @@ mod tests {
             is_probe: false,
         };
         network
-            .send_install_snapshot_request(sender.clone(), receiver.clone(), install_req)
+            .send_install_snapshot_request(&sender, &receiver, install_req)
             .await
             .unwrap();
 
@@ -1036,7 +1036,7 @@ mod tests {
             error_message: "".into(),
         };
         network
-            .send_install_snapshot_response(sender, receiver, install_resp)
+            .send_install_snapshot_response(&sender, &receiver, install_resp)
             .await
             .unwrap();
 
@@ -1128,7 +1128,7 @@ mod tests {
                 let mut vote_req = create_test_request_vote();
                 vote_req.term = i + 1;
                 network_clone
-                    .send_request_vote_request(sender_clone, receiver_clone, vote_req)
+                    .send_request_vote_request(&sender_clone, &receiver_clone, vote_req)
                     .await
             });
             handles.push(handle);
@@ -1183,7 +1183,7 @@ mod tests {
         // Send message that should be dropped
         let vote_req = create_test_request_vote();
         let result = network
-            .send_request_vote_request(sender, receiver, vote_req)
+            .send_request_vote_request(&sender, &receiver, vote_req)
             .await;
         assert!(result.is_ok()); // Send operation succeeds even if message is dropped
 
@@ -1197,7 +1197,7 @@ mod tests {
 mod additional_tests {
     use super::*;
     use crate::tests::mock::mock_network::tests::{create_test_raft_id, create_test_request_vote};
-    use tokio::time::{Instant, timeout};
+    use tokio::time::{timeout, Instant};
 
     /// 测试发送失败率（failure_rate）生效
     #[tokio::test]
@@ -1230,7 +1230,7 @@ mod additional_tests {
         // 发送消息（应入队但发送阶段失败）
         let vote_req = create_test_request_vote();
         let result = network
-            .send_request_vote_request(sender, receiver, vote_req)
+            .send_request_vote_request(&sender, &receiver, vote_req)
             .await;
         assert!(result.is_ok()); // 发送操作本身无错误
 
@@ -1273,7 +1273,7 @@ mod additional_tests {
             let mut vote_req = create_test_request_vote();
             vote_req.term = i;
             network
-                .send_request_vote_request(sender.clone(), receiver.clone(), vote_req)
+                .send_request_vote_request(&sender, &receiver, vote_req)
                 .await
                 .unwrap();
         }
@@ -1297,7 +1297,7 @@ mod additional_tests {
         let mut vote_req = create_test_request_vote();
         vote_req.term = 3;
         network
-            .send_request_vote_request(sender, receiver, vote_req)
+            .send_request_vote_request(&sender,& receiver, vote_req)
             .await
             .unwrap();
 
@@ -1336,7 +1336,7 @@ mod additional_tests {
             req.term = term;
             req.candidate_id = sender1.clone(); // 关键修复：设置正确的发送者ID
             network1
-                .send_request_vote_request(sender1.clone(), receiver.clone(), req)
+                .send_request_vote_request(&sender1, &receiver, req)
                 .await
                 .unwrap();
         }
@@ -1347,7 +1347,7 @@ mod additional_tests {
             req.term = term;
             req.candidate_id = sender2.clone(); // 关键修复：设置正确的发送者ID
             network2
-                .send_request_vote_request(sender2.clone(), receiver.clone(), req)
+                .send_request_vote_request(&sender2, &receiver, req)
                 .await
                 .unwrap();
         }
@@ -1397,7 +1397,7 @@ mod additional_tests {
                 let mut req = create_test_request_vote();
                 req.term = i as u64;
                 network
-                    .send_request_vote_request(sender.clone(), receiver.clone(), req)
+                    .send_request_vote_request(&sender, &receiver, req)
                     .await
                     .unwrap();
             }

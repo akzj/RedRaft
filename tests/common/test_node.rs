@@ -1,6 +1,6 @@
 // test_node.rs
 use crate::common::test_statemachine::TestStateMachine;
-use raft_lite::message::LogEntry;
+use raft_lite::message::{HardState, LogEntry};
 use raft_lite::mutl_raft_driver::{HandleEventTrait, MultiRaftDriver, Timers};
 use raft_lite::tests::mock::mock_network::{MockNetworkHub, MockNodeNetwork, NetworkEvent};
 use raft_lite::tests::mock::mock_storage::{MockStorage, SnapshotStorage};
@@ -111,7 +111,7 @@ impl TestNode {
             let cluster_config =
                 raft_lite::cluster_config::ClusterConfig::with_learners(voters, learners, 0);
             storage
-                .save_cluster_config(id.clone(), cluster_config)
+                .save_cluster_config(&id, cluster_config)
                 .await
                 .expect("save_cluster_config before RaftState::new");
         }
@@ -178,7 +178,7 @@ impl TestNode {
             feedback_window_size: 10,
             // 超极速智能超时配置 - 最激进的快速超时和重发
             base_request_timeout: Duration::from_millis(25), // 基础超时25ms
-            max_request_timeout: Duration::from_millis(100), // 最大超时100ms
+            max_request_timeout: Duration::from_millis(500), // 最大超时500ms
             min_request_timeout: Duration::from_millis(10),  // 最小超时10ms
             timeout_response_factor: 2.0,                    // 响应时间因子2.0倍
         };
@@ -202,7 +202,7 @@ impl TestNode {
             let election_timeout =
                 std::time::Duration::from_millis(500 + rand::random::<u64>() % 500); // 500-1000ms
             let timer_id = inner.timers.add_timer(
-                inner.id.clone(),
+                &inner.id,
                 raft_lite::Event::ElectionTimeout,
                 election_timeout,
             );
@@ -295,8 +295,8 @@ impl HandleEventTrait for TestNode {
 impl Network for TestNodeInner {
     async fn send_request_vote_request(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: raft_lite::message::RequestVoteRequest,
     ) -> RpcResult<()> {
         info!(
@@ -305,7 +305,7 @@ impl Network for TestNodeInner {
         );
         let result = self
             .network
-            .send_request_vote_request(from.clone(), target.clone(), args)
+            .send_request_vote_request(from, target, args)
             .await;
         if result.is_ok() {
             // info!(
@@ -323,8 +323,8 @@ impl Network for TestNodeInner {
 
     async fn send_request_vote_response(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: raft_lite::message::RequestVoteResponse,
     ) -> RpcResult<()> {
         info!(
@@ -338,8 +338,8 @@ impl Network for TestNodeInner {
 
     async fn send_append_entries_request(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: raft_lite::message::AppendEntriesRequest,
     ) -> RpcResult<()> {
         self.network
@@ -349,8 +349,8 @@ impl Network for TestNodeInner {
 
     async fn send_append_entries_response(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: raft_lite::message::AppendEntriesResponse,
     ) -> RpcResult<()> {
         self.network
@@ -360,8 +360,8 @@ impl Network for TestNodeInner {
 
     async fn send_install_snapshot_request(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: raft_lite::message::InstallSnapshotRequest,
     ) -> RpcResult<()> {
         self.network
@@ -371,8 +371,8 @@ impl Network for TestNodeInner {
 
     async fn send_install_snapshot_response(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: raft_lite::message::InstallSnapshotResponse,
     ) -> RpcResult<()> {
         self.network
@@ -384,26 +384,21 @@ impl Network for TestNodeInner {
 // Implement Storage trait (delegate to MockStorage)
 #[async_trait::async_trait]
 impl Storage for TestNodeInner {
-    async fn save_hard_state(
-        &self,
-        from: RaftId,
-        term: u64,
-        voted_for: Option<RaftId>,
-    ) -> StorageResult<()> {
-        self.storage.save_hard_state(from, term, voted_for).await
+    async fn save_hard_state(&self, from: &RaftId, hard_state: HardState) -> StorageResult<()> {
+        self.storage.save_hard_state(from, hard_state).await
     }
 
-    async fn load_hard_state(&self, from: RaftId) -> StorageResult<Option<(u64, Option<RaftId>)>> {
+    async fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<HardState>> {
         self.storage.load_hard_state(from).await
     }
 
-    async fn append_log_entries(&self, from: RaftId, entries: &[LogEntry]) -> StorageResult<()> {
+    async fn append_log_entries(&self, from: &RaftId, entries: &[LogEntry]) -> StorageResult<()> {
         self.storage.append_log_entries(from, entries).await
     }
 
     async fn get_log_entries(
         &self,
-        from: RaftId,
+        from: &RaftId,
         low: u64,
         high: u64,
     ) -> StorageResult<Vec<LogEntry>> {
@@ -412,32 +407,32 @@ impl Storage for TestNodeInner {
 
     async fn get_log_entries_term(
         &self,
-        from: RaftId,
+        from: &RaftId,
         low: u64,
         high: u64,
     ) -> StorageResult<Vec<(u64, u64)>> {
         self.storage.get_log_entries_term(from, low, high).await
     }
 
-    async fn truncate_log_suffix(&self, from: RaftId, idx: u64) -> StorageResult<()> {
+    async fn truncate_log_suffix(&self, from: &RaftId, idx: u64) -> StorageResult<()> {
         self.storage.truncate_log_suffix(from, idx).await
     }
 
-    async fn truncate_log_prefix(&self, from: RaftId, idx: u64) -> StorageResult<()> {
+    async fn truncate_log_prefix(&self, from: &RaftId, idx: u64) -> StorageResult<()> {
         self.storage.truncate_log_prefix(from, idx).await
     }
 
-    async fn get_last_log_index(&self, from: RaftId) -> StorageResult<(u64, u64)> {
+    async fn get_last_log_index(&self, from: &RaftId) -> StorageResult<(u64, u64)> {
         self.storage.get_last_log_index(from).await
     }
 
-    async fn get_log_term(&self, from: RaftId, idx: u64) -> StorageResult<u64> {
+    async fn get_log_term(&self, from: &RaftId, idx: u64) -> StorageResult<u64> {
         self.storage.get_log_term(from, idx).await
     }
 
     async fn save_snapshot(
         &self,
-        from: RaftId,
+        from: &RaftId,
         snap: raft_lite::message::Snapshot,
     ) -> StorageResult<()> {
         self.storage.save_snapshot(from, snap).await
@@ -445,12 +440,12 @@ impl Storage for TestNodeInner {
 
     async fn load_snapshot(
         &self,
-        from: RaftId,
+        from: &RaftId,
     ) -> StorageResult<Option<raft_lite::message::Snapshot>> {
         self.storage.load_snapshot(from).await
     }
 
-    async fn create_snapshot(&self, from: RaftId) -> StorageResult<(u64, u64)> {
+    async fn create_snapshot(&self, from: &RaftId) -> StorageResult<(u64, u64)> {
         // 使用TestStateMachine生成快照数据，它会返回已应用的索引、任期和数据
         let (snapshot_index, snapshot_term, snapshot_data) =
             match self.state_machine.create_snapshot(from.clone()) {
@@ -463,7 +458,7 @@ impl Storage for TestNodeInner {
             };
 
         // 获取当前集群配置
-        let config = self.storage.load_cluster_config(from.clone()).await?;
+        let config = self.storage.load_cluster_config(from).await?;
 
         // 创建快照对象
         let snapshot = raft_lite::message::Snapshot {
@@ -481,7 +476,7 @@ impl Storage for TestNodeInner {
 
     async fn save_cluster_config(
         &self,
-        from: RaftId,
+        from: &RaftId,
         conf: raft_lite::cluster_config::ClusterConfig,
     ) -> StorageResult<()> {
         self.storage.save_cluster_config(from, conf).await
@@ -489,40 +484,40 @@ impl Storage for TestNodeInner {
 
     async fn load_cluster_config(
         &self,
-        from: RaftId,
+        from: &RaftId,
     ) -> StorageResult<raft_lite::cluster_config::ClusterConfig> {
         self.storage.load_cluster_config(from).await
     }
 }
 
 impl TimerService for TestNodeInner {
-    fn del_timer(&self, _from: RaftId, timer_id: TimerId) {
+    fn del_timer(&self, _from: &RaftId, timer_id: TimerId) {
         self.timers.del_timer(timer_id);
     }
 
-    fn set_leader_transfer_timer(&self, from: RaftId, _dur: Duration) -> TimerId {
+    fn set_leader_transfer_timer(&self, from: &RaftId, dur: Duration) -> TimerId {
         self.timers
-            .add_timer(from, raft_lite::Event::LeaderTransferTimeout, _dur)
+            .add_timer(from, raft_lite::Event::LeaderTransferTimeout, dur)
     }
 
-    fn set_election_timer(&self, from: RaftId, _dur: Duration) -> TimerId {
+    fn set_election_timer(&self, from: &RaftId, dur: Duration) -> TimerId {
         self.timers
-            .add_timer(from, raft_lite::Event::ElectionTimeout, _dur)
+            .add_timer(from, raft_lite::Event::ElectionTimeout, dur)
     }
 
-    fn set_heartbeat_timer(&self, from: RaftId, _dur: Duration) -> TimerId {
+    fn set_heartbeat_timer(&self, from: &RaftId, dur: Duration) -> TimerId {
         self.timers
-            .add_timer(from, raft_lite::Event::HeartbeatTimeout, _dur)
+            .add_timer(from, raft_lite::Event::HeartbeatTimeout, dur)
     }
 
-    fn set_apply_timer(&self, from: RaftId, _dur: Duration) -> TimerId {
+    fn set_apply_timer(&self, from: &RaftId, dur: Duration) -> TimerId {
         self.timers
-            .add_timer(from, raft_lite::Event::ApplyLogTimeout, _dur)
+            .add_timer(from, raft_lite::Event::ApplyLogTimeout, dur)
     }
 
-    fn set_config_change_timer(&self, from: RaftId, _dur: Duration) -> TimerId {
+    fn set_config_change_timer(&self, from: &RaftId, dur: Duration) -> TimerId {
         self.timers
-            .add_timer(from, raft_lite::Event::ConfigChangeTimeout, _dur)
+            .add_timer(from, raft_lite::Event::ConfigChangeTimeout, dur)
     }
 }
 
@@ -530,7 +525,7 @@ impl TimerService for TestNodeInner {
 impl RaftCallbacks for TestNodeInner {
     async fn client_response(
         &self,
-        _from: RaftId,
+        _from: &RaftId,
         _request_id: RequestId,
         _result: raft_lite::traits::ClientResult<u64>,
     ) -> raft_lite::traits::ClientResult<()> {
@@ -539,7 +534,7 @@ impl RaftCallbacks for TestNodeInner {
 
     async fn state_changed(
         &self,
-        _from: RaftId,
+        _from: &RaftId,
         _role: raft_lite::Role,
     ) -> Result<(), raft_lite::error::StateChangeError> {
         Ok(())
@@ -547,7 +542,7 @@ impl RaftCallbacks for TestNodeInner {
 
     async fn apply_command(
         &self,
-        from: RaftId,
+        from: &RaftId,
         index: u64,
         term: u64,
         cmd: raft_lite::Command,
@@ -559,7 +554,7 @@ impl RaftCallbacks for TestNodeInner {
 
     async fn process_snapshot(
         &self,
-        from: RaftId,
+        from: &RaftId,
         index: u64,
         term: u64,
         data: Vec<u8>,
@@ -567,12 +562,12 @@ impl RaftCallbacks for TestNodeInner {
         request_id: RequestId,
     ) -> raft_lite::traits::SnapshotResult<()> {
         self.state_machine
-            .install_snapshot(from, index, term, data, request_id)
+            .install_snapshot(from.clone(), index, term, data, request_id)
     }
 
     async fn node_removed(
         &self,
-        node_id: RaftId,
+        node_id: &RaftId,
     ) -> Result<(), raft_lite::error::StateChangeError> {
         warn!("Node removed: {}", node_id);
         self.remove_node.notify_one();

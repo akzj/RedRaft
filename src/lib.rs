@@ -285,8 +285,8 @@ impl RaftState {
     /// 初始化状态
     pub async fn new(options: RaftStateOptions, callbacks: Arc<dyn RaftCallbacks>) -> Result<Self> {
         // 从回调加载持久化状态
-        let (current_term, voted_for) = match callbacks.load_hard_state(options.id.clone()).await {
-            Ok(Some((term, voted_for))) => (term, voted_for),
+        let (current_term, voted_for) = match callbacks.load_hard_state(&options.id).await {
+            Ok(Some(hard_state)) => (hard_state.term, hard_state.voted_for),
             Ok(None) => (0, None), // 如果没有持久化状态，则初始化为0
             Err(err) => {
                 // 加载失败时也初始化为0
@@ -295,7 +295,7 @@ impl RaftState {
             }
         };
 
-        let loaded_config = match callbacks.load_cluster_config(options.id.clone()).await {
+        let loaded_config = match callbacks.load_cluster_config(&options.id).await {
             Ok(conf) => conf,
             Err(err) => {
                 error!("Failed to load cluster config: {}", err);
@@ -304,7 +304,7 @@ impl RaftState {
             }
         };
 
-        let snap = match callbacks.load_snapshot(options.id.clone()).await {
+        let snap = match callbacks.load_snapshot(&options.id).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 info!("Node {} No snapshot found", options.id);
@@ -326,14 +326,14 @@ impl RaftState {
             + rand::random::<u64>()
                 % (options.election_timeout_max - options.election_timeout_min + 1);
 
-        let (last_log_index, last_log_term) =
-            match callbacks.get_last_log_index(options.id.clone()).await {
-                Ok((index, term)) => (index, term),
-                Err(err) => {
-                    error!("Failed to get last log index: {}", err);
-                    return Err(RaftError::Storage(err).into());
-                }
-            };
+        let (last_log_index, last_log_term) = match callbacks.get_last_log_index(&options.id).await
+        {
+            Ok((index, term)) => (index, term),
+            Err(err) => {
+                error!("Failed to get last log index: {}", err);
+                return Err(RaftError::Storage(err).into());
+            }
+        };
 
         Ok(RaftState {
             schedule_snapshot_probe_interval: options.schedule_snapshot_probe_interval,
@@ -444,11 +444,13 @@ impl RaftState {
     }
     async fn handle_election_timeout(&mut self) {
         if self.role == Role::Leader {
+            info!(target: "raft", "Node {} is the leader and will not start a new election", self.id);
             return; // Leader 不处理选举超时
         }
 
         // Learner 不参与选举，只接收日志复制
         if !self.config.voters_contains(&self.id) {
+            warn!("Node {} is a Learner and cannot start an election", self.id);
             return; // Learner 不处理选举超时
         }
 
@@ -468,7 +470,14 @@ impl RaftState {
             .error_handler
             .handle_void(
                 self.callbacks
-                    .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
+                    .save_hard_state(
+                        &self.id,
+                        HardState {
+                            raft_id: self.id.clone(),
+                            term: self.current_term,
+                            voted_for: self.voted_for.clone(),
+                        },
+                    )
                     .await,
                 "save_hard_state",
                 None,
@@ -507,7 +516,7 @@ impl RaftState {
         // 但根据 get_effective_voters 的实现，这里应该是指 voters
         for peer in self.config.get_effective_voters() {
             if *peer != self.id {
-                let target = peer.clone();
+                let target = peer;
                 let args = req.clone();
 
                 // handle 会根据错误 severity 记录日志，我们不需要在这里额外处理 None
@@ -515,7 +524,7 @@ impl RaftState {
                     .error_handler // <--- 添加这行来处理发送结果（虽然通常忽略）
                     .handle(
                         self.callbacks
-                            .send_request_vote_request(self.id.clone(), target.clone(), args)
+                            .send_request_vote_request(&self.id, &target, args)
                             .await,
                         "send_request_vote_request",
                         Some(&target),
@@ -537,7 +546,7 @@ impl RaftState {
             .error_handler
             .handle_void(
                 self.callbacks
-                    .state_changed(self.id.clone(), Role::Candidate)
+                    .state_changed(&self.id, Role::Candidate)
                     .await,
                 "state_changed",
                 None,
@@ -571,7 +580,14 @@ impl RaftState {
                 .error_handler // 使用统一错误处理
                 .handle_void(
                     self.callbacks
-                        .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
+                        .save_hard_state(
+                            &self.id,
+                            HardState {
+                                raft_id: self.id.clone(),
+                                term: self.current_term,
+                                voted_for: self.voted_for.clone(),
+                            },
+                        )
                         .await,
                     "save_hard_state",
                     None,
@@ -581,9 +597,7 @@ impl RaftState {
             let _ = self
                 .error_handler
                 .handle_void(
-                    self.callbacks
-                        .state_changed(self.id.clone(), Role::Follower)
-                        .await,
+                    self.callbacks.state_changed(&self.id, Role::Follower).await,
                     "state_changed",
                     None,
                 )
@@ -625,9 +639,12 @@ impl RaftState {
                     .handle_void(
                         self.callbacks
                             .save_hard_state(
-                                self.id.clone(),
-                                self.current_term,
-                                self.voted_for.clone(),
+                                &self.id,
+                                HardState {
+                                    raft_id: self.id.clone(),
+                                    term: self.current_term,
+                                    voted_for: self.voted_for.clone(),
+                                },
                             )
                             .await,
                         "save_hard_state",
@@ -665,7 +682,7 @@ impl RaftState {
             .error_handler
             .handle(
                 self.callbacks
-                    .send_request_vote_response(self.id.clone(), request.candidate_id.clone(), resp)
+                    .send_request_vote_response(&self.id, &request.candidate_id, resp)
                     .await,
                 "send_request_vote_response",
                 Some(&request.candidate_id), // 添加目标节点信息到错误日志
@@ -717,7 +734,14 @@ impl RaftState {
                 .error_handler
                 .handle_void(
                     self.callbacks
-                        .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
+                        .save_hard_state(
+                            &self.id,
+                            HardState {
+                                raft_id: self.id.clone(),
+                                term: self.current_term,
+                                voted_for: self.voted_for.clone(),
+                            },
+                        )
                         .await,
                     "save_hard_state",
                     None,
@@ -727,9 +751,7 @@ impl RaftState {
             let _ = self
                 .error_handler
                 .handle_void(
-                    self.callbacks
-                        .state_changed(self.id.clone(), Role::Follower)
-                        .await,
+                    self.callbacks.state_changed(&self.id, Role::Follower).await,
                     "state_changed",
                     None,
                 )
@@ -771,12 +793,12 @@ impl RaftState {
     // 启动心跳和日志应用定时器
     async fn reset_heartbeat_timer(&mut self) {
         if let Some(timer_id) = self.heartbeat_interval_timer_id {
-            self.callbacks.del_timer(self.id.clone(), timer_id);
+            self.callbacks.del_timer(&self.id, timer_id);
         }
 
         self.heartbeat_interval_timer_id = Some(
             self.callbacks
-                .set_heartbeat_timer(self.id.clone(), self.heartbeat_interval),
+                .set_heartbeat_timer(&self.id, self.heartbeat_interval),
         );
     }
 
@@ -813,11 +835,7 @@ impl RaftState {
 
         self.reset_heartbeat_timer().await;
 
-        if let Err(err) = self
-            .callbacks
-            .state_changed(self.id.clone(), Role::Leader)
-            .await
-        {
+        if let Err(err) = self.callbacks.state_changed(&self.id, Role::Leader).await {
             log::error!(
                 "Failed to change state to Leader for node {}: {}",
                 self.id,
@@ -839,12 +857,12 @@ impl RaftState {
         self.election_timeout = Duration::from_millis(new_timeout);
 
         if let Some(timer_id) = self.election_timer {
-            self.callbacks.del_timer(self.id.clone(), timer_id);
+            self.callbacks.del_timer(&self.id, timer_id);
         }
 
         self.election_timer = Some(
             self.callbacks
-                .set_election_timer(self.id.clone(), self.election_timeout),
+                .set_election_timer(&self.id, self.election_timeout),
         );
     }
 
@@ -923,9 +941,7 @@ impl RaftState {
                 match self
                     .error_handler
                     .handle(
-                        self.callbacks
-                            .get_log_term(self.id.clone(), prev_log_index)
-                            .await,
+                        self.callbacks.get_log_term(&self.id, prev_log_index).await,
                         "get_log_term",
                         Some(&peer),
                     )
@@ -943,7 +959,7 @@ impl RaftState {
                 .error_handler
                 .handle(
                     self.callbacks
-                        .get_log_entries(self.id.clone(), next_idx, high)
+                        .get_log_entries(&self.id, next_idx, high)
                         .await,
                     "get_log_entries",
                     Some(&peer),
@@ -992,7 +1008,7 @@ impl RaftState {
 
             if let Err(err) = self
                 .callbacks
-                .send_append_entries_request(self.id.clone(), peer.clone(), req)
+                .send_append_entries_request(&self.id, &peer, req)
                 .await
             {
                 warn!(
@@ -1057,7 +1073,7 @@ impl RaftState {
                 self.error_handler
                     .handle(
                         self.callbacks
-                            .get_log_term(self.id.clone(), request.prev_log_index)
+                            .get_log_term(&self.id, request.prev_log_index)
                             .await,
                         "get_log_term",
                         Some(&request.leader_id), // 添加来源信息到错误日志
@@ -1086,11 +1102,7 @@ impl RaftState {
                 .error_handler // 使用 error_handler 处理发送响应的错误
                 .handle(
                     self.callbacks
-                        .send_append_entries_response(
-                            self.id.clone(),
-                            request.leader_id.clone(),
-                            resp,
-                        )
+                        .send_append_entries_response(&self.id, &request.leader_id, resp)
                         .await,
                     "send_append_entries_response",
                     Some(&request.leader_id),
@@ -1124,7 +1136,14 @@ impl RaftState {
                 .error_handler
                 .handle_void(
                     self.callbacks
-                        .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
+                        .save_hard_state(
+                            &self.id,
+                            HardState {
+                                raft_id: self.id.clone(),
+                                term: self.current_term,
+                                voted_for: self.voted_for.clone(),
+                            },
+                        )
                         .await,
                     "save_hard_state",
                     None,
@@ -1138,7 +1157,14 @@ impl RaftState {
                 .error_handler
                 .handle_void(
                     self.callbacks
-                        .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
+                        .save_hard_state(
+                            &self.id,
+                            HardState {
+                                raft_id: self.id.clone(),
+                                term: self.current_term,
+                                voted_for: self.voted_for.clone(),
+                            },
+                        )
                         .await,
                     "save_hard_state",
                     None,
@@ -1162,7 +1188,7 @@ impl RaftState {
                 .error_handler
                 .handle(
                     self.callbacks
-                        .get_log_term(self.id.clone(), request.prev_log_index)
+                        .get_log_term(&self.id, request.prev_log_index)
                         .await,
                     "get_log_term",
                     Some(&request.leader_id),
@@ -1193,7 +1219,7 @@ impl RaftState {
                     Some(self.last_snapshot_term)
                 } else {
                     self.callbacks
-                        .get_log_term(self.id.clone(), request.prev_log_index)
+                        .get_log_term(&self.id, request.prev_log_index)
                         .await
                         .ok()
                 }
@@ -1215,7 +1241,7 @@ impl RaftState {
                 self.error_handler
                     .handle(
                         self.callbacks
-                            .get_log_term(self.id.clone(), request.prev_log_index)
+                            .get_log_term(&self.id, request.prev_log_index)
                             .await,
                         "get_log_term",
                         Some(&request.leader_id),
@@ -1236,11 +1262,7 @@ impl RaftState {
                 .error_handler
                 .handle(
                     self.callbacks
-                        .send_append_entries_response(
-                            self.id.clone(),
-                            request.leader_id.clone(),
-                            resp,
-                        )
+                        .send_append_entries_response(&self.id, &request.leader_id, resp)
                         .await,
                     "send_append_entries_response",
                     Some(&request.leader_id),
@@ -1281,11 +1303,7 @@ impl RaftState {
                     .error_handler
                     .handle(
                         self.callbacks
-                            .send_append_entries_response(
-                                self.id.clone(),
-                                request.leader_id.clone(),
-                                resp,
-                            )
+                            .send_append_entries_response(&self.id, &request.leader_id, resp)
                             .await,
                         "send_append_entries_response",
                         Some(&request.leader_id),
@@ -1308,7 +1326,7 @@ impl RaftState {
                 .error_handler
                 .handle_void(
                     self.callbacks
-                        .truncate_log_suffix(self.id.clone(), truncate_from_index)
+                        .truncate_log_suffix(&self.id, truncate_from_index)
                         .await,
                     "truncate_log_suffix",
                     None,
@@ -1364,7 +1382,7 @@ impl RaftState {
                     .error_handler
                     .handle_void(
                         self.callbacks
-                            .append_log_entries(self.id.clone(), &request.entries)
+                            .append_log_entries(&self.id, &request.entries)
                             .await,
                         "append_log_entries",
                         None,
@@ -1423,7 +1441,7 @@ impl RaftState {
             .error_handler
             .handle(
                 self.callbacks
-                    .send_append_entries_response(self.id.clone(), request.leader_id.clone(), resp)
+                    .send_append_entries_response(&self.id, &request.leader_id, resp)
                     .await,
                 "send_append_entries_response",
                 Some(&request.leader_id),
@@ -1445,6 +1463,12 @@ impl RaftState {
         peer: RaftId,
         response: AppendEntriesResponse,
     ) {
+        self.pipeline.record_append_entries_response_feedback(
+            &peer,
+            response.request_id,
+            response.success,
+        );
+
         // 非Leader角色不处理AppendEntries响应
         if self.role != Role::Leader {
             return;
@@ -1471,7 +1495,14 @@ impl RaftState {
                 .error_handler
                 .handle_void(
                     self.callbacks
-                        .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
+                        .save_hard_state(
+                            &self.id,
+                            HardState {
+                                raft_id: self.id.clone(),
+                                term: self.current_term,
+                                voted_for: self.voted_for.clone(),
+                            },
+                        )
                         .await,
                     "save_hard_state",
                     None,
@@ -1482,9 +1513,7 @@ impl RaftState {
             let _ = self
                 .error_handler
                 .handle_void(
-                    self.callbacks
-                        .state_changed(self.id.clone(), Role::Follower)
-                        .await,
+                    self.callbacks.state_changed(&self.id, Role::Follower).await,
                     "state_changed",
                     None,
                 )
@@ -1498,13 +1527,6 @@ impl RaftState {
             debug!(
                 "Leader {} received AppendEntries response from {}: req_id={}, success={}, matched_index={}",
                 self.id, peer, response.request_id, response.success, response.matched_index
-            );
-
-            // 记录反馈（成功或失败）
-            self.pipeline.record_append_entries_response_feedback(
-                &peer,
-                response.request_id,
-                response.success,
             );
 
             // 处理成功响应
@@ -1614,10 +1636,7 @@ impl RaftState {
 
                 // 第一遍：查找冲突任期的最后一个索引
                 for i in (1..=start_index).rev() {
-                    match storage
-                        .get_log_entries_term(self.id.clone(), i, i + 1)
-                        .await
-                    {
+                    match storage.get_log_entries_term(&self.id, i, i + 1).await {
                         Ok(entries) if !entries.is_empty() => {
                             info!(
                                 "Checking index {} with term {} for peer {}",
@@ -1659,7 +1678,7 @@ impl RaftState {
 
                 // 第二遍：查找第一个任期大于冲突任期的索引
                 for i in (1..=start_index).rev() {
-                    match storage.get_log_entries(self.id.clone(), i, i + 1).await {
+                    match storage.get_log_entries(&self.id, i, i + 1).await {
                         Ok(entries) if !entries.is_empty() => {
                             if entries[0].term > conflict_term {
                                 info!(
@@ -1739,7 +1758,7 @@ impl RaftState {
 
         if let Err(err) = self
             .callbacks
-            .send_request_vote_request(self.id.clone(), target.clone(), req)
+            .send_request_vote_request(&self.id, &target, req)
             .await
         {
             log::error!(
@@ -1754,7 +1773,7 @@ impl RaftState {
             if let Err(err) = self
                 .callbacks
                 .client_response(
-                    self.id.clone(),
+                    &self.id,
                     request_id,
                     Ok(0), // 成功代码
                 )
@@ -1774,7 +1793,7 @@ impl RaftState {
 
     // === 快照相关逻辑 ===
     async fn send_snapshot_to(&mut self, target: RaftId) {
-        let snap = match self.callbacks.load_snapshot(self.id.clone()).await {
+        let snap = match self.callbacks.load_snapshot(&self.id).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 error!("没有可用的快照，无法发送");
@@ -1818,7 +1837,7 @@ impl RaftState {
 
         if let Err(err) = self
             .callbacks
-            .send_install_snapshot_request(self.id.clone(), target, req)
+            .send_install_snapshot_request(&self.id, &target, req)
             .await
         {
             log::error!(
@@ -1846,11 +1865,7 @@ impl RaftState {
         let log_term = if snap.index <= self.last_snapshot_index {
             self.last_snapshot_term
         } else {
-            match self
-                .callbacks
-                .get_log_term(self.id.clone(), snap.index)
-                .await
-            {
+            match self.callbacks.get_log_term(&self.id, snap.index).await {
                 Ok(term) => term,
                 Err(_) => return false,
             }
@@ -1860,17 +1875,17 @@ impl RaftState {
     }
 
     // 发送探测消息检查快照安装状态（Leader端）
-    async fn probe_snapshot_status(&mut self, target: RaftId) {
+    async fn probe_snapshot_status(&mut self, target: &RaftId) {
         info!(
             "Probing snapshot status for follower {} at term {}, last_snapshot_index {}",
             target,
             self.current_term,
-            self.follower_last_snapshot_index.get(&target).unwrap_or(&0)
+            self.follower_last_snapshot_index.get(target).unwrap_or(&0)
         );
 
         let last_snap_index = self
             .follower_last_snapshot_index
-            .get(&target)
+            .get(target)
             .copied()
             .unwrap_or(0);
 
@@ -1889,10 +1904,10 @@ impl RaftState {
             .error_handler
             .handle(
                 self.callbacks
-                    .send_install_snapshot_request(self.id.clone(), target.clone(), req)
+                    .send_install_snapshot_request(&self.id, target, req)
                     .await,
                 "send_install_snapshot_request",
-                Some(&target),
+                Some(target),
             )
             .await;
     }
@@ -1916,11 +1931,7 @@ impl RaftState {
             self.error_handler
                 .handle_void(
                     self.callbacks
-                        .send_install_snapshot_response(
-                            self.id.clone(),
-                            request.leader_id.clone(),
-                            resp,
-                        )
+                        .send_install_snapshot_response(&self.id, &request.leader_id, resp)
                         .await,
                     "send_install_snapshot_reply",
                     Some(&request.leader_id),
@@ -1971,11 +1982,7 @@ impl RaftState {
             self.error_handler
                 .handle_void(
                     self.callbacks
-                        .send_install_snapshot_response(
-                            self.id.clone(),
-                            request.leader_id.clone(),
-                            resp,
-                        )
+                        .send_install_snapshot_response(&self.id, &request.leader_id, resp)
                         .await,
                     "send_install_snapshot_reply",
                     Some(&request.leader_id),
@@ -1995,11 +2002,7 @@ impl RaftState {
             self.error_handler
                 .handle_void(
                     self.callbacks
-                        .send_install_snapshot_response(
-                            self.id.clone(),
-                            request.leader_id.clone(),
-                            resp,
-                        )
+                        .send_install_snapshot_response(&self.id, &request.leader_id, resp)
                         .await,
                     "send_install_snapshot_reply",
                     Some(&request.leader_id),
@@ -2021,11 +2024,7 @@ impl RaftState {
             self.error_handler
                 .handle_void(
                     self.callbacks
-                        .send_install_snapshot_response(
-                            self.id.clone(),
-                            request.leader_id.clone(),
-                            resp,
-                        )
+                        .send_install_snapshot_response(&self.id, &request.leader_id, resp)
                         .await,
                     "send_install_snapshot_reply",
                     Some(&request.leader_id),
@@ -2047,11 +2046,7 @@ impl RaftState {
         self.error_handler
             .handle_void(
                 self.callbacks
-                    .send_install_snapshot_response(
-                        self.id.clone(),
-                        request.leader_id.clone(),
-                        resp,
-                    )
+                    .send_install_snapshot_response(&self.id, &request.leader_id, resp)
                     .await,
                 "send_install_snapshot_reply",
                 Some(&request.leader_id),
@@ -2064,7 +2059,7 @@ impl RaftState {
             .handle_void(
                 self.callbacks
                     .process_snapshot(
-                        self.id.clone(),
+                        &self.id,
                         request.last_included_index,
                         request.last_included_term,
                         request.data,
@@ -2136,9 +2131,12 @@ impl RaftState {
                         .handle_void(
                             self.callbacks
                                 .save_hard_state(
-                                    self.id.clone(),
-                                    self.current_term,
-                                    self.voted_for.clone(),
+                                    &self.id,
+                                    HardState {
+                                        raft_id: self.id.clone(),
+                                        term: self.current_term,
+                                        voted_for: self.voted_for.clone(),
+                                    },
                                 )
                                 .await,
                             "save_hard_state",
@@ -2150,9 +2148,7 @@ impl RaftState {
                     let _ = self
                         .error_handler
                         .handle_void(
-                            self.callbacks
-                                .state_changed(self.id.clone(), self.role)
-                                .await,
+                            self.callbacks.state_changed(&self.id, self.role).await,
                             "state_changed",
                             None,
                         )
@@ -2164,7 +2160,7 @@ impl RaftState {
                     .error_handler
                     .handle_void(
                         self.callbacks
-                            .save_cluster_config(self.id.clone(), self.config.clone())
+                            .save_cluster_config(&self.id, self.config.clone())
                             .await,
                         "save_cluster_config",
                         None,
@@ -2194,7 +2190,14 @@ impl RaftState {
             self.error_handler
                 .handle_void(
                     self.callbacks
-                        .save_hard_state(self.id.clone(), self.current_term, self.voted_for.clone())
+                        .save_hard_state(
+                            &self.id,
+                            HardState {
+                                raft_id: self.id.clone(),
+                                term: self.current_term,
+                                voted_for: self.voted_for.clone(),
+                            },
+                        )
                         .await,
                     "save_hard_state",
                     None,
@@ -2202,9 +2205,7 @@ impl RaftState {
                 .await;
             self.error_handler
                 .handle_void(
-                    self.callbacks
-                        .state_changed(self.id.clone(), Role::Follower)
-                        .await,
+                    self.callbacks.state_changed(&self.id, Role::Follower).await,
                     "state_changed",
                     None,
                 )
@@ -2302,7 +2303,7 @@ impl RaftState {
 
         // 执行每个到期的探测
         for peer in pending_peers {
-            self.probe_snapshot_status(peer.clone()).await;
+            self.probe_snapshot_status(&peer).await;
             // 更新探测计划状态
             self.extend_snapshot_probe(&peer);
         }
@@ -2331,7 +2332,7 @@ impl RaftState {
                 .handle_void(
                     self.callbacks
                         .client_response(
-                            self.id.clone(),
+                            &self.id,
                             request_id,
                             Err(ClientError::NotLeader(self.leader_id.clone())),
                         )
@@ -2349,7 +2350,7 @@ impl RaftState {
                 self.error_handler
                     .handle_void(
                         self.callbacks
-                            .client_response(self.id.clone(), request_id, Ok(index))
+                            .client_response(&self.id, request_id, Ok(index))
                             .await,
                         "client_response",
                         None,
@@ -2380,7 +2381,7 @@ impl RaftState {
             .error_handler
             .handle_void(
                 self.callbacks
-                    .append_log_entries(self.id.clone(), &[new_entry.clone()])
+                    .append_log_entries(&self.id, &[new_entry.clone()])
                     .await,
                 "append_log_entries",
                 None,
@@ -2395,7 +2396,7 @@ impl RaftState {
                 .handle_void(
                     self.callbacks
                         .client_response(
-                            self.id.clone(),
+                            &self.id,
                             request_id,
                             Err(ClientError::Internal(anyhow::anyhow!(
                                 "failed to append log"
@@ -2457,7 +2458,7 @@ impl RaftState {
 
         let entries = match self
             .callbacks
-            .get_log_entries(self.id.clone(), start, end + 1)
+            .get_log_entries(&self.id, start, end + 1)
             .await
         {
             Ok(entries) => entries,
@@ -2585,26 +2586,26 @@ impl RaftState {
 
                             // 清理定时器
                             if let Some(timer_id) = self.election_timer.take() {
-                                self.callbacks.del_timer(self.id.clone(), timer_id);
+                                self.callbacks.del_timer(&self.id, timer_id);
                             }
                             if let Some(timer_id) = self.heartbeat_interval_timer_id.take() {
-                                self.callbacks.del_timer(self.id.clone(), timer_id);
+                                self.callbacks.del_timer(&self.id, timer_id);
                             }
                             if let Some(timer_id) = self.apply_interval_timer.take() {
-                                self.callbacks.del_timer(self.id.clone(), timer_id);
+                                self.callbacks.del_timer(&self.id, timer_id);
                             }
                             if let Some(timer_id) = self.config_change_timer.take() {
-                                self.callbacks.del_timer(self.id.clone(), timer_id);
+                                self.callbacks.del_timer(&self.id, timer_id);
                             }
                             if let Some(timer_id) = self.leader_transfer_timer.take() {
-                                self.callbacks.del_timer(self.id.clone(), timer_id);
+                                self.callbacks.del_timer(&self.id, timer_id);
                             }
 
                             // 通知业务层节点已被删除
                             let _ = self
                                 .error_handler
                                 .handle_void(
-                                    self.callbacks.node_removed(self.id.clone()).await,
+                                    self.callbacks.node_removed(&self.id).await,
                                     "node_removed",
                                     None,
                                 )
@@ -2619,7 +2620,7 @@ impl RaftState {
                         .error_handler
                         .handle_void(
                             self.callbacks
-                                .save_cluster_config(self.id.clone(), self.config.clone())
+                                .save_cluster_config(&self.id, self.config.clone())
                                 .await,
                             "save_cluster_config",
                             None,
@@ -2655,7 +2656,7 @@ impl RaftState {
                 );
                 let _ = self
                     .callbacks
-                    .apply_command(self.id.clone(), entry.index, entry.term, entry.command)
+                    .apply_command(&self.id, entry.index, entry.term, entry.command)
                     .await;
                 self.last_applied = index;
 
@@ -2679,12 +2680,12 @@ impl RaftState {
         };
 
         if let Some(timer) = self.apply_interval_timer {
-            self.callbacks.del_timer(self.id.clone(), timer);
+            self.callbacks.del_timer(&self.id, timer);
         }
 
         self.apply_interval_timer = Some(
             self.callbacks
-                .set_apply_timer(self.id.clone(), self.apply_interval),
+                .set_apply_timer(&self.id, self.apply_interval),
         );
     }
 
@@ -2696,7 +2697,7 @@ impl RaftState {
                 self.error_handler
                     .handle_void(
                         self.callbacks
-                            .client_response(self.id.clone(), *req_id, Ok(log_index))
+                            .client_response(&self.id, *req_id, Ok(log_index))
                             .await,
                         "client_response",
                         None,
@@ -2718,7 +2719,7 @@ impl RaftState {
                 .handle_void(
                     self.callbacks
                         .client_response(
-                            self.id.clone(),
+                            &self.id,
                             request_id,
                             Err(ClientError::NotLeader(self.leader_id.clone())),
                         )
@@ -2736,7 +2737,7 @@ impl RaftState {
                 .handle_void(
                     self.callbacks
                         .client_response(
-                            self.id.clone(),
+                            &self.id,
                             request_id,
                             Err(ClientError::Conflict(anyhow::anyhow!(
                                 "config change in progress"
@@ -2759,7 +2760,7 @@ impl RaftState {
                 .handle_void(
                     self.callbacks
                         .client_response(
-                            self.id.clone(),
+                            &self.id,
                             request_id,
                             Err(ClientError::Internal(anyhow::anyhow!(
                                 "invalid cluster config"
@@ -2781,7 +2782,7 @@ impl RaftState {
                 .handle_void(
                     self.callbacks
                         .client_response(
-                            self.id.clone(),
+                            &self.id,
                             request_id,
                             Err(ClientError::Internal(anyhow::anyhow!(
                                 "Failed to enter joint config: {}",
@@ -2804,7 +2805,7 @@ impl RaftState {
                     .handle_void(
                         self.callbacks
                             .client_response(
-                                self.id.clone(),
+                                &self.id,
                                 request_id,
                                 Err(ClientError::Internal(anyhow::anyhow!(
                                     "failed to serialize config: {}",
@@ -2833,7 +2834,7 @@ impl RaftState {
             .error_handler
             .handle_void(
                 self.callbacks
-                    .append_log_entries(self.id.clone(), &[new_entry.clone()])
+                    .append_log_entries(&self.id, &[new_entry.clone()])
                     .await,
                 "append_log_entries",
                 None,
@@ -2844,7 +2845,7 @@ impl RaftState {
                 .handle_void(
                     self.callbacks
                         .client_response(
-                            self.id.clone(),
+                            &self.id,
                             request_id,
                             Err(ClientError::Internal(anyhow::anyhow!(
                                 "failed to append config log"
@@ -2877,7 +2878,7 @@ impl RaftState {
         // 设置配置变更超时定时器
         self.config_change_timer = Some(
             self.callbacks
-                .set_config_change_timer(self.id.clone(), self.config_change_timeout),
+                .set_config_change_timer(&self.id, self.config_change_timeout),
         );
 
         // 立即同步日志
@@ -2904,7 +2905,7 @@ impl RaftState {
             // 未超时，重新设置定时器
             self.config_change_timer = Some(
                 self.callbacks
-                    .set_config_change_timer(self.id.clone(), self.config_change_timeout),
+                    .set_config_change_timer(&self.id, self.config_change_timeout),
             );
 
             return;
@@ -3113,7 +3114,7 @@ impl RaftState {
             .error_handler
             .handle_void(
                 self.callbacks
-                    .append_log_entries(self.id.clone(), &[exit_entry])
+                    .append_log_entries(&self.id, &[exit_entry])
                     .await,
                 "append_log_entries",
                 None,
@@ -3142,7 +3143,7 @@ impl RaftState {
             .error_handler
             .handle_void(
                 self.callbacks
-                    .save_cluster_config(self.id.clone(), self.config.clone())
+                    .save_cluster_config(&self.id, self.config.clone())
                     .await,
                 "save_cluster_config",
                 None,
@@ -3256,7 +3257,7 @@ impl RaftState {
         self.error_handler
             .handle_void(
                 self.callbacks
-                    .client_response(self.id.clone(), request_id, Err(error))
+                    .client_response(&self.id, request_id, Err(error))
                     .await,
                 "client_response",
                 None,
@@ -3296,9 +3297,7 @@ impl RaftState {
         if !self
             .error_handler
             .handle_void(
-                self.callbacks
-                    .append_log_entries(self.id.clone(), &[entry])
-                    .await,
+                self.callbacks.append_log_entries(&self.id, &[entry]).await,
                 "append_log_entries",
                 None,
             )
@@ -3431,7 +3430,7 @@ impl RaftState {
                 .handle_void(
                     self.callbacks
                         .client_response(
-                            self.id.clone(),
+                            &self.id,
                             request_id,
                             Err(ClientError::NotLeader(self.leader_id.clone())),
                         )
@@ -3448,7 +3447,7 @@ impl RaftState {
                 .handle_void(
                     self.callbacks
                         .client_response(
-                            self.id.clone(),
+                            &self.id,
                             request_id,
                             Err(ClientError::Internal(anyhow::anyhow!(
                                 "leader transfer already in progress"
@@ -3467,7 +3466,7 @@ impl RaftState {
                 .handle_void(
                     self.callbacks
                         .client_response(
-                            self.id.clone(),
+                            &self.id,
                             request_id,
                             Err(ClientError::Internal(anyhow::anyhow!(
                                 "target node not in cluster"
@@ -3486,7 +3485,7 @@ impl RaftState {
                 .handle_void(
                     self.callbacks
                         .client_response(
-                            self.id.clone(),
+                            &self.id,
                             request_id,
                             Err(ClientError::Internal(anyhow::anyhow!(
                                 "cannot transfer to self"
@@ -3512,7 +3511,7 @@ impl RaftState {
 
         self.leader_transfer_timer = Some(
             self.callbacks
-                .set_leader_transfer_timer(self.id.clone(), self.leader_transfer_timeout),
+                .set_leader_transfer_timer(&self.id, self.leader_transfer_timeout),
         );
     }
 
@@ -3525,7 +3524,7 @@ impl RaftState {
             self.last_snapshot_term
         } else {
             self.callbacks
-                .get_log_term(self.id.clone(), prev_log_index)
+                .get_log_term(&self.id, prev_log_index)
                 .await
                 .unwrap_or(0)
         };
@@ -3544,7 +3543,7 @@ impl RaftState {
             .error_handler
             .handle(
                 self.callbacks
-                    .send_append_entries_request(self.id.clone(), target, req)
+                    .send_append_entries_request(&self.id, &target, req)
                     .await,
                 "send_append_entries_request",
                 None,
@@ -3572,11 +3571,7 @@ impl RaftState {
         } else if snapshot_index <= self.last_snapshot_index {
             self.last_snapshot_term
         } else {
-            match self
-                .callbacks
-                .get_log_term(self.id.clone(), snapshot_index)
-                .await
-            {
+            match self.callbacks.get_log_term(&self.id, snapshot_index).await {
                 Ok(term) => term,
                 Err(e) => {
                     error!(
@@ -3595,7 +3590,7 @@ impl RaftState {
         let (snap_index, snap_term) = match self
             .error_handler
             .handle(
-                self.callbacks.create_snapshot(self.id.clone()).await,
+                self.callbacks.create_snapshot(&self.id).await,
                 "create_snapshot",
                 None,
             )
@@ -3623,7 +3618,7 @@ impl RaftState {
         }
 
         // 6. 读取快照数据（业务层应已持久化）
-        let snap = match self.callbacks.load_snapshot(self.id.clone()).await {
+        let snap = match self.callbacks.load_snapshot(&self.id).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 error!("No snapshot found after creation");
@@ -3658,7 +3653,7 @@ impl RaftState {
                 .error_handler
                 .handle_void(
                     self.callbacks
-                        .truncate_log_prefix(self.id.clone(), snap.index + 1)
+                        .truncate_log_prefix(&self.id, snap.index + 1)
                         .await,
                     "truncate_log_prefix",
                     None,
@@ -3691,7 +3686,7 @@ impl RaftState {
                 .handle_void(
                     self.callbacks
                         .client_response(
-                            self.id.clone(),
+                            &self.id,
                             request_id,
                             Err(ClientError::Internal(anyhow::anyhow!(
                                 "leader transfer timeout"
@@ -3750,9 +3745,7 @@ impl RaftState {
             let candidate_term = match self
                 .error_handler
                 .handle(
-                    self.callbacks
-                        .get_log_term(self.id.clone(), candidate_index)
-                        .await,
+                    self.callbacks.get_log_term(&self.id, candidate_index).await,
                     "get_log_term",
                     None,
                 )
@@ -3768,11 +3761,7 @@ impl RaftState {
                 // 检查是否有当前任期的日志被提交
                 let mut has_current_term = false;
                 for i in (self.commit_index + 1)..=candidate_index {
-                    if self
-                        .callbacks
-                        .get_log_term(self.id.clone(), i)
-                        .await
-                        .unwrap_or(0)
+                    if self.callbacks.get_log_term(&self.id, i).await.unwrap_or(0)
                         == self.current_term
                     {
                         has_current_term = true;

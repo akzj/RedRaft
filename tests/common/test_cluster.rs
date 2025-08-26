@@ -504,7 +504,10 @@ impl TestCluster {
             request_id,
         };
 
-        match self.driver.dispatch_event(leader_id.clone(), add_learner_event) {
+        match self
+            .driver
+            .dispatch_event(leader_id.clone(), add_learner_event)
+        {
             raft_lite::mutl_raft_driver::SendEventResult::Success => {
                 info!("Add learner event sent to leader {:?}", leader_id);
             }

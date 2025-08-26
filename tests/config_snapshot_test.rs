@@ -33,7 +33,7 @@ async fn test_snapshot_config_application() {
         .wait_for_leader(Duration::from_secs(5))
         .await
         .expect("Should have a leader");
-    
+
     println!("✓ Leader election successful, leader: {:?}", leader_id);
 
     // 写入一些数据
@@ -45,7 +45,8 @@ async fn test_snapshot_config_application() {
         };
         let command_bytes = command.encode();
 
-        cluster.propose_command(&leader_id, command_bytes)
+        cluster
+            .propose_command(&leader_id, command_bytes)
             .expect("Should be able to propose command");
     }
 
@@ -53,13 +54,16 @@ async fn test_snapshot_config_application() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // 验证数据一致性
-    cluster.verify_data_consistency().await
+    cluster
+        .verify_data_consistency()
+        .await
         .expect("Data should be consistent before snapshot");
     println!("✓ Data consistency verified before snapshot");
 
     // 触发快照
     println!("\n=== Triggering snapshot ===");
-    cluster.trigger_snapshot(&leader_id)
+    cluster
+        .trigger_snapshot(&leader_id)
         .expect("Should be able to trigger snapshot");
 
     // 等待快照完成
@@ -68,15 +72,19 @@ async fn test_snapshot_config_application() {
     println!("✓ Snapshot creation completed");
 
     // 验证快照后数据一致性
-    cluster.verify_data_consistency().await
+    cluster
+        .verify_data_consistency()
+        .await
         .expect("Data should be consistent after snapshot");
     println!("✓ Data consistency verified after snapshot");
 
     // 添加一个新的learner节点来测试快照配置应用
     println!("\n=== Testing snapshot config application with learner ===");
     let learner_id = RaftId::new("test_group".to_string(), "learner1".to_string());
-    
-    cluster.add_learner(learner_id.clone()).await
+
+    cluster
+        .add_learner(learner_id.clone())
+        .await
         .expect("Should be able to add learner");
     println!("✓ Added learner: {:?}", learner_id);
 
@@ -86,9 +94,15 @@ async fn test_snapshot_config_application() {
     // 验证learner的数据与集群一致
     if let Some(learner_data) = cluster.get_node_data(&learner_id) {
         if let Some(reference_data) = cluster.get_node_data(&leader_id) {
-            assert_eq!(learner_data.len(), reference_data.len(),
-                "Learner should have same data count as cluster");
-            println!("✓ Learner synced {} entries via snapshot", learner_data.len());
+            assert_eq!(
+                learner_data.len(),
+                reference_data.len(),
+                "Learner should have same data count as cluster"
+            );
+            println!(
+                "✓ Learner synced {} entries via snapshot",
+                learner_data.len()
+            );
         }
     }
 

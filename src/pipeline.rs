@@ -3,9 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use log::debug;
+use tracing::{debug, info, warn};
 
-use crate::{RaftId, RequestId, RaftStateOptions};
+use crate::{RaftId, RaftStateOptions, RequestId};
 
 /// Pipeline 状态管理器，负责处理 InFlight 请求的反馈控制和超时管理
 pub struct PipelineState {
@@ -17,7 +17,7 @@ pub struct PipelineState {
 
     // 简单高效的超时管理 - 按发送顺序排列
     inflight_timeout_queue: HashMap<RaftId, VecDeque<(RequestId, Instant)>>, // peer -> 按时间顺序的请求队列
-    
+
     // 配置选项
     options: RaftStateOptions,
 }
@@ -129,7 +129,7 @@ impl PipelineState {
                 .map(|reqs| reqs.len())
                 .unwrap_or(0);
 
-            debug!(
+            info!(
                 "Recorded successful response from peer {} (request: {}, response_time: {:?}, remaining_inflight: {})",
                 peer, request_id, response_time, remaining_count
             );
@@ -145,6 +145,10 @@ impl PipelineState {
         request_id: RequestId,
         success: bool,
     ) {
+        debug!(
+            "AppendEntries response from {}: {} (success: {})",
+            peer, request_id, success
+        );
         if success {
             self.record_success_response(peer, request_id);
         } else {
@@ -282,7 +286,7 @@ impl PipelineState {
             if let Some(peer_requests) = self.inflight_requests.get_mut(&peer) {
                 if peer_requests.remove(&expired_request_id).is_some() {
                     let elapsed = expired_send_time.elapsed();
-                    debug!(
+                    warn!(
                         "Cleaned up expired inflight request {} to peer {} (elapsed: {:?}, timeout: {:?})",
                         expired_request_id, peer, elapsed, timeout_used
                     );
@@ -312,7 +316,7 @@ impl PipelineState {
             self.options.base_request_timeout
         };
 
-        debug!(
+        info!(
             "Smart timeout for peer {}: {:?} (avg_rtt: {:?}, factor: {})",
             peer, timeout, avg_response_time, self.options.timeout_response_factor
         );

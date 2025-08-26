@@ -79,7 +79,7 @@ impl TestStateMachine {
     // Required apply command handler
     pub async fn apply_command(
         &self,
-        _from: RaftId,
+        _from: &RaftId,
         index: u64,
         term: u64,
         cmd: raft_lite::Command,

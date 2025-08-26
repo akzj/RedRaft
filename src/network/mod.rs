@@ -9,8 +9,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use tokio::sync::{Notify, mpsc};
-use tokio::time::{Duration, sleep, timeout};
+use tokio::sync::{mpsc, Notify};
+use tokio::time::{sleep, timeout, Duration};
 use tonic::transport::{Endpoint, Server};
 use tracing::{debug, error, info, warn};
 
@@ -346,16 +346,16 @@ impl RaftService for MultiRaftNetwork {
 impl Network for MultiRaftNetwork {
     async fn send_request_vote_request(
         &self,
-        from: RaftId, // 本地 RaftId，可能用于日志
-        target: RaftId,
+        from:& RaftId, // 本地 RaftId，可能用于日志
+        target:& RaftId,
         args: RequestVoteRequest,
     ) -> RpcResult<()> {
         // 注意：args 中应该已经包含了 from 和 target 信息
         if let Some(tx) = self.get_outgoing_tx(&target.node) {
             if tx
                 .send(OutgoingMessage::RequestVote {
-                    from: from,
-                    target: target,
+                    from: from.clone(),
+                    target: target.clone(),
                     args: args,
                 })
                 .is_err()
@@ -373,15 +373,15 @@ impl Network for MultiRaftNetwork {
 
     async fn send_request_vote_response(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target:& RaftId,
         args: RequestVoteResponse,
     ) -> RpcResult<()> {
         if let Some(tx) = self.get_outgoing_tx(&target.node) {
             if tx
                 .send(OutgoingMessage::RequestVoteResponse {
-                    from: from,
-                    target: target,
+                    from: from.clone(),
+                    target: target.clone(),
                     args: args,
                 })
                 .is_err()
@@ -399,15 +399,15 @@ impl Network for MultiRaftNetwork {
 
     async fn send_append_entries_request(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target:& RaftId,
         args: AppendEntriesRequest,
     ) -> RpcResult<()> {
         if let Some(tx) = self.get_outgoing_tx(&target.node) {
             if tx
                 .send(OutgoingMessage::AppendEntries {
-                    from: from,
-                    target: target,
+                    from: from.clone(),
+                    target: target.clone(),
                     args: args,
                 })
                 .is_err()
@@ -425,15 +425,15 @@ impl Network for MultiRaftNetwork {
 
     async fn send_append_entries_response(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: AppendEntriesResponse,
     ) -> RpcResult<()> {
         if let Some(tx) = self.get_outgoing_tx(&target.node) {
             if tx
                 .send(OutgoingMessage::AppendEntriesResponse {
-                    from: from,
-                    target: target,
+                    from: from.clone(),
+                    target: target.clone(),
                     args: args,
                 })
                 .is_err()
@@ -451,15 +451,15 @@ impl Network for MultiRaftNetwork {
 
     async fn send_install_snapshot_request(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target:& RaftId,
         args: InstallSnapshotRequest,
     ) -> RpcResult<()> {
         if let Some(tx) = self.get_outgoing_tx(&target.node) {
             if tx
                 .send(OutgoingMessage::InstallSnapshot {
-                    from: from,
-                    target: target,
+                    from: from.clone(),
+                    target: target.clone(),
                     args: args,
                 })
                 .is_err()
@@ -477,15 +477,15 @@ impl Network for MultiRaftNetwork {
 
     async fn send_install_snapshot_response(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: InstallSnapshotResponse,
     ) -> RpcResult<()> {
         if let Some(tx) = self.get_outgoing_tx(&target.node) {
             if tx
                 .send(OutgoingMessage::InstallSnapshotResponse {
-                    from: from,
-                    target: target,
+                    from: from.clone(),
+                    target: target.clone(),
                     args: args,
                 })
                 .is_err()

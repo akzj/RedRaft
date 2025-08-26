@@ -9,7 +9,7 @@ pub mod tests {
     use mock::mock_storage::MockStorage;
     use std::sync::Arc;
     use tokio::sync::Mutex;
-    use tokio::time::{Duration, sleep, timeout};
+    use tokio::time::{sleep, timeout, Duration};
 
     // 测试用的简单回调实现
     struct TestCallbacks {
@@ -36,8 +36,8 @@ pub mod tests {
     impl Network for TestCallbacks {
         async fn send_request_vote_request(
             &self,
-            from: RaftId,
-            target: RaftId,
+            from: &RaftId,
+            target: &RaftId,
             args: RequestVoteRequest,
         ) -> RpcResult<()> {
             self.network
@@ -47,8 +47,8 @@ pub mod tests {
 
         async fn send_request_vote_response(
             &self,
-            from: RaftId,
-            target: RaftId,
+            from: &RaftId,
+            target:& RaftId,
             args: RequestVoteResponse,
         ) -> RpcResult<()> {
             self.network
@@ -58,8 +58,8 @@ pub mod tests {
 
         async fn send_append_entries_request(
             &self,
-            from: RaftId,
-            target: RaftId,
+            from: &RaftId,
+            target: &RaftId,
             args: AppendEntriesRequest,
         ) -> RpcResult<()> {
             self.network
@@ -69,8 +69,8 @@ pub mod tests {
 
         async fn send_append_entries_response(
             &self,
-            from: RaftId,
-            target: RaftId,
+            from: &RaftId,
+            target:& RaftId,
             args: AppendEntriesResponse,
         ) -> RpcResult<()> {
             self.network
@@ -80,8 +80,8 @@ pub mod tests {
 
         async fn send_install_snapshot_request(
             &self,
-            from: RaftId,
-            target: RaftId,
+            from: &RaftId,
+            target:& RaftId,
             args: InstallSnapshotRequest,
         ) -> RpcResult<()> {
             self.network
@@ -91,8 +91,8 @@ pub mod tests {
 
         async fn send_install_snapshot_response(
             &self,
-            from: RaftId,
-            target: RaftId,
+            from: &RaftId,
+            target:& RaftId,
             args: InstallSnapshotResponse,
         ) -> RpcResult<()> {
             self.network
@@ -105,23 +105,22 @@ pub mod tests {
     impl Storage for TestCallbacks {
         async fn save_hard_state(
             &self,
-            from: RaftId,
-            term: u64,
-            voted_for: Option<RaftId>,
+            from: &RaftId,
+            hard_state: HardState,
         ) -> StorageResult<()> {
-            self.storage.save_hard_state(from, term, voted_for).await
+            self.storage.save_hard_state(from, hard_state).await
         }
 
         async fn load_hard_state(
             &self,
-            from: RaftId,
-        ) -> StorageResult<Option<(u64, Option<RaftId>)>> {
+            from: &RaftId,
+        ) -> StorageResult<Option<HardState>> {
             self.storage.load_hard_state(from).await
         }
 
         async fn append_log_entries(
             &self,
-            from: RaftId,
+            from: &RaftId,
             entries: &[LogEntry],
         ) -> StorageResult<()> {
             self.storage.append_log_entries(from, entries).await
@@ -129,7 +128,7 @@ pub mod tests {
 
         async fn get_log_entries(
             &self,
-            from: RaftId,
+            from: &RaftId,
             low: u64,
             high: u64,
         ) -> StorageResult<Vec<LogEntry>> {
@@ -138,79 +137,79 @@ pub mod tests {
 
         async fn get_log_entries_term(
             &self,
-            from: RaftId,
+            from: &RaftId,
             low: u64,
             high: u64,
         ) -> StorageResult<Vec<(u64, u64)>> {
             self.storage.get_log_entries_term(from, low, high).await
         }
 
-        async fn truncate_log_suffix(&self, from: RaftId, idx: u64) -> StorageResult<()> {
+        async fn truncate_log_suffix(&self, from:& RaftId, idx: u64) -> StorageResult<()> {
             self.storage.truncate_log_suffix(from, idx).await
         }
 
-        async fn truncate_log_prefix(&self, from: RaftId, idx: u64) -> StorageResult<()> {
+        async fn truncate_log_prefix(&self, from: &RaftId, idx: u64) -> StorageResult<()> {
             self.storage.truncate_log_prefix(from, idx).await
         }
 
-        async fn get_last_log_index(&self, from: RaftId) -> StorageResult<(u64, u64)> {
+        async fn get_last_log_index(&self, from: &RaftId) -> StorageResult<(u64, u64)> {
             self.storage.get_last_log_index(from).await
         }
 
-        async fn get_log_term(&self, from: RaftId, idx: u64) -> StorageResult<u64> {
+        async fn get_log_term(&self, from: &RaftId, idx: u64) -> StorageResult<u64> {
             self.storage.get_log_term(from, idx).await
         }
 
-        async fn save_snapshot(&self, from: RaftId, snap: Snapshot) -> StorageResult<()> {
+        async fn save_snapshot(&self, from:& RaftId, snap: Snapshot) -> StorageResult<()> {
             self.storage.save_snapshot(from, snap).await
         }
 
-        async fn load_snapshot(&self, from: RaftId) -> StorageResult<Option<Snapshot>> {
+        async fn load_snapshot(&self, from: &RaftId) -> StorageResult<Option<Snapshot>> {
             self.storage.load_snapshot(from).await
         }
 
-        async fn create_snapshot(&self, from: RaftId) -> StorageResult<(u64, u64)> {
+        async fn create_snapshot(&self, from: &RaftId) -> StorageResult<(u64, u64)> {
             self.storage.create_snapshot(from).await
         }
 
         async fn save_cluster_config(
             &self,
-            from: RaftId,
+            from: &RaftId,
             conf: ClusterConfig,
         ) -> StorageResult<()> {
             self.storage.save_cluster_config(from, conf).await
         }
 
-        async fn load_cluster_config(&self, from: RaftId) -> StorageResult<ClusterConfig> {
+        async fn load_cluster_config(&self, from: &RaftId) -> StorageResult<ClusterConfig> {
             self.storage.load_cluster_config(from).await
         }
     }
 
     impl TimerService for TestCallbacks {
-        fn del_timer(&self, _from: RaftId, _timer_id: TimerId) {}
+        fn del_timer(&self, _from: &RaftId, _timer_id: TimerId) {}
 
-        fn set_leader_transfer_timer(&self, _from: RaftId, _dur: Duration) -> TimerId {
+        fn set_leader_transfer_timer(&self, _from: &RaftId, _dur: Duration) -> TimerId {
             // Use a simple atomic counter instead of async lock
             static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         }
 
-        fn set_election_timer(&self, _from: RaftId, _dur: Duration) -> TimerId {
+        fn set_election_timer(&self, _from: &RaftId, _dur: Duration) -> TimerId {
             static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         }
 
-        fn set_heartbeat_timer(&self, _from: RaftId, _dur: Duration) -> TimerId {
+        fn set_heartbeat_timer(&self, _from: &RaftId, _dur: Duration) -> TimerId {
             static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         }
 
-        fn set_apply_timer(&self, _from: RaftId, _dur: Duration) -> TimerId {
+        fn set_apply_timer(&self, _from: &RaftId, _dur: Duration) -> TimerId {
             static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         }
 
-        fn set_config_change_timer(&self, _from: RaftId, _dur: Duration) -> TimerId {
+        fn set_config_change_timer(&self, _from: &RaftId, _dur: Duration) -> TimerId {
             static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         }
@@ -220,36 +219,36 @@ pub mod tests {
     impl RaftCallbacks for TestCallbacks {
         async fn client_response(
             &self,
-            from: RaftId,
+            from: &RaftId,
             request_id: RequestId,
             result: ClientResult<u64>,
         ) -> ClientResult<()> {
             let mut responses = self.client_responses.lock().await;
-            responses.push((from, request_id, result));
+            responses.push((from.clone(), request_id, result));
             Ok(())
         }
 
-        async fn state_changed(&self, from: RaftId, role: Role) -> Result<(), StateChangeError> {
+        async fn state_changed(&self, from: &RaftId, role: Role) -> Result<(), StateChangeError> {
             let mut changes = self.state_changes.lock().await;
-            changes.push((from, role));
+            changes.push((from.clone(), role));
             Ok(())
         }
 
         async fn apply_command(
             &self,
-            from: RaftId,
+            from: &RaftId,
             index: u64,
             term: u64,
             cmd: Command,
         ) -> ApplyResult<()> {
             let mut commands = self.applied_commands.lock().await;
-            commands.push((from, index, term, cmd));
+            commands.push((from.clone(), index, term, cmd));
             Ok(())
         }
 
         async fn process_snapshot(
             &self,
-            _from: RaftId,
+            _from: &RaftId,
             _index: u64,
             _term: u64,
             _data: Vec<u8>,
@@ -259,7 +258,7 @@ pub mod tests {
             Ok(())
         }
 
-        async fn node_removed(&self, _node_id: RaftId) -> Result<(), StateChangeError> {
+        async fn node_removed(&self, _node_id: &RaftId) -> Result<(), StateChangeError> {
             Ok(())
         }
     }
@@ -287,7 +286,7 @@ pub mod tests {
         all_nodes.extend(peers.clone());
         let cluster_config = ClusterConfig::simple(all_nodes.into_iter().collect(), 0);
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .map_err(|e| format!("Failed to save cluster config: {:?}", e))?;
 
@@ -404,9 +403,12 @@ pub mod tests {
             .await;
 
         // 验证硬状态已更新（应该投票给候选人）
-        let hard_state = storage.load_hard_state(node_id).await.unwrap();
+        let hard_state = storage.load_hard_state(&node_id).await.unwrap();
         assert!(hard_state.is_some());
-        let (term, voted_for) = hard_state.unwrap();
+        let (term, voted_for) = match hard_state{
+            Some(hs) => (hs.term, hs.voted_for),
+            None => panic!("Hard state should exist"),
+        };
         assert_eq!(term, 1);
         assert_eq!(voted_for, Some(candidate_id));
     }
@@ -452,7 +454,7 @@ pub mod tests {
 
         // 验证日志已存储
         let stored_entries = storage
-            .get_log_entries(node_id.clone(), 1, 2)
+            .get_log_entries(&node_id, 1, 2)
             .await
             .unwrap();
         assert!(!stored_entries.is_empty(), "Should have stored log entries");
@@ -538,7 +540,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -562,7 +564,7 @@ pub mod tests {
             .await;
 
         // 如果是领导者，应该有日志条目
-        let stored_entries = storage.get_log_entries(node_id, 1, 2).await;
+        let stored_entries = storage.get_log_entries(&node_id, 1, 2).await;
         if raft_state.get_role() == Role::Leader && stored_entries.is_ok() {
             let entries = stored_entries.unwrap();
             if !entries.is_empty() {
@@ -594,7 +596,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node1.clone(), cluster_config)
+            .save_cluster_config(&node1, cluster_config)
             .await
             .unwrap();
 
@@ -616,7 +618,7 @@ pub mod tests {
             .await;
 
         // 检查是否创建了联合配置日志
-        let stored_entries = storage.get_log_entries(node1, 1, 2).await;
+        let stored_entries = storage.get_log_entries(&node1, 1, 2).await;
         if stored_entries.is_ok() && raft_state.get_role() == Role::Leader {
             let entries = stored_entries.unwrap();
             if !entries.is_empty() {
@@ -700,7 +702,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -741,7 +743,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -757,7 +759,7 @@ pub mod tests {
             client_request_id: Some(RequestId::new()),
         };
         storage
-            .append_log_entries(node_id.clone(), &[local_entry])
+            .append_log_entries(&node_id, &[local_entry])
             .await
             .unwrap();
 
@@ -789,7 +791,7 @@ pub mod tests {
             .await;
 
         // 验证处理结果 - 在实际场景中，冲突解决可能很复杂
-        let stored_entries = storage.get_log_entries(node_id, 1, 2).await.unwrap();
+        let stored_entries = storage.get_log_entries(&node_id, 1, 2).await.unwrap();
         println!("Stored entries count: {}", stored_entries.len());
         if !stored_entries.is_empty() {
             println!(
@@ -821,7 +823,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -876,7 +878,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -893,7 +895,7 @@ pub mod tests {
             client_request_id: Some(RequestId::new()),
         };
         storage
-            .append_log_entries(node_id.clone(), &[local_entry])
+            .append_log_entries(&node_id, &[local_entry])
             .await
             .unwrap();
         // 更新 RaftState 的内存状态（如果需要）
@@ -921,7 +923,7 @@ pub mod tests {
         assert_eq!(raft_state.current_term, 2);
         assert_eq!(raft_state.role, Role::Follower);
         assert_eq!(raft_state.voted_for, None); // 因为自己的日志更新
-        // 验证是否发送了拒绝的响应
+                                                // 验证是否发送了拒绝的响应
     }
 
     // 3. 测试 Candidate 收到更高任期的 `RequestVoteResponse`（拒绝）
@@ -944,7 +946,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -981,11 +983,9 @@ pub mod tests {
         assert_eq!(raft_state.current_term, candidate_term + 1);
         // 验证状态变更通知
         let state_changes = callbacks.state_changes.lock().await;
-        assert!(
-            state_changes
-                .iter()
-                .any(|&(_, role)| role == Role::Follower)
-        );
+        assert!(state_changes
+            .iter()
+            .any(|&(_, role)| role == Role::Follower));
     }
 
     // 4. 测试 Leader 收到更高任期的 `AppendEntriesResponse`（失败）
@@ -1008,7 +1008,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -1052,11 +1052,9 @@ pub mod tests {
         assert_eq!(raft_state.leader_id, None);
         // 验证状态变更通知
         let state_changes = callbacks.state_changes.lock().await;
-        assert!(
-            state_changes
-                .iter()
-                .any(|&(_, role)| role == Role::Follower)
-        );
+        assert!(state_changes
+            .iter()
+            .any(|&(_, role)| role == Role::Follower));
     }
 
     // 5. 测试 Follower 处理过期的 `AppendEntriesRequest`（`prev_log_index` < `last_snapshot_index` 且任期不匹配）
@@ -1079,7 +1077,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -1149,7 +1147,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -1176,7 +1174,7 @@ pub mod tests {
             client_request_id: None,
         };
         storage
-            .append_log_entries(node_id.clone(), &[log_entry1, log_entry2])
+            .append_log_entries(&node_id, &[log_entry1, log_entry2])
             .await
             .unwrap();
         raft_state.last_log_index = 2;
@@ -1233,7 +1231,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -1326,7 +1324,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -1412,7 +1410,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -1501,7 +1499,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -1579,7 +1577,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -1634,7 +1632,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -1654,7 +1652,7 @@ pub mod tests {
             client_request_id: None,
         };
         storage
-            .append_log_entries(node_id.clone(), &[log_entry])
+            .append_log_entries(&node_id, &[log_entry])
             .await
             .unwrap();
         raft_state.last_log_index = 1;
@@ -1729,7 +1727,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -1765,7 +1763,7 @@ pub mod tests {
             },
         ];
         storage
-            .append_log_entries(node_id.clone(), &log_entries)
+            .append_log_entries(&node_id, &log_entries)
             .await
             .unwrap();
         raft_state.last_log_index = 3;
@@ -1827,7 +1825,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -1891,7 +1889,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -1907,7 +1905,7 @@ pub mod tests {
             client_request_id: None,
         };
         storage
-            .append_log_entries(node_id.clone(), &[local_log_entry])
+            .append_log_entries(&node_id, &[local_log_entry])
             .await
             .unwrap();
 
@@ -1959,7 +1957,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -1999,7 +1997,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -2054,7 +2052,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -2120,7 +2118,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -2186,7 +2184,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -2226,7 +2224,7 @@ pub mod tests {
                 assert_eq!(sender, node_id);
                 assert_eq!(target, leader_id);
                 assert_eq!(resp.term, 5); // Response should have the follower's term
-                // Assuming rejection means not Installing/Success, could also check specific state if defined
+                                          // Assuming rejection means not Installing/Success, could also check specific state if defined
             }
             _ => panic!("Expected InstallSnapshotResponse"),
         }
@@ -2251,7 +2249,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -2310,7 +2308,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -2378,7 +2376,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -2396,7 +2394,7 @@ pub mod tests {
             client_request_id: None,
         };
         storage
-            .append_log_entries(node_id.clone(), &[local_log_entry])
+            .append_log_entries(&node_id, &[local_log_entry])
             .await
             .unwrap();
         raft_state.last_log_index = 5;
@@ -2442,7 +2440,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -2460,7 +2458,7 @@ pub mod tests {
             client_request_id: None,
         };
         storage
-            .append_log_entries(node_id.clone(), &[local_log_entry])
+            .append_log_entries(&node_id, &[local_log_entry])
             .await
             .unwrap();
         raft_state.last_log_index = 3;
@@ -2505,7 +2503,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -2574,7 +2572,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -2634,7 +2632,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -2701,9 +2699,9 @@ pub mod tests {
         // commit_index 的更新可以作为一个更复杂的测试。
         // 这里简单断言它至少没有减少，并且可能增加了。
         assert!(raft_state.commit_index >= initial_commit_index); // 至少不减少
-        // 如果 update_commit_index 逻辑正确，它应该增加到 15
-        // assert_eq!(raft_state.commit_index, 15); // 如果逻辑是提交到多数派最小值且所有日志同任期
-        // 为了测试的确定性，我们只验证 next_index 和 match_index
+                                                                  // 如果 update_commit_index 逻辑正确，它应该增加到 15
+                                                                  // assert_eq!(raft_state.commit_index, 15); // 如果逻辑是提交到多数派最小值且所有日志同任期
+                                                                  // 为了测试的确定性，我们只验证 next_index 和 match_index
     }
 
     // 4. 测试 Leader 处理当前任期的失败响应 (包含 matched_index)
@@ -2723,7 +2721,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -2786,7 +2784,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -2846,7 +2844,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -2908,7 +2906,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -2969,7 +2967,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
         let options = create_test_options(node_id.clone(), vec![peer1.clone(), peer2.clone()]);
@@ -2992,7 +2990,7 @@ pub mod tests {
             })
             .collect();
         storage
-            .append_log_entries(node_id.clone(), &log_entries)
+            .append_log_entries(&node_id, &log_entries)
             .await
             .unwrap();
         raft_state.last_log_index = 5;
@@ -3052,7 +3050,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
         let options = create_test_options(node_id.clone(), vec![peer1.clone()]);
@@ -3081,7 +3079,7 @@ pub mod tests {
             })
             .collect();
         storage
-            .append_log_entries(node_id.clone(), &leader_logs)
+            .append_log_entries(&node_id, &leader_logs)
             .await
             .unwrap();
         raft_state.last_log_index = 15;
@@ -3137,7 +3135,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
         let options = create_test_options(node_id.clone(), vec![leader_id.clone()]);
@@ -3216,7 +3214,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), initial_config)
+            .save_cluster_config(&node_id, initial_config)
             .await
             .unwrap();
         let options = create_test_options(node_id.clone(), vec![node2.clone(), node3.clone()]);
@@ -3245,7 +3243,7 @@ pub mod tests {
             client_request_id: None,
         };
         storage
-            .append_log_entries(node_id.clone(), &[config_log_entry])
+            .append_log_entries(&node_id, &[config_log_entry])
             .await
             .unwrap();
         raft_state.last_log_index = 1;
@@ -3300,7 +3298,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
         let options = create_test_options(node_id.clone(), vec![leader_id.clone()]);
@@ -3352,7 +3350,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
         let options = create_test_options(node_id.clone(), vec![leader_id.clone()]);
@@ -3406,7 +3404,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
         let options = create_test_options(node_id.clone(), vec![leader_id.clone()]);
@@ -3445,7 +3443,7 @@ pub mod tests {
 
         // 验证日志被追加 (从快照点之后开始)
         let stored_entries = storage
-            .get_log_entries(node_id.clone(), 6, 7)
+            .get_log_entries(&node_id, 6, 7)
             .await
             .unwrap();
         assert_eq!(stored_entries.len(), 1);
@@ -3479,7 +3477,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -3578,7 +3576,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node_id.clone(), cluster_config)
+            .save_cluster_config(&node_id, cluster_config)
             .await
             .unwrap();
 
@@ -3633,7 +3631,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node1.clone(), cluster_config)
+            .save_cluster_config(&node1, cluster_config)
             .await
             .unwrap();
 
@@ -3665,7 +3663,7 @@ pub mod tests {
 
         // 添加配置变更日志到存储
         storage
-            .append_log_entries(node1.clone(), &[config_entry.clone()])
+            .append_log_entries(&node1, &[config_entry.clone()])
             .await
             .unwrap();
 
@@ -3746,7 +3744,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node1.clone(), cluster_config)
+            .save_cluster_config(&node1, cluster_config)
             .await
             .unwrap();
 
@@ -3791,7 +3789,7 @@ pub mod tests {
         };
 
         storage
-            .append_log_entries(node1.clone(), &[config_entry.clone()])
+            .append_log_entries(&node1, &[config_entry.clone()])
             .await
             .unwrap();
 
@@ -3843,7 +3841,7 @@ pub mod tests {
             0,
         );
         storage
-            .save_cluster_config(node1.clone(), initial_config.clone())
+            .save_cluster_config(&node1, initial_config.clone())
             .await
             .unwrap();
 
@@ -3877,7 +3875,7 @@ pub mod tests {
         ];
 
         storage
-            .append_log_entries(node1.clone(), &dummy_entries)
+            .append_log_entries(&node1, &dummy_entries)
             .await
             .unwrap();
 
@@ -3896,7 +3894,7 @@ pub mod tests {
         };
 
         storage
-            .append_log_entries(node1.clone(), &[updated_entry.clone()])
+            .append_log_entries(&node1, &[updated_entry.clone()])
             .await
             .unwrap();
 
@@ -3930,7 +3928,7 @@ pub mod tests {
         };
 
         storage
-            .append_log_entries(node1.clone(), &[old_entry.clone()])
+            .append_log_entries(&node1, &[old_entry.clone()])
             .await
             .unwrap();
 
@@ -3962,7 +3960,7 @@ pub mod tests {
         // 初始化5节点集群
         let initial_config = ClusterConfig::simple(nodes.iter().cloned().collect(), 0);
         storage
-            .save_cluster_config(nodes[0].clone(), initial_config)
+            .save_cluster_config(&nodes[0], initial_config)
             .await
             .unwrap();
 
@@ -4016,7 +4014,7 @@ pub mod tests {
         let initial_config =
             ClusterConfig::simple(vec![node1.clone(), node2.clone()].into_iter().collect(), 0);
         storage
-            .save_cluster_config(node1.clone(), initial_config)
+            .save_cluster_config(&node1, initial_config)
             .await
             .unwrap();
 
@@ -4034,10 +4032,8 @@ pub mod tests {
 
         // 应该检测到log_index不匹配
         assert!(validation_result.is_err());
-        assert!(
-            validation_result
-                .unwrap_err()
-                .contains("log_index mismatch")
-        );
+        assert!(validation_result
+            .unwrap_err()
+            .contains("log_index mismatch"));
     }
 }

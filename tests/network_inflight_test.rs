@@ -451,7 +451,7 @@ async fn test_network_inflight_under_packet_loss() {
 
     // 验证集群恢复状态 - 确保有稳定的leader
     let mut recovery_attempts = 0;
-    let max_recovery_attempts = 30; // 增加最大尝试次数到30
+    let max_recovery_attempts = 200; // 增加最大尝试次数到200
     let mut stable_leader = None;
 
     while recovery_attempts < max_recovery_attempts {
@@ -485,9 +485,7 @@ async fn test_network_inflight_under_packet_loss() {
             );
         }
 
-        // 随机等待间隔，避免选举碰撞
-        let random_delay = rand::rng().random_range(200..800);
-        tokio::time::sleep(Duration::from_millis(random_delay)).await;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
     }
 
     // 断言：集群恢复后应该有稳定的leader

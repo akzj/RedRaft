@@ -14,43 +14,43 @@ pub trait Network: Send + Sync {
     // 发送 RPC 回调
     async fn send_request_vote_request(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: RequestVoteRequest,
     ) -> RpcResult<()>;
 
     async fn send_request_vote_response(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: RequestVoteResponse,
     ) -> RpcResult<()>;
 
     async fn send_append_entries_request(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: AppendEntriesRequest,
     ) -> RpcResult<()>;
 
     async fn send_append_entries_response(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: AppendEntriesResponse,
     ) -> RpcResult<()>;
 
     async fn send_install_snapshot_request(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: InstallSnapshotRequest,
     ) -> RpcResult<()>;
 
     async fn send_install_snapshot_response(
         &self,
-        from: RaftId,
-        target: RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: InstallSnapshotResponse,
     ) -> RpcResult<()>;
 }
@@ -94,57 +94,52 @@ pub trait Network: Send + Sync {
 ///
 /// All methods return a `StorageResult` indicating success or failure, with the appropriate result type.
 pub trait Storage: Send + Sync {
-    async fn save_hard_state(
-        &self,
-        from: RaftId,
-        term: u64,
-        voted_for: Option<RaftId>,
-    ) -> StorageResult<()>;
+    async fn save_hard_state(&self, from: &RaftId, hard_state: HardState) -> StorageResult<()>;
 
-    async fn load_hard_state(&self, from: RaftId) -> StorageResult<Option<(u64, Option<RaftId>)>>;
+    async fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<HardState>>;
 
-    async fn append_log_entries(&self, from: RaftId, entries: &[LogEntry]) -> StorageResult<()>;
+    async fn append_log_entries(&self, from: &RaftId, entries: &[LogEntry]) -> StorageResult<()>;
 
     async fn get_log_entries(
         &self,
-        from: RaftId,
+        from: &RaftId,
         low: u64,
         high: u64,
     ) -> StorageResult<Vec<LogEntry>>;
 
     async fn get_log_entries_term(
         &self,
-        from: RaftId,
+        from: &RaftId,
         low: u64,
         high: u64,
     ) -> StorageResult<Vec<(u64, u64)>>;
 
-    async fn truncate_log_suffix(&self, from: RaftId, idx: u64) -> StorageResult<()>;
+    async fn truncate_log_suffix(&self, from: &RaftId, idx: u64) -> StorageResult<()>;
 
-    async fn truncate_log_prefix(&self, from: RaftId, idx: u64) -> StorageResult<()>;
+    async fn truncate_log_prefix(&self, from: &RaftId, idx: u64) -> StorageResult<()>;
 
-    async fn get_last_log_index(&self, from: RaftId) -> StorageResult<(u64, u64)>;
+    async fn get_last_log_index(&self, from: &RaftId) -> StorageResult<(u64, u64)>;
 
-    async fn get_log_term(&self, from: RaftId, idx: u64) -> StorageResult<u64>;
+    async fn get_log_term(&self, from: &RaftId, idx: u64) -> StorageResult<u64>;
 
-    async fn save_snapshot(&self, from: RaftId, snap: Snapshot) -> StorageResult<()>;
+    async fn save_snapshot(&self, from: &RaftId, snap: Snapshot) -> StorageResult<()>;
 
-    async fn load_snapshot(&self, from: RaftId) -> StorageResult<Option<Snapshot>>;
+    async fn load_snapshot(&self, from: &RaftId) -> StorageResult<Option<Snapshot>>;
 
-    async fn create_snapshot(&self, from: RaftId) -> StorageResult<(u64, u64)>;
+    async fn create_snapshot(&self, from: &RaftId) -> StorageResult<(u64, u64)>;
 
-    async fn save_cluster_config(&self, from: RaftId, conf: ClusterConfig) -> StorageResult<()>;
+    async fn save_cluster_config(&self, from: &RaftId, conf: ClusterConfig) -> StorageResult<()>;
 
-    async fn load_cluster_config(&self, from: RaftId) -> StorageResult<ClusterConfig>;
+    async fn load_cluster_config(&self, from: &RaftId) -> StorageResult<ClusterConfig>;
 }
 
 pub trait TimerService {
-    fn del_timer(&self, from: RaftId, timer_id: TimerId) -> ();
-    fn set_leader_transfer_timer(&self, from: RaftId, dur: Duration) -> TimerId;
-    fn set_election_timer(&self, from: RaftId, dur: Duration) -> TimerId;
-    fn set_heartbeat_timer(&self, from: RaftId, dur: Duration) -> TimerId;
-    fn set_apply_timer(&self, from: RaftId, dur: Duration) -> TimerId;
-    fn set_config_change_timer(&self, from: RaftId, dur: Duration) -> TimerId;
+    fn del_timer(&self, from: &RaftId, timer_id: TimerId) -> ();
+    fn set_leader_transfer_timer(&self, from: &RaftId, dur: Duration) -> TimerId;
+    fn set_election_timer(&self, from: &RaftId, dur: Duration) -> TimerId;
+    fn set_heartbeat_timer(&self, from: &RaftId, dur: Duration) -> TimerId;
+    fn set_apply_timer(&self, from: &RaftId, dur: Duration) -> TimerId;
+    fn set_config_change_timer(&self, from: &RaftId, dur: Duration) -> TimerId;
 }
 
 #[async_trait]
@@ -152,18 +147,18 @@ pub trait RaftCallbacks: Network + Storage + TimerService + Send + Sync {
     // 客户端响应回调
     async fn client_response(
         &self,
-        from: RaftId,
+        from: &RaftId,
         request_id: RequestId,
         result: ClientResult<u64>,
     ) -> ClientResult<()>;
 
     // 状态变更通知回调
-    async fn state_changed(&self, from: RaftId, role: Role) -> Result<(), StateChangeError>;
+    async fn state_changed(&self, from: &RaftId, role: Role) -> Result<(), StateChangeError>;
 
     // 日志应用到状态机的回调
     async fn apply_command(
         &self,
-        from: RaftId,
+        from: &RaftId,
         index: u64,
         term: u64,
         cmd: Command,
@@ -172,7 +167,7 @@ pub trait RaftCallbacks: Network + Storage + TimerService + Send + Sync {
     // 处理快照数据
     async fn process_snapshot(
         &self,
-        from: RaftId,
+        from: &RaftId,
         index: u64,
         term: u64,
         data: Vec<u8>,
@@ -181,5 +176,5 @@ pub trait RaftCallbacks: Network + Storage + TimerService + Send + Sync {
     ) -> SnapshotResult<()>;
 
     // 节点被从集群中删除的回调，用于优雅退出
-    async fn node_removed(&self, node_id: RaftId) -> Result<(), StateChangeError>;
+    async fn node_removed(&self, node_id: &RaftId) -> Result<(), StateChangeError>;
 }

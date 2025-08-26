@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::network::{OutgoingMessage, pb};
+use crate::network::{pb, OutgoingMessage};
 
 tonic::include_proto!("pb");
 

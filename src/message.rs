@@ -98,3 +98,18 @@ pub struct AppendEntriesResponse {
     pub request_id: RequestId,
     pub matched_index: u64, // 用于快速同步
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardState {
+    pub raft_id: RaftId,
+    pub term: u64,
+    pub voted_for: Option<RaftId>,
+}
+
+impl PartialEq for HardState {
+    fn eq(&self, other: &Self) -> bool {
+        self.raft_id == other.raft_id
+            && self.term == other.term
+            && self.voted_for == other.voted_for
+    }
+}

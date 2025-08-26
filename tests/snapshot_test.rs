@@ -33,7 +33,7 @@ async fn test_cluster_snapshot_and_learner_sync() {
         .wait_for_leader(Duration::from_secs(5))
         .await
         .expect("Should have a leader");
-    
+
     println!("✓ Leader election successful, leader: {:?}", leader_id);
 
     // ===== 1. 多轮数据写入和快照测试 =====
@@ -41,7 +41,7 @@ async fn test_cluster_snapshot_and_learner_sync() {
 
     for s in 1..=5 {
         println!("\n--- Round {} ---", s);
-        
+
         // 写入200条数据
         for i in 1..=200 {
             let command = KvCommand::Set {
@@ -58,7 +58,7 @@ async fn test_cluster_snapshot_and_learner_sync() {
                 }
                 Err(e) => println!("✗ Failed to propose command: {}", e),
             }
-            
+
             // 小延迟避免过度发送
             if i % 10 == 0 {
                 tokio::time::sleep(Duration::from_millis(1)).await;
@@ -80,11 +80,9 @@ async fn test_cluster_snapshot_and_learner_sync() {
         let current_leaders = cluster.get_current_leader().await;
         assert_eq!(current_leaders.len(), 1);
         let current_leader = current_leaders.first().unwrap();
-        
+
         println!("Triggering snapshot on leader {:?}", current_leader);
-        cluster
-            .trigger_snapshot(current_leader)
-            .unwrap();
+        cluster.trigger_snapshot(current_leader).unwrap();
 
         // 等待快照完成
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -99,20 +97,26 @@ async fn test_cluster_snapshot_and_learner_sync() {
         // 每第3轮添加learner测试通过快照同步数据
         if s == 3 {
             println!("\n=== Testing learner sync via snapshot ===");
-            
+
             // 创建learner节点
             let learner_id = RaftId::new("test_group".to_string(), format!("learner{}", s));
-            
+
             println!("Adding learner {:?}", learner_id);
             match cluster.add_learner(learner_id.clone()).await {
                 Ok(()) => {
                     println!("✓ Successfully added learner {:?}", learner_id);
-                    
+
                     // 等待learner通过快照同步数据
                     println!("Waiting for learner to sync via snapshot...");
-                    match cluster.wait_for_learner_sync(&learner_id, Duration::from_secs(10)).await {
+                    match cluster
+                        .wait_for_learner_sync(&learner_id, Duration::from_secs(10))
+                        .await
+                    {
                         Ok(()) => {
-                            println!("✓ Learner {:?} successfully synced data via snapshot", learner_id);
+                            println!(
+                                "✓ Learner {:?} successfully synced data via snapshot",
+                                learner_id
+                            );
                         }
                         Err(e) => {
                             println!("✗ Learner sync failed: {}", e);
@@ -123,10 +127,16 @@ async fn test_cluster_snapshot_and_learner_sync() {
                     if let Some(learner_data) = cluster.get_node_data(&learner_id) {
                         if let Some(reference_data) = cluster.get_node_data(&leader_id) {
                             if learner_data == reference_data {
-                                println!("✓ Learner data matches cluster data (verified {} entries)", learner_data.len());
+                                println!(
+                                    "✓ Learner data matches cluster data (verified {} entries)",
+                                    learner_data.len()
+                                );
                             } else {
-                                println!("✗ Learner data mismatch! Learner: {}, Reference: {}", 
-                                    learner_data.len(), reference_data.len());
+                                println!(
+                                    "✗ Learner data mismatch! Learner: {}, Reference: {}",
+                                    learner_data.len(),
+                                    reference_data.len()
+                                );
                             }
                         }
                     }
@@ -147,22 +157,35 @@ async fn test_cluster_snapshot_and_learner_sync() {
 
     // ===== 2. 最终数据一致性验证 =====
     println!("\n=== Final data consistency verification ===");
-    
+
     // 等待最终同步
-    match cluster.wait_for_data_replication(Duration::from_secs(5)).await {
+    match cluster
+        .wait_for_data_replication(Duration::from_secs(5))
+        .await
+    {
         Ok(()) => {
             println!("✓ Final data replication completed");
-            
+
             // 获取最终数据统计
             if let Some(final_data) = cluster.get_node_data(&leader_id) {
-                println!("✓ Final cluster state: {} key-value pairs", final_data.len());
-                
+                println!(
+                    "✓ Final cluster state: {} key-value pairs",
+                    final_data.len()
+                );
+
                 // 验证数据完整性 - 应该有 5 * 200 = 1000 条记录
                 let expected_count = 5 * 200;
                 if final_data.len() == expected_count {
-                    println!("✓ Data integrity verified: {} entries as expected", expected_count);
+                    println!(
+                        "✓ Data integrity verified: {} entries as expected",
+                        expected_count
+                    );
                 } else {
-                    println!("✗ Data integrity check failed: expected {}, got {}", expected_count, final_data.len());
+                    println!(
+                        "✗ Data integrity check failed: expected {}, got {}",
+                        expected_count,
+                        final_data.len()
+                    );
                 }
             }
         }
