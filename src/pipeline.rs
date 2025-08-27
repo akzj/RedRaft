@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::{RaftId, RaftStateOptions, RequestId};
 
@@ -129,7 +129,7 @@ impl PipelineState {
                 .map(|reqs| reqs.len())
                 .unwrap_or(0);
 
-            info!(
+            debug!(
                 "Recorded successful response from peer {} (request: {}, response_time: {:?}, remaining_inflight: {})",
                 peer, request_id, response_time, remaining_count
             );
@@ -316,7 +316,7 @@ impl PipelineState {
             self.options.base_request_timeout
         };
 
-        info!(
+        debug!(
             "Smart timeout for peer {}: {:?} (avg_rtt: {:?}, factor: {})",
             peer, timeout, avg_response_time, self.options.timeout_response_factor
         );
