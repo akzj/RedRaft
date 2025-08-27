@@ -1,6 +1,12 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
+use anyhow::{Ok, Result};
+use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::{Command, RaftId, RequestId, cluster_config::ClusterConfig};
 
@@ -33,7 +39,7 @@ pub struct InstallSnapshotResponse {
     pub error_message: String, // 错误信息，如果有的话
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Decode, Encode)]
 pub struct Snapshot {
     pub index: u64,
     pub term: u64,
@@ -53,7 +59,7 @@ pub struct SnapshotProbeSchedule {
 
 // === 核心状态与逻辑 ===
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct LogEntry {
     pub term: u64,
     pub index: u64,
@@ -99,7 +105,10 @@ pub struct AppendEntriesResponse {
     pub matched_index: u64, // 用于快速同步
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct HardStateMap(HashMap<RaftId, HardState>);
+
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct HardState {
     pub raft_id: RaftId,
     pub term: u64,
@@ -111,5 +120,20 @@ impl PartialEq for HardState {
         self.raft_id == other.raft_id
             && self.term == other.term
             && self.voted_for == other.voted_for
+    }
+}
+
+impl LogEntry {
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize)> {
+        let config = bincode::config::standard();
+        Ok(bincode::decode_from_slice(data, config).map_err(|e| {
+            warn!("Failed to deserialize log entry: {}", e);
+            e
+        })?)
+    }
+
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        let config = bincode::config::standard();
+        Ok(bincode::encode_to_vec(self, config)?)
     }
 }

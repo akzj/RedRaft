@@ -5,6 +5,8 @@ use crate::error::*;
 use crate::traits::*;
 use anyhow::Result;
 use async_trait::async_trait;
+use bincode::Decode;
+use bincode::Encode;
 
 use crate::message::*;
 use serde::{Deserialize, Serialize};
@@ -30,7 +32,7 @@ pub type Command = Vec<u8>;
 pub type TimerId = u64; // 定时器ID类型
 pub type NodeId = String;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Encode, Decode)]
 pub struct RaftId {
     pub group: GroupId,
     pub node: NodeId,
@@ -49,7 +51,7 @@ impl RaftId {
 }
 
 // 请求ID类型（用于过滤超时响应）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Encode, Decode)]
 pub struct RequestId(u64);
 
 impl RequestId {

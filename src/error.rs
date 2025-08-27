@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{error, info, warn};
@@ -49,10 +51,10 @@ pub enum RpcError {
 }
 
 /// 存储相关错误
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum StorageError {
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] Arc<anyhow::Error>),
 
     #[error("Log entry at index {0} not found")]
     LogNotFound(u64),

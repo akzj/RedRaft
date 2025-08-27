@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
 use crate::{RaftId, error::ConfigError};
@@ -14,7 +15,7 @@ pub enum QuorumRequirement {
 // 为错误类型实现便捷构造函数
 
 // === 集群配置 ===
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Decode, Encode)]
 pub struct ClusterConfig {
     pub epoch: u64,     // 配置版本号
     pub log_index: u64, // 最后一次配置变更的日志索引
@@ -23,7 +24,7 @@ pub struct ClusterConfig {
     pub joint: Option<JointConfig>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Decode, Encode)]
 pub struct JointConfig {
     pub log_index: u64, // 最后一次配置变更的日志索引
 
