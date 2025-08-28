@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 
 use crate::{
-    message::HardState, ClusterConfig, LogEntry, RaftId, Snapshot, Storage, StorageResult,
+    ClusterConfig, LogEntry, RaftId, Snapshot, Storage, StorageResult,
+    message::HardState,
+    traits::{ClusterConfigStorage, HardStateStorage, LogEntryStorage, SnapshotStorage},
 };
 use std::{
     collections::HashMap,
@@ -10,11 +12,11 @@ use std::{
 };
 
 #[derive(Clone)]
-pub struct SnapshotStorage {
+pub struct SnapshotMemStore {
     snapshots: Arc<RwLock<HashMap<RaftId, Snapshot>>>,
 }
 
-impl SnapshotStorage {
+impl SnapshotMemStore {
     pub fn new() -> Self {
         Self {
             snapshots: Arc::new(RwLock::new(HashMap::new())),
@@ -35,7 +37,7 @@ pub struct MockStorageInner {
     log: RwLock<Vec<LogEntry>>,
     snapshot: RwLock<Option<Snapshot>>,
     config: RwLock<Option<ClusterConfig>>,
-    snapshot_storage: Option<SnapshotStorage>,
+    snapshot_storage: Option<SnapshotMemStore>,
 }
 
 /// 内存存储实现（用于测试和单机场景）
@@ -57,7 +59,7 @@ impl MockStorage {
         }
     }
 
-    pub fn new_with_snapshot_storage(snapshot_storage: SnapshotStorage) -> Self {
+    pub fn new_with_snapshot_storage(snapshot_storage: SnapshotMemStore) -> Self {
         let inner = MockStorageInner {
             hard_state: RwLock::new(HashMap::new()),
             log: RwLock::new(Vec::new()),
@@ -86,7 +88,56 @@ impl Deref for MockStorage {
 }
 
 #[async_trait]
-impl Storage for MockStorage {
+impl HardStateStorage for MockStorage {
+    async fn save_hard_state(&self, _from: &RaftId, hard_state: HardState) -> StorageResult<()> {
+        let mut hs = self.hard_state.write().unwrap();
+        hs.insert(hard_state.raft_id.clone(), hard_state);
+        Ok(())
+    }
+
+    async fn load_hard_state(&self, _from: &RaftId) -> StorageResult<Option<HardState>> {
+        let hs = self.hard_state.read().unwrap();
+        // Return None if term is 0 (uninitialized), otherwise Some
+        match hs.get(_from) {
+            Some(state) => Ok(Some(state.clone())),
+            _ => Ok(None),
+        }
+    }
+}
+
+#[async_trait]
+impl SnapshotStorage for MockStorage {
+    async fn save_snapshot(&self, from: &RaftId, snap: Snapshot) -> StorageResult<()> {
+        let mut snapshot = self.snapshot.write().unwrap();
+        *snapshot = Some(snap.clone());
+        if let Some(snapshot_storage) = &self.snapshot_storage {
+            snapshot_storage.save_snapshot(from.clone(), snap);
+        }
+        Ok(())
+    }
+
+    async fn load_snapshot(&self, _from: &RaftId) -> StorageResult<Option<Snapshot>> {
+        let snapshot = self.snapshot.read().unwrap();
+        Ok(snapshot.clone())
+    }
+}
+
+#[async_trait]
+impl ClusterConfigStorage for MockStorage {
+    async fn save_cluster_config(&self, _from: &RaftId, conf: ClusterConfig) -> StorageResult<()> {
+        let mut config = self.config.write().unwrap();
+        *config = Some(conf);
+        Ok(())
+    }
+
+    async fn load_cluster_config(&self, _from: &RaftId) -> StorageResult<ClusterConfig> {
+        let config = self.config.read().unwrap();
+        Ok(config.as_ref().unwrap().clone())
+    }
+}
+
+#[async_trait]
+impl LogEntryStorage for MockStorage {
     async fn get_log_entries_term(
         &self,
         _from: &RaftId,
@@ -100,21 +151,6 @@ impl Storage for MockStorage {
             .map(|e| (e.index, e.term))
             .collect();
         Ok(entries)
-    }
-
-    async fn save_hard_state(&self, _from:& RaftId, hard_state: HardState) -> StorageResult<()> {
-        let mut hs = self.hard_state.write().unwrap();
-        hs.insert(hard_state.raft_id.clone(), hard_state);
-        Ok(())
-    }
-
-    async fn load_hard_state(&self, _from: &RaftId) -> StorageResult<Option<HardState>> {
-        let hs = self.hard_state.read().unwrap();
-        // Return None if term is 0 (uninitialized), otherwise Some
-        match hs.get(_from){
-            Some(state) => Ok(Some(state.clone())),
-            _ => Ok(None),
-        }
     }
 
     async fn append_log_entries(&self, _from: &RaftId, entries: &[LogEntry]) -> StorageResult<()> {
@@ -153,59 +189,6 @@ impl Storage for MockStorage {
         Ok(())
     }
 
-    async fn save_snapshot(&self, from: &RaftId, snap: Snapshot) -> StorageResult<()> {
-        let mut snapshot = self.snapshot.write().unwrap();
-        *snapshot = Some(snap.clone());
-        if let Some(snapshot_storage) = &self.snapshot_storage {
-            snapshot_storage.save_snapshot(from.clone(), snap);
-        }
-        Ok(())
-    }
-
-    async fn create_snapshot(&self, from: &RaftId) -> StorageResult<(u64, u64)> {
-        let log = self.log.read().unwrap();
-        let config = self.config.read().unwrap();
-
-        if let Some(entry) = log.last() {
-            // 创建快照数据
-            let snapshot = Snapshot {
-                index: entry.index,
-                term: entry.term,
-                config: config.clone().unwrap_or_else(|| {
-                    // 如果没有配置，创建一个默认的单节点配置
-                    ClusterConfig::simple(std::iter::once(from.clone()).collect(), entry.index)
-                }),
-                data: format!("snapshot_data_at_index_{}", entry.index).into_bytes(),
-            };
-
-            // 保存快照
-            {
-                let mut snap = self.snapshot.write().unwrap();
-                *snap = Some(snapshot);
-            }
-
-            Ok((entry.index, entry.term))
-        } else {
-            // 如果没有日志，创建一个空快照
-            let snapshot = Snapshot {
-                index: 0,
-                term: 0,
-                config: config.clone().unwrap_or_else(|| {
-                    ClusterConfig::simple(std::iter::once(from.clone()).collect(), 0)
-                }),
-                data: b"empty_snapshot".to_vec(),
-            };
-
-            // 保存快照
-            {
-                let mut snap = self.snapshot.write().unwrap();
-                *snap = Some(snapshot);
-            }
-
-            Ok((0, 0))
-        }
-    }
-
     async fn get_last_log_index(&self, _from: &RaftId) -> StorageResult<(u64, u64)> {
         let log = self.log.read().unwrap();
         if let Some(entry) = log.last() {
@@ -230,22 +213,6 @@ impl Storage for MockStorage {
         // 如果日志条目不存在，返回错误而不是 0
         // 这样可以避免日志一致性检查的混淆
         Err(crate::StorageError::LogNotFound(idx))
-    }
-
-    async fn load_snapshot(&self, _from: &RaftId) -> StorageResult<Option<Snapshot>> {
-        let snapshot = self.snapshot.read().unwrap();
-        Ok(snapshot.clone())
-    }
-
-    async fn save_cluster_config(&self, _from: &RaftId, conf: ClusterConfig) -> StorageResult<()> {
-        let mut config = self.config.write().unwrap();
-        *config = Some(conf);
-        Ok(())
-    }
-
-    async fn load_cluster_config(&self, _from: &RaftId) -> StorageResult<ClusterConfig> {
-        let config = self.config.read().unwrap();
-        Ok(config.as_ref().unwrap().clone())
     }
 }
 
@@ -398,19 +365,13 @@ mod tests {
         assert_eq!(last_term, 2);
 
         // 测试获取日志条目范围
-        let retrieved = storage
-            .get_log_entries(&node_id, 1, 3)
-            .await
-            .unwrap();
+        let retrieved = storage.get_log_entries(&node_id, 1, 3).await.unwrap();
         assert_eq!(retrieved.len(), 2);
         assert_eq!(retrieved[0].index, 1);
         assert_eq!(retrieved[1].index, 2);
 
         // 测试获取全部日志
-        let all_entries = storage
-            .get_log_entries(&node_id, 1, 4)
-            .await
-            .unwrap();
+        let all_entries = storage.get_log_entries(&node_id, 1, 4).await.unwrap();
         assert_eq!(all_entries.len(), 3);
 
         // 测试空范围
@@ -461,15 +422,9 @@ mod tests {
             .unwrap();
 
         // 截断索引3及之后的日志
-        storage
-            .truncate_log_suffix(&node_id, 3)
-            .await
-            .unwrap();
+        storage.truncate_log_suffix(&node_id, 3).await.unwrap();
 
-        let remaining = storage
-            .get_log_entries(&node_id, 1, 10)
-            .await
-            .unwrap();
+        let remaining = storage.get_log_entries(&node_id, 1, 10).await.unwrap();
         assert_eq!(remaining.len(), 2);
         assert_eq!(remaining[0].index, 1);
         assert_eq!(remaining[1].index, 2);
@@ -478,10 +433,7 @@ mod tests {
         assert_eq!(last_index, 2);
 
         // 测试截断不存在的索引
-        storage
-            .truncate_log_suffix(&node_id, 10)
-            .await
-            .unwrap();
+        storage.truncate_log_suffix(&node_id, 10).await.unwrap();
         let unchanged = storage.get_log_entries(&node_id, 1, 10).await.unwrap();
         assert_eq!(unchanged.len(), 2);
     }
@@ -504,28 +456,16 @@ mod tests {
             .unwrap();
 
         // 截断索引3之前的日志
-        storage
-            .truncate_log_prefix(&node_id, 3)
-            .await
-            .unwrap();
+        storage.truncate_log_prefix(&node_id, 3).await.unwrap();
 
-        let remaining = storage
-            .get_log_entries(&node_id, 1, 10)
-            .await
-            .unwrap();
+        let remaining = storage.get_log_entries(&node_id, 1, 10).await.unwrap();
         assert_eq!(remaining.len(), 2);
         assert_eq!(remaining[0].index, 3);
         assert_eq!(remaining[1].index, 4);
 
         // 测试截断所有日志
-        storage
-            .truncate_log_prefix(&node_id, 5)
-            .await
-            .unwrap();
-        let empty = storage
-            .get_log_entries(&node_id, 1, 10)
-            .await
-            .unwrap();
+        storage.truncate_log_prefix(&node_id, 5).await.unwrap();
+        let empty = storage.get_log_entries(&node_id, 1, 10).await.unwrap();
         assert_eq!(empty.len(), 0);
 
         let (last_index, last_term) = storage.get_last_log_index(&node_id).await.unwrap();
@@ -561,31 +501,6 @@ mod tests {
 
         let updated = storage.load_snapshot(&node_id).await.unwrap();
         assert_eq!(updated, Some(new_snapshot));
-    }
-
-    #[tokio::test]
-    async fn test_create_snapshot() {
-        let storage = MockStorage::new();
-        let node_id = create_test_raft_id("group1", "node1");
-
-        // 测试空日志的快照创建
-        let (index, term) = storage.create_snapshot(&node_id).await.unwrap();
-        assert_eq!(index, 0);
-        assert_eq!(term, 0);
-
-        // 添加日志后测试快照创建
-        let entries = vec![
-            create_test_log_entry(1, 1, "command1"),
-            create_test_log_entry(2, 2, "command2"),
-        ];
-        storage
-            .append_log_entries(&node_id, &entries)
-            .await
-            .unwrap();
-
-        let (index, term) = storage.create_snapshot(&node_id).await.unwrap();
-        assert_eq!(index, 2);
-        assert_eq!(term, 2);
     }
 
     #[tokio::test]
@@ -652,10 +567,7 @@ mod tests {
         }
 
         // 验证所有日志都被正确写入
-        let all_entries = storage
-            .get_log_entries(&node_id, 1, 11)
-            .await
-            .unwrap();
+        let all_entries = storage.get_log_entries(&node_id, 1, 11).await.unwrap();
         assert_eq!(all_entries.len(), 10);
 
         // 验证日志顺序（可能因并发而乱序，但所有条目都应该存在）
@@ -682,35 +594,20 @@ mod tests {
             .unwrap();
 
         // 测试相等的low和high
-        let same_range = storage
-            .get_log_entries(&node_id, 2, 2)
-            .await
-            .unwrap();
+        let same_range = storage.get_log_entries(&node_id, 2, 2).await.unwrap();
         assert_eq!(same_range.len(), 0);
 
         // 测试超出范围的查询
-        let out_of_range = storage
-            .get_log_entries(&node_id, 10, 20)
-            .await
-            .unwrap();
+        let out_of_range = storage.get_log_entries(&node_id, 10, 20).await.unwrap();
         assert_eq!(out_of_range.len(), 0);
 
         // 测试倒序范围（high < low）
-        let reverse_range = storage
-            .get_log_entries(&node_id, 3, 1)
-            .await
-            .unwrap();
+        let reverse_range = storage.get_log_entries(&node_id, 3, 1).await.unwrap();
         assert_eq!(reverse_range.len(), 0);
 
         // 测试截断不存在的索引
-        storage
-            .truncate_log_suffix(&node_id, 100)
-            .await
-            .unwrap();
-        let unchanged = storage
-            .get_log_entries(&node_id, 1, 10)
-            .await
-            .unwrap();
+        storage.truncate_log_suffix(&node_id, 100).await.unwrap();
+        let unchanged = storage.get_log_entries(&node_id, 1, 10).await.unwrap();
         assert_eq!(unchanged.len(), 3);
 
         // 测试获取不存在索引的任期
@@ -727,12 +624,11 @@ mod tests {
 
         // 测试不同节点的独立操作（虽然MockStorage是共享的，但接口设计为支持多节点）
 
-
         let state1 = HardState {
-                    raft_id: node1.clone(),
-                    term: 5,
-                    voted_for: Some(candidate1.clone()),
-                };
+            raft_id: node1.clone(),
+            term: 5,
+            voted_for: Some(candidate1.clone()),
+        };
 
         storage
             .save_hard_state(
@@ -743,18 +639,14 @@ mod tests {
             .await
             .unwrap();
 
-
-            let state2 = HardState {
-                    raft_id: node2.clone(),
-                    term: 3,
-                    voted_for: Some(candidate2.clone()),
-                };
+        let state2 = HardState {
+            raft_id: node2.clone(),
+            term: 3,
+            voted_for: Some(candidate2.clone()),
+        };
 
         storage
-            .save_hard_state(
-                &node2,
-                state2.clone(),
-            )
+            .save_hard_state(&node2, state2.clone())
             .await
             .unwrap();
 
@@ -777,25 +669,16 @@ mod tests {
             create_test_log_entry(1, 1, "command1"),
             create_test_log_entry(2, 1, "command2"),
         ];
-        storage
-            .append_log_entries(&node_id, &batch1)
-            .await
-            .unwrap();
+        storage.append_log_entries(&node_id, &batch1).await.unwrap();
 
         let batch2 = vec![
             create_test_log_entry(3, 2, "command3"),
             create_test_log_entry(4, 2, "command4"),
         ];
-        storage
-            .append_log_entries(&node_id, &batch2)
-            .await
-            .unwrap();
+        storage.append_log_entries(&node_id, &batch2).await.unwrap();
 
         // 验证所有日志都存在
-        let all = storage
-            .get_log_entries(&node_id, 1, 5)
-            .await
-            .unwrap();
+        let all = storage.get_log_entries(&node_id, 1, 5).await.unwrap();
         assert_eq!(all.len(), 4);
         assert_eq!(all[0].index, 1);
         assert_eq!(all[3].index, 4);

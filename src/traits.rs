@@ -57,7 +57,6 @@ pub trait Network: Send + Sync {
     ) -> RpcResult<()>;
 }
 
-#[async_trait]
 /// The `Storage` trait defines the interface for persistent storage required by a Raft node.
 /// Implementors of this trait are responsible for storing and retrieving Raft state, log entries,
 /// snapshots, and cluster configuration in a thread-safe and asynchronous manner.
@@ -95,13 +94,16 @@ pub trait Network: Send + Sync {
 /// # Returns
 ///
 /// All methods return a `StorageResult` indicating success or failure, with the appropriate result type.
-pub trait Storage: Send + Sync {
+
+#[async_trait]
+pub trait HardStateStorage: Send + Sync {
     async fn save_hard_state(&self, from: &RaftId, hard_state: HardState) -> StorageResult<()>;
-
     async fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<HardState>>;
+}
 
+#[async_trait]
+pub trait LogEntryStorage: Send + Sync {
     async fn append_log_entries(&self, from: &RaftId, entries: &[LogEntry]) -> StorageResult<()>;
-
     async fn get_log_entries(
         &self,
         from: &RaftId,
@@ -123,16 +125,24 @@ pub trait Storage: Send + Sync {
     async fn get_last_log_index(&self, from: &RaftId) -> StorageResult<(u64, u64)>;
 
     async fn get_log_term(&self, from: &RaftId, idx: u64) -> StorageResult<u64>;
+}
 
+#[async_trait]
+pub trait SnapshotStorage: Send + Sync {
     async fn save_snapshot(&self, from: &RaftId, snap: Snapshot) -> StorageResult<()>;
-
     async fn load_snapshot(&self, from: &RaftId) -> StorageResult<Option<Snapshot>>;
+}
 
-    async fn create_snapshot(&self, from: &RaftId) -> StorageResult<(u64, u64)>;
-
+#[async_trait]
+pub trait ClusterConfigStorage: Send + Sync {
     async fn save_cluster_config(&self, from: &RaftId, conf: ClusterConfig) -> StorageResult<()>;
-
     async fn load_cluster_config(&self, from: &RaftId) -> StorageResult<ClusterConfig>;
+}
+
+#[async_trait]
+pub trait Storage:
+    ClusterConfigStorage + HardStateStorage + SnapshotStorage + LogEntryStorage + Send + Sync
+{
 }
 
 pub trait TimerService: Send + Sync {
@@ -150,18 +160,7 @@ pub trait EventSender: Send + Sync {
 }
 
 #[async_trait]
-pub trait RaftCallbacks: Network + Storage + TimerService + EventSender {
-    // 客户端响应回调
-    async fn client_response(
-        &self,
-        from: &RaftId,
-        request_id: RequestId,
-        result: ClientResult<u64>,
-    ) -> ClientResult<()>;
-
-    // 状态变更通知回调
-    async fn state_changed(&self, from: &RaftId, role: Role) -> Result<(), StateChangeError>;
-
+pub trait StateMachine: Send + Sync {
     // 日志应用到状态机的回调
     async fn apply_command(
         &self,
@@ -183,6 +182,34 @@ pub trait RaftCallbacks: Network + Storage + TimerService + EventSender {
         oneshot: oneshot::Sender<SnapshotResult<()>>,
     );
 
+    // create snapshot and save to
+    async fn create_snapshot(
+        &self,
+        from: &RaftId,
+        cluster_config: ClusterConfig,
+        saver: Arc<dyn SnapshotStorage>,
+    ) -> StorageResult<(u64, u64)>;
+
+    // 客户端响应回调
+    async fn client_response(
+        &self,
+        from: &RaftId,
+        request_id: RequestId,
+        result: ClientResult<u64>,
+    ) -> ClientResult<()>;
+}
+
+#[async_trait]
+pub trait EventNotify {
+    // 状态变更通知回调
+    async fn on_state_changed(&self, from: &RaftId, role: Role) -> Result<(), StateChangeError>;
+
     // 节点被从集群中删除的回调，用于优雅退出
-    async fn node_removed(&self, node_id: &RaftId) -> Result<(), StateChangeError>;
+    async fn on_node_removed(&self, node_id: &RaftId) -> Result<(), StateChangeError>;
+}
+
+#[async_trait]
+pub trait RaftCallbacks:
+    StateMachine + Network + Storage + TimerService + EventSender + EventNotify
+{
 }

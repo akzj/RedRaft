@@ -27,9 +27,9 @@ pub mod message;
 pub mod mutl_raft_driver;
 pub mod network;
 pub mod pipeline;
+pub mod storage;
 pub mod tests;
 pub mod traits;
-pub mod wal;
 // 类型定义
 
 pub type GroupId = String;
@@ -560,7 +560,7 @@ impl RaftState {
             .error_handler
             .handle_void(
                 self.callbacks
-                    .state_changed(&self.id, Role::Candidate)
+                    .on_state_changed(&self.id, Role::Candidate)
                     .await,
                 "state_changed",
                 None,
@@ -611,7 +611,9 @@ impl RaftState {
             let _ = self
                 .error_handler
                 .handle_void(
-                    self.callbacks.state_changed(&self.id, Role::Follower).await,
+                    self.callbacks
+                        .on_state_changed(&self.id, Role::Follower)
+                        .await,
                     "state_changed",
                     None,
                 )
@@ -766,7 +768,9 @@ impl RaftState {
             let _ = self
                 .error_handler
                 .handle_void(
-                    self.callbacks.state_changed(&self.id, Role::Follower).await,
+                    self.callbacks
+                        .on_state_changed(&self.id, Role::Follower)
+                        .await,
                     "state_changed",
                     None,
                 )
@@ -850,7 +854,11 @@ impl RaftState {
 
         self.reset_heartbeat_timer().await;
 
-        if let Err(err) = self.callbacks.state_changed(&self.id, Role::Leader).await {
+        if let Err(err) = self
+            .callbacks
+            .on_state_changed(&self.id, Role::Leader)
+            .await
+        {
             log::error!(
                 "Failed to change state to Leader for node {}: {}",
                 self.id,
@@ -1559,7 +1567,9 @@ impl RaftState {
             let _ = self
                 .error_handler
                 .handle_void(
-                    self.callbacks.state_changed(&self.id, Role::Follower).await,
+                    self.callbacks
+                        .on_state_changed(&self.id, Role::Follower)
+                        .await,
                     "state_changed",
                     None,
                 )
@@ -1599,17 +1609,16 @@ impl RaftState {
                         );
                     } else {
                         // 保持当前的 next_index（可能是乐观更新的结果）
-                        // info!(
-                        //     "Node {} updated match_index for {}: match_index={} (next_index={} kept)",
-                        //     self.id, peer, match_index, current_next
-                        // );
+                        debug!(
+                            "Node {} updated match_index for {}: match_index={} (next_index={} kept)",
+                            self.id, peer, match_index, current_next
+                        );
                     }
                 } else {
-                    // 这是过期的响应，忽略所有更新
-                    // info!(
-                    //     "Node {} Ignoring stale response from {}: matched_index={} <= current={}",
-                    //     self.id, peer, match_index, current_match
-                    // );
+                    debug!(
+                        "Node {} Ignoring stale response from {}: matched_index={} <= current={}",
+                        self.id, peer, match_index, current_match
+                    );
                 }
 
                 // 尝试更新commit_index
@@ -2253,7 +2262,7 @@ impl RaftState {
                         let _ = self
                             .error_handler
                             .handle_void(
-                                self.callbacks.state_changed(&self.id, self.role).await,
+                                self.callbacks.on_state_changed(&self.id, self.role).await,
                                 "state_changed",
                                 None,
                             )
@@ -2269,7 +2278,7 @@ impl RaftState {
                             );
                             // Node is no longer a member of the cluster
                             self.callbacks
-                                .node_removed(&self.id)
+                                .on_node_removed(&self.id)
                                 .await
                                 .unwrap_or_else(|e| {
                                     error!("Failed to remove node {}: {}", self.id, e);
@@ -2286,7 +2295,7 @@ impl RaftState {
                         let _ = self
                             .error_handler
                             .handle_void(
-                                self.callbacks.state_changed(&self.id, self.role).await,
+                                self.callbacks.on_state_changed(&self.id, self.role).await,
                                 "state_changed",
                                 None,
                             )
@@ -2344,7 +2353,9 @@ impl RaftState {
                 .await;
             self.error_handler
                 .handle_void(
-                    self.callbacks.state_changed(&self.id, Role::Follower).await,
+                    self.callbacks
+                        .on_state_changed(&self.id, Role::Follower)
+                        .await,
                     "state_changed",
                     None,
                 )
@@ -2751,7 +2762,7 @@ impl RaftState {
                             let _ = self
                                 .error_handler
                                 .handle_void(
-                                    self.callbacks.node_removed(&self.id).await,
+                                    self.callbacks.on_node_removed(&self.id).await,
                                     "node_removed",
                                     None,
                                 )
@@ -3730,13 +3741,15 @@ impl RaftState {
         };
 
         // 3. 获取当前集群配置（用于验证快照配置的兼容性）
-        let _config = self.config.clone();
+        let config = self.config.clone();
 
         // 4. 让业务层生成快照数据
         let (snap_index, snap_term) = match self
             .error_handler
             .handle(
-                self.callbacks.create_snapshot(&self.id).await,
+                self.callbacks
+                    .create_snapshot(&self.id, config, self.callbacks.clone())
+                    .await,
                 "create_snapshot",
                 None,
             )

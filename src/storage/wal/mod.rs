@@ -22,7 +22,7 @@ use crate::{
     cluster_config::ClusterConfig,
     error::StorageError,
     message::{HardState, HardStateMap, LogEntry, Snapshot},
-    traits::{Storage, StorageResult},
+    traits::{HardStateStorage, LogEntryStorage, Storage, StorageResult},
 };
 
 #[derive(Debug, Default, Decode, Encode, Clone, PartialEq, Eq, Hash)]
@@ -61,12 +61,6 @@ const ENTRY_MAGIC_NUM: u32 = 0x_1234_5678;
 const ENTRY_HEADER_SIZE: u32 = 16; // 4 + 4 + 4 + 4 = 16 bytes
 const LOG_SEGMENT_VERSION_V1: u32 = 1;
 
-pub struct SegmentTruncateLog {}
-
-// LogSegment file format:
-// |  EntryHeader[ logEntry |  clusterConfig | truncatePrefix | truncateSuffix ] ... | hard_states ...| index ...| tail | tail size,crc (u32,u32) | version (u32)|
-// SnapshotSegment file format:
-// |  EntryHeader[ snapshot ] ... |  index ...| tail | tail size,crc (u32,u32) | version (u32)|
 // 快照存储目录结构（以本地磁盘为例）：
 // /raft/snapshots/{raft_id}
 // ├─ {timestamp}_10000_5000/  # 快照目录名：时间戳_lastIncludedIndex_lastIncludedTerm（便于定位和清理）
@@ -74,6 +68,16 @@ pub struct SegmentTruncateLog {}
 // │  ├─ data_000.dat        # 业务数据分片1（按固定大小分片，如100MB/片）
 // │  ├─ data_001.dat        # 业务数据分片2
 // │  └─ checksum.sha256     # 分片校验文件（记录每个data文件的SHA256，避免分片损坏）
+
+pub struct SnapshotStore {
+    snapshots: HashMap<RaftId, Vec<u8>>,
+}
+
+pub struct SegmentTruncateLog {}
+
+// LogSegment file format:
+// |  EntryHeader[ logEntry |  clusterConfig | truncatePrefix | truncateSuffix ] ... | hard_states ...| index ...| tail | tail size,crc (u32,u32) | version (u32)|
+
 #[derive(Debug, Default, Decode, Encode)]
 pub struct LogSegmentTail {
     hard_states_offset: u64,
@@ -629,7 +633,7 @@ impl LogEntryStore {
 }
 
 #[async_trait::async_trait]
-impl Storage for LogEntryStore {
+impl HardStateStorage for LogEntryStore {
     async fn save_hard_state(&self, from: &RaftId, hard_state: HardState) -> StorageResult<()> {
         unimplemented!()
     }
@@ -637,7 +641,10 @@ impl Storage for LogEntryStore {
     async fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<HardState>> {
         unimplemented!()
     }
+}
 
+#[async_trait::async_trait]
+impl LogEntryStorage for LogEntryStore {
     async fn append_log_entries(&self, from: &RaftId, entries: &[LogEntry]) -> StorageResult<()> {
         unimplemented!()
     }
@@ -673,26 +680,6 @@ impl Storage for LogEntryStore {
     }
 
     async fn get_log_term(&self, from: &RaftId, idx: u64) -> StorageResult<u64> {
-        unimplemented!()
-    }
-
-    async fn save_snapshot(&self, from: &RaftId, snap: Snapshot) -> StorageResult<()> {
-        unimplemented!()
-    }
-
-    async fn load_snapshot(&self, from: &RaftId) -> StorageResult<Option<Snapshot>> {
-        unimplemented!()
-    }
-
-    async fn create_snapshot(&self, from: &RaftId) -> StorageResult<(u64, u64)> {
-        unimplemented!()
-    }
-
-    async fn save_cluster_config(&self, from: &RaftId, conf: ClusterConfig) -> StorageResult<()> {
-        unimplemented!()
-    }
-
-    async fn load_cluster_config(&self, from: &RaftId) -> StorageResult<ClusterConfig> {
         unimplemented!()
     }
 }

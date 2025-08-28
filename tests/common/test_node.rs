@@ -1,10 +1,11 @@
 // test_node.rs
 use crate::common::test_statemachine::TestStateMachine;
 use anyhow::Result;
+use raft_lite::cluster_config::ClusterConfig;
 use raft_lite::message::{HardState, LogEntry};
 use raft_lite::mutl_raft_driver::{HandleEventTrait, MultiRaftDriver, Timers};
 use raft_lite::tests::mock::mock_network::{MockNetworkHub, MockNodeNetwork, NetworkEvent};
-use raft_lite::tests::mock::mock_storage::{MockStorage, SnapshotStorage};
+use raft_lite::tests::mock::mock_storage::{MockStorage, SnapshotMemStore};
 use raft_lite::traits::*;
 use raft_lite::*;
 use std::ops::Deref;
@@ -43,7 +44,7 @@ impl TestNode {
         id: RaftId,
         hub: MockNetworkHub,
         timer_service: Timers,
-        snapshot_storage: SnapshotStorage,
+        snapshot_storage: SnapshotMemStore,
         driver: MultiRaftDriver,
         initial_peers: Vec<RaftId>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -63,7 +64,7 @@ impl TestNode {
         id: RaftId,
         hub: MockNetworkHub,
         timer_service: Timers,
-        snapshot_storage: SnapshotStorage,
+        snapshot_storage: SnapshotMemStore,
         driver: MultiRaftDriver,
         initial_voters: Vec<RaftId>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -83,7 +84,7 @@ impl TestNode {
         id: RaftId,
         hub: MockNetworkHub,
         timer_service: Timers,
-        snapshot_storage: SnapshotStorage,
+        snapshot_storage: SnapshotMemStore,
         driver: MultiRaftDriver,
         initial_peers_or_voters: Vec<RaftId>,
         is_voter: bool,
@@ -387,7 +388,24 @@ impl Network for TestNodeInner {
 
 // Implement Storage trait (delegate to MockStorage)
 #[async_trait::async_trait]
-impl Storage for TestNodeInner {
+impl SnapshotStorage for TestNodeInner {
+    async fn save_snapshot(
+        &self,
+        from: &RaftId,
+        snap: raft_lite::message::Snapshot,
+    ) -> StorageResult<()> {
+        self.storage.save_snapshot(from, snap).await
+    }
+
+    async fn load_snapshot(
+        &self,
+        from: &RaftId,
+    ) -> StorageResult<Option<raft_lite::message::Snapshot>> {
+        self.storage.load_snapshot(from).await
+    }
+}
+#[async_trait::async_trait]
+impl HardStateStorage for TestNodeInner {
     async fn save_hard_state(&self, from: &RaftId, hard_state: HardState) -> StorageResult<()> {
         self.storage.save_hard_state(from, hard_state).await
     }
@@ -395,7 +413,27 @@ impl Storage for TestNodeInner {
     async fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<HardState>> {
         self.storage.load_hard_state(from).await
     }
+}
+#[async_trait::async_trait]
+impl ClusterConfigStorage for TestNodeInner {
+    async fn save_cluster_config(
+        &self,
+        from: &RaftId,
+        conf: raft_lite::cluster_config::ClusterConfig,
+    ) -> StorageResult<()> {
+        self.storage.save_cluster_config(from, conf).await
+    }
 
+    async fn load_cluster_config(
+        &self,
+        from: &RaftId,
+    ) -> StorageResult<raft_lite::cluster_config::ClusterConfig> {
+        self.storage.load_cluster_config(from).await
+    }
+}
+
+#[async_trait::async_trait]
+impl LogEntryStorage for TestNodeInner {
     async fn append_log_entries(&self, from: &RaftId, entries: &[LogEntry]) -> StorageResult<()> {
         self.storage.append_log_entries(from, entries).await
     }
@@ -432,65 +470,6 @@ impl Storage for TestNodeInner {
 
     async fn get_log_term(&self, from: &RaftId, idx: u64) -> StorageResult<u64> {
         self.storage.get_log_term(from, idx).await
-    }
-
-    async fn save_snapshot(
-        &self,
-        from: &RaftId,
-        snap: raft_lite::message::Snapshot,
-    ) -> StorageResult<()> {
-        self.storage.save_snapshot(from, snap).await
-    }
-
-    async fn load_snapshot(
-        &self,
-        from: &RaftId,
-    ) -> StorageResult<Option<raft_lite::message::Snapshot>> {
-        self.storage.load_snapshot(from).await
-    }
-
-    async fn create_snapshot(&self, from: &RaftId) -> StorageResult<(u64, u64)> {
-        // 使用TestStateMachine生成快照数据，它会返回已应用的索引、任期和数据
-        let (snapshot_index, snapshot_term, snapshot_data) =
-            match self.state_machine.create_snapshot(from.clone()) {
-                Ok(data) => data,
-                Err(e) => {
-                    return Err(raft_lite::error::StorageError::SnapshotCreationFailed(
-                        format!("State machine snapshot creation failed: {:?}", e),
-                    ));
-                }
-            };
-
-        // 获取当前集群配置
-        let config = self.storage.load_cluster_config(from).await?;
-
-        // 创建快照对象
-        let snapshot = raft_lite::message::Snapshot {
-            index: snapshot_index,
-            term: snapshot_term,
-            config,
-            data: snapshot_data,
-        };
-
-        // 保存快照到存储
-        self.storage.save_snapshot_internal(snapshot);
-
-        Ok((snapshot_index, snapshot_term))
-    }
-
-    async fn save_cluster_config(
-        &self,
-        from: &RaftId,
-        conf: raft_lite::cluster_config::ClusterConfig,
-    ) -> StorageResult<()> {
-        self.storage.save_cluster_config(from, conf).await
-    }
-
-    async fn load_cluster_config(
-        &self,
-        from: &RaftId,
-    ) -> StorageResult<raft_lite::cluster_config::ClusterConfig> {
-        self.storage.load_cluster_config(from).await
     }
 }
 
@@ -539,21 +518,39 @@ impl EventSender for TestNodeInner {
 }
 
 #[async_trait::async_trait]
-impl RaftCallbacks for TestNodeInner {
+impl EventNotify for TestNodeInner {
+    async fn on_state_changed(
+        &self,
+        _from: &RaftId,
+        _role: raft_lite::Role,
+    ) -> Result<(), raft_lite::error::StateChangeError> {
+        Ok(())
+    }
+
+    async fn on_node_removed(
+        &self,
+        node_id: &RaftId,
+    ) -> Result<(), raft_lite::error::StateChangeError> {
+        warn!("Node removed: {}", node_id);
+        self.remove_node.notify_one();
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl RaftCallbacks for TestNodeInner {}
+
+#[async_trait::async_trait]
+impl Storage for TestNodeInner {}
+
+#[async_trait::async_trait]
+impl StateMachine for TestNodeInner {
     async fn client_response(
         &self,
         _from: &RaftId,
         _request_id: RequestId,
         _result: raft_lite::traits::ClientResult<u64>,
     ) -> raft_lite::traits::ClientResult<()> {
-        Ok(())
-    }
-
-    async fn state_changed(
-        &self,
-        _from: &RaftId,
-        _role: raft_lite::Role,
-    ) -> Result<(), raft_lite::error::StateChangeError> {
         Ok(())
     }
 
@@ -575,7 +572,7 @@ impl RaftCallbacks for TestNodeInner {
         index: u64,
         term: u64,
         data: Vec<u8>,
-        config: raft_lite::cluster_config::ClusterConfig,
+        config: ClusterConfig,
         request_id: RequestId,
         oneshot: oneshot::Sender<SnapshotResult<()>>,
     ) {
@@ -587,13 +584,35 @@ impl RaftCallbacks for TestNodeInner {
         });
     }
 
-    async fn node_removed(
+    async fn create_snapshot(
         &self,
-        node_id: &RaftId,
-    ) -> Result<(), raft_lite::error::StateChangeError> {
-        warn!("Node removed: {}", node_id);
-        self.remove_node.notify_one();
-        Ok(())
+        from: &RaftId,
+        config: ClusterConfig,
+        saver: Arc<dyn SnapshotStorage>,
+    ) -> StorageResult<(u64, u64)> {
+        // 使用TestStateMachine生成快照数据，它会返回已应用的索引、任期和数据
+        let (snapshot_index, snapshot_term, snapshot_data) =
+            match self.state_machine.create_snapshot(from.clone()) {
+                Ok(data) => data,
+                Err(e) => {
+                    return Err(raft_lite::error::StorageError::SnapshotCreationFailed(
+                        format!("State machine snapshot creation failed: {:?}", e),
+                    ));
+                }
+            };
+
+        // 创建快照对象
+        let snapshot = raft_lite::message::Snapshot {
+            index: snapshot_index,
+            term: snapshot_term,
+            config,
+            data: snapshot_data,
+        };
+
+        // 保存快照到存储
+        saver.save_snapshot(from, snapshot).await.unwrap();
+
+        Ok((snapshot_index, snapshot_term))
     }
 }
 

@@ -33,6 +33,12 @@ pub mod tests {
     }
 
     #[async_trait]
+    impl RaftCallbacks for TestCallbacks {}
+
+    #[async_trait]
+    impl Storage for TestCallbacks {}
+
+    #[async_trait]
     impl Network for TestCallbacks {
         async fn send_request_vote_request(
             &self,
@@ -102,7 +108,7 @@ pub mod tests {
     }
 
     #[async_trait]
-    impl Storage for TestCallbacks {
+    impl HardStateStorage for TestCallbacks {
         async fn save_hard_state(&self, from: &RaftId, hard_state: HardState) -> StorageResult<()> {
             self.storage.save_hard_state(from, hard_state).await
         }
@@ -110,7 +116,36 @@ pub mod tests {
         async fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<HardState>> {
             self.storage.load_hard_state(from).await
         }
+    }
 
+    #[async_trait]
+    impl SnapshotStorage for TestCallbacks {
+        async fn save_snapshot(&self, from: &RaftId, snap: Snapshot) -> StorageResult<()> {
+            self.storage.save_snapshot(from, snap).await
+        }
+
+        async fn load_snapshot(&self, from: &RaftId) -> StorageResult<Option<Snapshot>> {
+            self.storage.load_snapshot(from).await
+        }
+    }
+
+    #[async_trait]
+    impl ClusterConfigStorage for TestCallbacks {
+        async fn save_cluster_config(
+            &self,
+            from: &RaftId,
+            conf: ClusterConfig,
+        ) -> StorageResult<()> {
+            self.storage.save_cluster_config(from, conf).await
+        }
+
+        async fn load_cluster_config(&self, from: &RaftId) -> StorageResult<ClusterConfig> {
+            self.storage.load_cluster_config(from).await
+        }
+    }
+
+    #[async_trait]
+    impl LogEntryStorage for TestCallbacks {
         async fn append_log_entries(
             &self,
             from: &RaftId,
@@ -152,30 +187,6 @@ pub mod tests {
         async fn get_log_term(&self, from: &RaftId, idx: u64) -> StorageResult<u64> {
             self.storage.get_log_term(from, idx).await
         }
-
-        async fn save_snapshot(&self, from: &RaftId, snap: Snapshot) -> StorageResult<()> {
-            self.storage.save_snapshot(from, snap).await
-        }
-
-        async fn load_snapshot(&self, from: &RaftId) -> StorageResult<Option<Snapshot>> {
-            self.storage.load_snapshot(from).await
-        }
-
-        async fn create_snapshot(&self, from: &RaftId) -> StorageResult<(u64, u64)> {
-            self.storage.create_snapshot(from).await
-        }
-
-        async fn save_cluster_config(
-            &self,
-            from: &RaftId,
-            conf: ClusterConfig,
-        ) -> StorageResult<()> {
-            self.storage.save_cluster_config(from, conf).await
-        }
-
-        async fn load_cluster_config(&self, from: &RaftId) -> StorageResult<ClusterConfig> {
-            self.storage.load_cluster_config(from).await
-        }
     }
 
     impl TimerService for TestCallbacks {
@@ -216,7 +227,43 @@ pub mod tests {
     }
 
     #[async_trait]
-    impl RaftCallbacks for TestCallbacks {
+    impl StateMachine for TestCallbacks {
+        async fn create_snapshot(
+            &self,
+            from: &RaftId,
+            config: ClusterConfig,
+            saver: Arc<dyn SnapshotStorage>,
+        ) -> StorageResult<(u64, u64)> {
+            let mut commands = self.applied_commands.lock().await;
+
+            if commands.is_empty() {
+                return Err(StorageError::SnapshotCreationFailed(
+                    "No commands to snapshot".into(),
+                ));
+            }
+
+            let data = serde_json::to_vec(&*commands).map_err(|e| {
+                StorageError::SnapshotCreationFailed(format!(
+                    "Snapshot serialization error: {:?}",
+                    e
+                ))
+            })?;
+
+            saver
+                .save_snapshot(
+                    from,
+                    Snapshot {
+                        index: commands.last().unwrap().1,
+                        term: commands.last().unwrap().2,
+                        data,
+                        config,
+                    },
+                )
+                .await
+                .unwrap();
+
+            Ok((commands.last().unwrap().1, commands.last().unwrap().2))
+        }
         async fn client_response(
             &self,
             from: &RaftId,
@@ -225,12 +272,6 @@ pub mod tests {
         ) -> ClientResult<()> {
             let mut responses = self.client_responses.lock().await;
             responses.push((from.clone(), request_id, result));
-            Ok(())
-        }
-
-        async fn state_changed(&self, from: &RaftId, role: Role) -> Result<(), StateChangeError> {
-            let mut changes = self.state_changes.lock().await;
-            changes.push((from.clone(), role));
             Ok(())
         }
 
@@ -257,8 +298,21 @@ pub mod tests {
             _oneshot: oneshot::Sender<SnapshotResult<()>>,
         ) {
         }
+    }
 
-        async fn node_removed(&self, _node_id: &RaftId) -> Result<(), StateChangeError> {
+    #[async_trait]
+    impl EventNotify for TestCallbacks {
+        async fn on_state_changed(
+            &self,
+            from: &RaftId,
+            role: Role,
+        ) -> Result<(), StateChangeError> {
+            let mut changes = self.state_changes.lock().await;
+            changes.push((from.clone(), role));
+            Ok(())
+        }
+
+        async fn on_node_removed(&self, _node_id: &RaftId) -> Result<(), StateChangeError> {
             Ok(())
         }
     }

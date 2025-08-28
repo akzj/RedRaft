@@ -6,7 +6,7 @@ use raft_lite::mutl_raft_driver::MultiRaftDriver;
 use raft_lite::tests::mock::mock_network::MockNetworkHub;
 use raft_lite::tests::mock::mock_network::MockNetworkHubConfig;
 use raft_lite::tests::mock::mock_network::MockRaftNetworkConfig;
-use raft_lite::tests::mock::mock_storage::SnapshotStorage;
+use raft_lite::tests::mock::mock_storage::SnapshotMemStore;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -26,7 +26,7 @@ pub struct TestCluster {
     driver: MultiRaftDriver,
     config: TestClusterConfig,
     hub: MockNetworkHub,
-    snapshot_storage: SnapshotStorage,
+    snapshot_storage: SnapshotMemStore,
     nodes: Arc<Mutex<HashMap<RaftId, TestNode>>>,
 }
 
@@ -34,7 +34,7 @@ impl TestCluster {
     pub async fn new(config: TestClusterConfig) -> Self {
         let hub = MockNetworkHub::new(config.hub.clone());
         let cluster = TestCluster {
-            snapshot_storage: SnapshotStorage::new(),
+            snapshot_storage: SnapshotMemStore::new(),
             driver: MultiRaftDriver::new(),
             config,
             hub,
