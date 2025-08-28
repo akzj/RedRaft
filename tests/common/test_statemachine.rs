@@ -58,6 +58,8 @@ impl SimpleKvStore {
 
 // --- 实现 RaftCallbacks ---
 // TestStateMachine 将包含 KvStore 和与 Raft 交互所需的其他组件
+
+#[derive(Clone)]
 pub struct TestStateMachine {
     id: RaftId,
     pub store: Arc<RwLock<SimpleKvStore>>,
@@ -130,7 +132,7 @@ impl TestStateMachine {
         let applied_term = *self.last_applied_term.read().unwrap();
 
         let data = serde_json::to_vec(&self.store.read().unwrap().clone())
-            .map_err(|e| raft_lite::error::SnapshotError::DataCorrupted(e.into()))?;
+            .map_err(|e| raft_lite::error::SnapshotError::DataCorrupted(Arc::new(e.into())))?;
 
         debug!(
             "node {:?} created snapshot at index={}, term={}, data_len={}",
@@ -153,7 +155,7 @@ impl TestStateMachine {
         _request_id: RequestId,
     ) -> raft_lite::traits::SnapshotResult<()> {
         let store: SimpleKvStore = serde_json::from_slice(&data)
-            .map_err(|e| raft_lite::error::SnapshotError::DataCorrupted(e.into()))?;
+            .map_err(|e| raft_lite::error::SnapshotError::DataCorrupted(Arc::new(e.into())))?;
         self.store.write().unwrap().data = store.data;
         Ok(())
     }

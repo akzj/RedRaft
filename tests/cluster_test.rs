@@ -70,9 +70,8 @@ async fn test_cluster_config_operations() {
             key: format!("key{}", i),
             value: format!("value{}", i),
         };
-        let command_bytes = command.encode();
 
-        match cluster.propose_command(&leader_id, command_bytes) {
+        match cluster.propose_command(&leader_id, &command) {
             Ok(()) => println!("✓ Successfully proposed command: {:?}", command),
             Err(e) => println!("✗ Failed to propose command {:?}: {}", command, e),
         }
@@ -117,6 +116,10 @@ async fn test_cluster_config_operations() {
                     }
                     raft_lite::Role::Candidate => {
                         println!("✓ New node successfully joined and is participating in election");
+                    }
+
+                    raft_lite::Role::Learner => {
+                        println!("✓ New node successfully joined as learner");
                     }
                 }
                 println!("✓ New node integrated correctly via Raft config change");
@@ -241,13 +244,12 @@ async fn test_cluster_config_operations() {
         // 3.5 发送一个测试命令确保集群仍然可用，并验证新节点数据同步
         let leaders = cluster.get_current_leader().await;
         if let Some(current_leader) = leaders.first() {
-            let test_command = KvCommand::Set {
+            let command = KvCommand::Set {
                 key: format!("iteration_key_{}", iteration),
                 value: format!("iteration_value_{}", iteration),
             };
-            let command_bytes = test_command.encode();
 
-            match cluster.propose_command(current_leader, command_bytes) {
+            match cluster.propose_command(current_leader, &command) {
                 Ok(()) => {
                     println!(
                         "✓ Cluster still accepts commands after iteration {}",
@@ -290,6 +292,7 @@ async fn test_cluster_config_operations() {
     let mut leader_count = 0;
     let mut follower_count = 0;
     let mut candidate_count = 0;
+    let mut learner_count = 0;
 
     for (id, role) in &final_status {
         println!("  {:?}: {:?}", id, role);
@@ -297,6 +300,7 @@ async fn test_cluster_config_operations() {
             raft_lite::Role::Leader => leader_count += 1,
             raft_lite::Role::Follower => follower_count += 1,
             raft_lite::Role::Candidate => candidate_count += 1,
+            raft_lite::Role::Learner => learner_count += 1,
         }
     }
 

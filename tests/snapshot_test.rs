@@ -48,9 +48,8 @@ async fn test_cluster_snapshot_and_learner_sync() {
                 key: format!("key{}-{}", s, i),
                 value: format!("value{}-{}", s, i),
             };
-            let command_bytes = command.encode();
 
-            match cluster.propose_command(&leader_id, command_bytes) {
+            match cluster.propose_command(&leader_id, &command) {
                 Ok(()) => {
                     if i % 50 == 0 {
                         println!("✓ Successfully proposed command batch {}/200", i);

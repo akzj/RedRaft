@@ -7,11 +7,16 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bincode::Decode;
 use bincode::Encode;
+use rand::Rng;
+use tokio::sync::oneshot;
+use tonic::Request;
 
 use crate::message::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fmt::write;
 use std::fmt::{self, Display};
+use std::result;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -127,6 +132,9 @@ pub enum Event {
 
     // 快照生成
     CreateSnapshot,
+
+    // 快照安装结果
+    CompleteSnapshotInstallation(CompleteSnapshotInstallation),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +142,7 @@ pub enum Role {
     Follower,
     Candidate,
     Leader,
+    Learner, // 学习者角色（非投票成员）
 }
 
 impl Display for Role {
@@ -142,6 +151,7 @@ impl Display for Role {
             Role::Follower => write!(f, "Follower"),
             Role::Candidate => write!(f, "Candidate"),
             Role::Leader => write!(f, "Leader"),
+            Role::Learner => write!(f, "Learner"),
         }
     }
 }
@@ -179,9 +189,8 @@ pub struct RaftState {
     joint_config_log_index: u64, // 联合配置的日志索引
 
     // 定时器配置
-    election_timeout: Duration,
-    election_timeout_min: u64,
-    election_timeout_max: u64,
+    election_timeout_min: Duration,
+    election_timeout_max: Duration,
     heartbeat_interval: Duration,
     heartbeat_interval_timer_id: Option<TimerId>,
     apply_interval: Duration, // 日志应用到状态机的间隔
@@ -203,6 +212,7 @@ pub struct RaftState {
 
     // 快照请求跟踪（仅 Follower 有效）
     current_snapshot_request_id: Option<RequestId>,
+    install_snapshot_success: Option<(bool, RequestId, Option<SnapshotError>)>, // 安装快照成功标志
 
     // 快照相关状态（Leader 用）
     follower_snapshot_states: HashMap<RaftId, InstallSnapshotState>,
@@ -231,10 +241,10 @@ pub struct RaftState {
 pub struct RaftStateOptions {
     pub id: RaftId,
     pub peers: Vec<RaftId>,
-    pub election_timeout_min: u64,
-    pub election_timeout_max: u64,
-    pub heartbeat_interval: u64,
-    pub apply_interval: u64,
+    pub election_timeout_min: Duration,
+    pub election_timeout_max: Duration,
+    pub heartbeat_interval: Duration,
+    pub apply_interval: Duration,
     pub config_change_timeout: Duration,
     pub leader_transfer_timeout: Duration,
     pub apply_batch_size: u64, // 每次应用到状态机的日志条数
@@ -259,11 +269,11 @@ impl Default for RaftStateOptions {
         Self {
             id: RaftId::new("".to_string(), "".to_string()),
             peers: vec![],
-            election_timeout_min: 500,
-            election_timeout_max: 1000,
-            heartbeat_interval: 50,
-            apply_interval: 100,
-            apply_batch_size: 64,
+            election_timeout_min: Duration::from_millis(150),
+            election_timeout_max: Duration::from_millis(300),
+            heartbeat_interval: Duration::from_millis(50),
+            apply_interval: Duration::from_millis(1),
+            apply_batch_size: 54,
             config_change_timeout: Duration::from_secs(10),
             leader_transfer_timeout: Duration::from_secs(10),
             schedule_snapshot_probe_interval: Duration::from_secs(5),
@@ -324,9 +334,6 @@ impl RaftState {
                 return Err(RaftError::Storage(err).into());
             }
         };
-        let timeout = options.election_timeout_min
-            + rand::random::<u64>()
-                % (options.election_timeout_max - options.election_timeout_min + 1);
 
         let (last_log_index, last_log_term) = match callbacks.get_last_log_index(&options.id).await
         {
@@ -366,11 +373,10 @@ impl RaftState {
             heartbeat_interval_timer_id: None,
             config_change_timeout: options.config_change_timeout,
             joint_config_log_index: 0, // 联合配置的日志索引初始化为0
-            election_timeout: Duration::from_millis(timeout),
             election_timeout_min: options.election_timeout_min,
             election_timeout_max: options.election_timeout_max,
-            heartbeat_interval: Duration::from_millis(options.heartbeat_interval),
-            apply_interval: Duration::from_millis(options.apply_interval),
+            heartbeat_interval: options.heartbeat_interval,
+            apply_interval: options.apply_interval,
             apply_interval_timer: None,
             config_change_timer: None,
             last_heartbeat: Instant::now(),
@@ -378,6 +384,7 @@ impl RaftState {
             election_votes: HashMap::new(),
             election_max_term: current_term,
             current_election_id: None,
+            install_snapshot_success: None,
             current_snapshot_request_id: None,
             follower_snapshot_states: HashMap::new(),
             follower_last_snapshot_index: HashMap::new(),
@@ -442,6 +449,11 @@ impl RaftState {
                 self.handle_leader_transfer_timeout().await;
             }
             Event::CreateSnapshot => self.create_snapshot().await,
+
+            Event::CompleteSnapshotInstallation(complete_snapshot_installation) => {
+                self.handle_complete_snapshot_installation(complete_snapshot_installation)
+                    .await;
+            }
         }
     }
     async fn handle_election_timeout(&mut self) {
@@ -629,6 +641,7 @@ impl RaftState {
                 // 满足所有投票条件，授予投票
                 self.voted_for = Some(request.candidate_id.clone());
                 vote_granted = true;
+                self.reset_election().await; // 重置选举定时器
                 info!(
                     "Node {} granting vote to {} for term {}",
                     self.id,
@@ -853,18 +866,49 @@ impl RaftState {
     }
 
     async fn reset_election(&mut self) {
+        // 重置当前选举ID，准备新一轮选举计时
         self.current_election_id = None;
-        let new_timeout = self.election_timeout_min
-            + rand::random::<u64>() % (self.election_timeout_max - self.election_timeout_min + 1);
-        self.election_timeout = Duration::from_millis(new_timeout);
 
-        if let Some(timer_id) = self.election_timer {
-            self.callbacks.del_timer(&self.id, timer_id);
+        // 计算有效的随机范围，确保至少有1ms的随机空间
+        let min_ms = self.election_timeout_min.as_millis() as u64;
+        let max_ms = self.election_timeout_max.as_millis() as u64;
+
+        // 确保最小超时小于最大超时，否则使用默认范围
+        let (actual_min, actual_max) = if min_ms < max_ms {
+            (min_ms, max_ms)
+        } else {
+            warn!(
+                "Node {} has invalid election timeout range (min: {:?}, max: {:?}), using default range",
+                self.id, self.election_timeout_min, self.election_timeout_max
+            );
+            (150, 300) // 默认Raft选举超时范围
+        };
+
+        // 生成随机偏移量，范围为[0, actual_max - actual_min]
+        let range = actual_max - actual_min + 1; // +1确保能取到最大值
+        let mut rng = rand::rng();
+        let random_offset = rng.random_range(0..range);
+
+        // 计算最终的选举超时时间
+        let election_timeout = Duration::from_millis(actual_min + random_offset);
+
+        debug!(
+            "Node {} reset election timer to {:?} (range: {:?}-{:?})",
+            self.id,
+            election_timeout,
+            Duration::from_millis(actual_min),
+            Duration::from_millis(actual_max)
+        );
+
+        // 安全地删除旧计时器（如果存在）
+        if let Some(timer_id) = self.election_timer.take() {
+            self.callbacks.del_timer(&self.id, timer_id)
         }
 
+        // 设置新的选举计时器并处理可能的错误
         self.election_timer = Some(
             self.callbacks
-                .set_election_timer(&self.id, self.election_timeout),
+                .set_election_timer(&self.id, election_timeout),
         );
     }
 
@@ -998,15 +1042,15 @@ impl RaftState {
                     next_idx,
                     next_idx + entries_len as u64
                 );
-            }
 
-            // 记录InFlight请求
-            self.pipeline.track_inflight_request(
-                &peer,
-                request_id,
-                next_idx + entries_len as u64,
-                now,
-            );
+                // 记录InFlight请求
+                self.pipeline.track_inflight_request(
+                    &peer,
+                    request_id,
+                    next_idx + entries_len as u64,
+                    now,
+                );
+            }
 
             if let Err(err) = self
                 .callbacks
@@ -1813,6 +1857,8 @@ impl RaftState {
             return;
         }
 
+        let snapshot_request_id = RequestId::new();
+
         let req = InstallSnapshotRequest {
             term: self.current_term,
             leader_id: self.id.clone(),
@@ -1820,7 +1866,8 @@ impl RaftState {
             last_included_term: snap.term,
             data: snap.data.clone(),
             config: snap.config.clone(), // 包含快照中的配置信息
-            request_id: RequestId::new(),
+            request_id: snapshot_request_id,
+            snapshot_request_id: snapshot_request_id,
             is_probe: false,
         };
 
@@ -1833,6 +1880,7 @@ impl RaftState {
         // 为这个Follower创建探测计划
         self.schedule_snapshot_probe(
             target.clone(),
+            snapshot_request_id,
             self.schedule_snapshot_probe_interval,
             self.schedule_snapshot_probe_retries,
         );
@@ -1877,7 +1925,7 @@ impl RaftState {
     }
 
     // 发送探测消息检查快照安装状态（Leader端）
-    async fn probe_snapshot_status(&mut self, target: &RaftId) {
+    async fn probe_snapshot_status(&mut self, target: &RaftId, snapshot_request_id: RequestId) {
         info!(
             "Probing snapshot status for follower {} at term {}, last_snapshot_index {}",
             target,
@@ -1898,6 +1946,7 @@ impl RaftState {
             last_included_term: 0,       // 探测消息不需要实际任期
             data: vec![],                // 空数据
             config: self.config.clone(), // 探测请求使用当前配置
+            snapshot_request_id,
             request_id: RequestId::new(),
             is_probe: true,
         };
@@ -1963,15 +2012,37 @@ impl RaftState {
         // 处理空探测消息
         if request.is_probe {
             // 返回当前快照安装状态
-            let current_state = if let Some(req_id) = &self.current_snapshot_request_id {
+            let current_state = if let Some(current_snapshot_request_id) =
+                &self.current_snapshot_request_id
+            {
                 // 如果是正在处理的那个快照请求
-                if *req_id == request.request_id {
-                    InstallSnapshotState::Installing
+                if *current_snapshot_request_id == request.snapshot_request_id {
+                    match self.install_snapshot_success.clone() {
+                        Some((success, request_id, error)) => {
+                            assert!(request_id == request.snapshot_request_id);
+                            if success {
+                                InstallSnapshotState::Success
+                            } else {
+                                InstallSnapshotState::Failed(format!(
+                                    "Snapshot installation failed: {}",
+                                    error.unwrap()
+                                ))
+                            }
+                        }
+                        None => InstallSnapshotState::Installing,
+                    }
                 } else {
+                    warn!(
+                        "Node {} received InstallSnapshot {} probe, but no snapshot request_id not match {} ",
+                        self.id, request.snapshot_request_id, current_snapshot_request_id
+                    );
                     InstallSnapshotState::Failed("No such snapshot in progress".into())
                 }
             } else {
-                // 没有正在处理的快照
+                warn!(
+                    "Node {} received InstallSnapshot probe, but no snapshot is in progress",
+                    self.id
+                );
                 InstallSnapshotState::Success
             };
 
@@ -2057,22 +2128,64 @@ impl RaftState {
 
         // 将快照数据交给业务层处理（异步）
         // 注意：这里不阻塞Raft状态机，实际处理由业务层完成
-        self.error_handler
-            .handle_void(
-                self.callbacks
-                    .process_snapshot(
-                        &self.id,
-                        request.last_included_index,
-                        request.last_included_term,
-                        request.data,
-                        request.config.clone(), // 传递配置信息
-                        request.request_id,
-                    )
-                    .await,
-                "process_snapshot",
-                None,
-            )
-            .await;
+
+        let (oneshot_tx, oneshot_rx) = oneshot::channel();
+
+        self.callbacks.process_snapshot(
+            &self.id,
+            request.last_included_index,
+            request.last_included_term,
+            request.data,
+            request.config.clone(), // 传递配置信息
+            request.request_id,
+            oneshot_tx,
+        );
+
+        let callbacks = self.callbacks.clone();
+        let self_id = self.id.clone();
+
+        tokio::task::spawn(async move {
+            let result = oneshot_rx.await;
+            let result = match result {
+                Ok(result) => {
+                    match &result {
+                        Ok(_) => {
+                            info!("Snapshot processing succeeded");
+                        }
+                        Err(error) => {
+                            warn!("Snapshot processing failed: {}", error);
+                        }
+                    };
+                    result
+                }
+                Err(error) => {
+                    error!("Snapshot processing failed: {}", error);
+                    Err(SnapshotError::Unknown)
+                }
+            };
+
+            match callbacks
+                .send(
+                    self_id,
+                    Event::CompleteSnapshotInstallation(CompleteSnapshotInstallation {
+                        index: request.last_included_index,
+                        term: request.last_included_term,
+                        success: result.is_ok(),
+                        request_id: request.request_id,
+                        reason: result.err().map(|e| e.to_string()),
+                        config: Some(request.config.clone()),
+                    }),
+                )
+                .await
+            {
+                Ok(()) => {
+                    info!("Snapshot installation result sent successfully");
+                }
+                Err(error) => {
+                    error!("Snapshot installation result send failed: {}", error);
+                }
+            }
+        });
     }
 
     async fn verify_snapshot_config_compatibility(&self, _req: &InstallSnapshotRequest) -> bool {
@@ -2084,80 +2197,38 @@ impl RaftState {
     }
 
     // 业务层完成快照处理后调用此方法更新状态（Follower端）
-    pub async fn complete_snapshot_installation(
+    pub async fn handle_complete_snapshot_installation(
         &mut self,
-        request_id: RequestId,
-        success: bool,
-        _reason: Option<String>,
-        index: u64,
-        term: u64,
-        config: Option<ClusterConfig>,
+        result: CompleteSnapshotInstallation,
     ) {
         // 检查是否是当前正在处理的快照
-        if self.current_snapshot_request_id != Some(request_id) {
+        if self.current_snapshot_request_id != Some(result.request_id) {
+            warn!(
+                "Node {} received completion for unknown snapshot request_id: {:?}, current: {:?}",
+                self.id, result.request_id, self.current_snapshot_request_id
+            );
             return;
         }
 
         // 更新快照状态
-        if success {
+        if result.success {
             // 对于快照安装，我们信任传入的index和term参数
             // 快照安装意味着用快照替换所有小于等于index的日志条目
-            self.last_snapshot_index = index;
-            self.last_snapshot_term = term;
-            self.commit_index = self.commit_index.max(index);
-            self.last_applied = self.last_applied.max(index);
+            self.last_snapshot_index = result.index;
+            self.last_snapshot_term = result.term;
+            self.commit_index = self.commit_index.max(result.index);
+            self.last_applied = self.last_applied.max(result.index);
 
             // 应用快照中的配置信息到当前RaftState
-            if let Some(snapshot_config) = config {
+            if let Some(snapshot_config) = result.config {
                 info!(
                     "Node {} applying snapshot config: old_config={:?}, new_config={:?}",
                     self.id, self.config, snapshot_config
                 );
-                self.config = snapshot_config;
-
-                // 如果节点在新配置中不是voter，且当前是leader或candidate，需要转为follower
-                if !self.config.voters_contains(&self.id)
-                    && (self.role == Role::Leader || self.role == Role::Candidate)
-                {
-                    warn!(
-                        "Node {} is no longer a voter in snapshot config, stepping down to follower",
-                        self.id
-                    );
-                    self.role = Role::Follower;
-                    self.voted_for = None;
-                    self.leader_id = None;
-
-                    // 持久化状态变更
-                    let _ = self
-                        .error_handler
-                        .handle_void(
-                            self.callbacks
-                                .save_hard_state(
-                                    &self.id,
-                                    HardState {
-                                        raft_id: self.id.clone(),
-                                        term: self.current_term,
-                                        voted_for: self.voted_for.clone(),
-                                    },
-                                )
-                                .await,
-                            "save_hard_state",
-                            None,
-                        )
-                        .await;
-
-                    // 通知状态变更
-                    let _ = self
-                        .error_handler
-                        .handle_void(
-                            self.callbacks.state_changed(&self.id, self.role).await,
-                            "state_changed",
-                            None,
-                        )
-                        .await;
-                }
 
                 // 持久化新的配置
+                let old_config = self.config.clone();
+                self.config = snapshot_config;
                 let _ = self
                     .error_handler
                     .handle_void(
@@ -2168,7 +2239,73 @@ impl RaftState {
                         None,
                     )
                     .await;
+
+                match (
+                    self.config.voters_contains(&self.id),
+                    self.config.learners_contains(&self.id),
+                ) {
+                    (false, true) => {
+                        warn!(
+                            "Node {} is no longer a voter in snapshot config, stepping down to learner",
+                            self.id
+                        );
+                        self.role = Role::Learner;
+                        let _ = self
+                            .error_handler
+                            .handle_void(
+                                self.callbacks.state_changed(&self.id, self.role).await,
+                                "state_changed",
+                                None,
+                            )
+                            .await;
+                    }
+                    (false, false) => {
+                        if old_config.voters_contains(&self.id)
+                            || old_config.learners_contains(&self.id)
+                        {
+                            warn!(
+                                "Node {} is no longer a member in snapshot config, remove self",
+                                self.id
+                            );
+                            // Node is no longer a member of the cluster
+                            self.callbacks
+                                .node_removed(&self.id)
+                                .await
+                                .unwrap_or_else(|e| {
+                                    error!("Failed to remove node {}: {}", self.id, e);
+                                });
+                        } else {
+                            info!(
+                                "Node {} snapshot config not contain self, continue to sync log from leader",
+                                self.id
+                            );
+                        }
+                    }
+                    (true, false) => {
+                        self.role = Role::Follower;
+                        let _ = self
+                            .error_handler
+                            .handle_void(
+                                self.callbacks.state_changed(&self.id, self.role).await,
+                                "state_changed",
+                                None,
+                            )
+                            .await;
+                    }
+                    (true, true) => {
+                        error!(
+                            "Node {} cannot be both voter and learner in snapshot config",
+                            self.id
+                        );
+                    }
+                }
             }
+        } else {
+            warn!(
+                "Node {} snapshot installation failed: {}",
+                self.id,
+                result.reason.clone().unwrap_or("Unknown reason".into())
+            );
         }
 
         // 清除当前处理标记
@@ -2251,7 +2388,13 @@ impl RaftState {
     }
 
     // 安排快照状态探测（无内部线程）
-    fn schedule_snapshot_probe(&mut self, peer: RaftId, interval: Duration, max_attempts: u32) {
+    fn schedule_snapshot_probe(
+        &mut self,
+        peer: RaftId,
+        snapshot_request_id: RequestId,
+        interval: Duration,
+        max_attempts: u32,
+    ) {
         // 先移除可能存在的旧计划
         self.remove_snapshot_probe(&peer);
 
@@ -2262,6 +2405,7 @@ impl RaftState {
             interval,
             max_attempts,
             attempts: 0,
+            snapshot_request_id,
         });
     }
 
@@ -2296,16 +2440,16 @@ impl RaftState {
     // 处理到期的探测计划
     async fn process_pending_probes(&mut self, now: Instant) {
         // 收集需要执行的探测
-        let pending_peers: Vec<RaftId> = self
+        let pending_peers: Vec<(RaftId, RequestId)> = self
             .snapshot_probe_schedules
             .iter()
             .filter(|s| s.next_probe_time <= now)
-            .map(|s| s.peer.clone())
+            .map(|s| (s.peer.clone(), s.snapshot_request_id))
             .collect();
 
         // 执行每个到期的探测
-        for peer in pending_peers {
-            self.probe_snapshot_status(&peer).await;
+        for (peer, snapshot_request_id) in pending_peers {
+            self.probe_snapshot_status(&peer, snapshot_request_id).await;
             // 更新探测计划状态
             self.extend_snapshot_probe(&peer);
         }

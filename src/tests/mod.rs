@@ -9,7 +9,7 @@ pub mod tests {
     use mock::mock_storage::MockStorage;
     use std::sync::Arc;
     use tokio::sync::Mutex;
-    use tokio::time::{sleep, timeout, Duration};
+    use tokio::time::{Duration, sleep, timeout};
 
     // 测试用的简单回调实现
     struct TestCallbacks {
@@ -48,7 +48,7 @@ pub mod tests {
         async fn send_request_vote_response(
             &self,
             from: &RaftId,
-            target:& RaftId,
+            target: &RaftId,
             args: RequestVoteResponse,
         ) -> RpcResult<()> {
             self.network
@@ -70,7 +70,7 @@ pub mod tests {
         async fn send_append_entries_response(
             &self,
             from: &RaftId,
-            target:& RaftId,
+            target: &RaftId,
             args: AppendEntriesResponse,
         ) -> RpcResult<()> {
             self.network
@@ -81,7 +81,7 @@ pub mod tests {
         async fn send_install_snapshot_request(
             &self,
             from: &RaftId,
-            target:& RaftId,
+            target: &RaftId,
             args: InstallSnapshotRequest,
         ) -> RpcResult<()> {
             self.network
@@ -92,7 +92,7 @@ pub mod tests {
         async fn send_install_snapshot_response(
             &self,
             from: &RaftId,
-            target:& RaftId,
+            target: &RaftId,
             args: InstallSnapshotResponse,
         ) -> RpcResult<()> {
             self.network
@@ -103,18 +103,11 @@ pub mod tests {
 
     #[async_trait]
     impl Storage for TestCallbacks {
-        async fn save_hard_state(
-            &self,
-            from: &RaftId,
-            hard_state: HardState,
-        ) -> StorageResult<()> {
+        async fn save_hard_state(&self, from: &RaftId, hard_state: HardState) -> StorageResult<()> {
             self.storage.save_hard_state(from, hard_state).await
         }
 
-        async fn load_hard_state(
-            &self,
-            from: &RaftId,
-        ) -> StorageResult<Option<HardState>> {
+        async fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<HardState>> {
             self.storage.load_hard_state(from).await
         }
 
@@ -144,7 +137,7 @@ pub mod tests {
             self.storage.get_log_entries_term(from, low, high).await
         }
 
-        async fn truncate_log_suffix(&self, from:& RaftId, idx: u64) -> StorageResult<()> {
+        async fn truncate_log_suffix(&self, from: &RaftId, idx: u64) -> StorageResult<()> {
             self.storage.truncate_log_suffix(from, idx).await
         }
 
@@ -160,7 +153,7 @@ pub mod tests {
             self.storage.get_log_term(from, idx).await
         }
 
-        async fn save_snapshot(&self, from:& RaftId, snap: Snapshot) -> StorageResult<()> {
+        async fn save_snapshot(&self, from: &RaftId, snap: Snapshot) -> StorageResult<()> {
             self.storage.save_snapshot(from, snap).await
         }
 
@@ -216,6 +209,13 @@ pub mod tests {
     }
 
     #[async_trait]
+    impl EventSender for TestCallbacks {
+        async fn send(&self, _target: RaftId, _event: Event) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
     impl RaftCallbacks for TestCallbacks {
         async fn client_response(
             &self,
@@ -246,7 +246,7 @@ pub mod tests {
             Ok(())
         }
 
-        async fn process_snapshot(
+        fn process_snapshot(
             &self,
             _from: &RaftId,
             _index: u64,
@@ -254,8 +254,8 @@ pub mod tests {
             _data: Vec<u8>,
             _config: ClusterConfig, // 添加配置参数
             _request_id: RequestId,
-        ) -> SnapshotResult<()> {
-            Ok(())
+            _oneshot: oneshot::Sender<SnapshotResult<()>>,
+        ) {
         }
 
         async fn node_removed(&self, _node_id: &RaftId) -> Result<(), StateChangeError> {
@@ -325,10 +325,10 @@ pub mod tests {
         RaftStateOptions {
             id,
             peers,
-            election_timeout_min: 100,
-            election_timeout_max: 200,
-            heartbeat_interval: 50,
-            apply_interval: 10,
+            election_timeout_min: Duration::from_millis(150),
+            election_timeout_max: Duration::from_millis(300),
+            heartbeat_interval: Duration::from_millis(50),
+            apply_interval: Duration::from_millis(1),
             apply_batch_size: 64,
             config_change_timeout: Duration::from_secs(5),
             leader_transfer_timeout: Duration::from_secs(5),
@@ -405,7 +405,7 @@ pub mod tests {
         // 验证硬状态已更新（应该投票给候选人）
         let hard_state = storage.load_hard_state(&node_id).await.unwrap();
         assert!(hard_state.is_some());
-        let (term, voted_for) = match hard_state{
+        let (term, voted_for) = match hard_state {
             Some(hs) => (hs.term, hs.voted_for),
             None => panic!("Hard state should exist"),
         };
@@ -453,10 +453,7 @@ pub mod tests {
             .await;
 
         // 验证日志已存储
-        let stored_entries = storage
-            .get_log_entries(&node_id, 1, 2)
-            .await
-            .unwrap();
+        let stored_entries = storage.get_log_entries(&node_id, 1, 2).await.unwrap();
         assert!(!stored_entries.is_empty(), "Should have stored log entries");
         assert_eq!(stored_entries[0].term, 1);
         assert_eq!(stored_entries[0].index, 1);
@@ -648,6 +645,7 @@ pub mod tests {
             data: vec![1, 2, 3, 4, 5],
             config: ClusterConfig::empty(), // 测试用空配置
             request_id: RequestId::new(),
+            snapshot_request_id: RequestId::new(),
             is_probe: false,
         };
 
@@ -661,14 +659,14 @@ pub mod tests {
 
         // 验证快照处理（在实际实现中，业务层需要调用complete_snapshot_installation）
         raft_state
-            .complete_snapshot_installation(
-                snapshot_request.request_id,
-                true,
-                None,
-                snapshot_request.last_included_index,
-                snapshot_request.last_included_term,
-                Some(snapshot_request.config.clone()),
-            )
+            .handle_complete_snapshot_installation(CompleteSnapshotInstallation {
+                index: snapshot_request.last_included_index,
+                term: snapshot_request.last_included_term,
+                success: true,
+                request_id: snapshot_request.request_id,
+                reason: None,
+                config: Some(snapshot_request.config.clone()),
+            })
             .await;
 
         // 验证快照状态已更新
@@ -923,7 +921,7 @@ pub mod tests {
         assert_eq!(raft_state.current_term, 2);
         assert_eq!(raft_state.role, Role::Follower);
         assert_eq!(raft_state.voted_for, None); // 因为自己的日志更新
-                                                // 验证是否发送了拒绝的响应
+        // 验证是否发送了拒绝的响应
     }
 
     // 3. 测试 Candidate 收到更高任期的 `RequestVoteResponse`（拒绝）
@@ -983,9 +981,11 @@ pub mod tests {
         assert_eq!(raft_state.current_term, candidate_term + 1);
         // 验证状态变更通知
         let state_changes = callbacks.state_changes.lock().await;
-        assert!(state_changes
-            .iter()
-            .any(|&(_, role)| role == Role::Follower));
+        assert!(
+            state_changes
+                .iter()
+                .any(|&(_, role)| role == Role::Follower)
+        );
     }
 
     // 4. 测试 Leader 收到更高任期的 `AppendEntriesResponse`（失败）
@@ -1052,9 +1052,11 @@ pub mod tests {
         assert_eq!(raft_state.leader_id, None);
         // 验证状态变更通知
         let state_changes = callbacks.state_changes.lock().await;
-        assert!(state_changes
-            .iter()
-            .any(|&(_, role)| role == Role::Follower));
+        assert!(
+            state_changes
+                .iter()
+                .any(|&(_, role)| role == Role::Follower)
+        );
     }
 
     // 5. 测试 Follower 处理过期的 `AppendEntriesRequest`（`prev_log_index` < `last_snapshot_index` 且任期不匹配）
@@ -1349,6 +1351,7 @@ pub mod tests {
             next_probe_time: Instant::now(),     // 立即可执行
             interval: Duration::from_millis(50), // 使用较短的间隔方便测试
             max_attempts: 3,
+            snapshot_request_id: RequestId::new(),
             attempts: 0, // 初始尝试次数为 0
         };
         raft_state.snapshot_probe_schedules.push(probe_schedule);
@@ -1435,6 +1438,7 @@ pub mod tests {
             data: snapshot_data,
             config: snap_config,          // 使用测试配置
             request_id: RequestId::new(), // 使用特定 ID 以便验证
+            snapshot_request_id: RequestId::new(),
             is_probe: false,
         };
         let request_id = snapshot_request.request_id.clone();
@@ -1456,14 +1460,14 @@ pub mod tests {
         let new_last_applied_index = snapshot_request.last_included_index;
         let new_last_applied_term = snapshot_request.last_included_term;
         raft_state
-            .complete_snapshot_installation(
-                request_id.clone(),
-                true, // success
-                None, // snapshot_data (如果需要)
-                new_last_applied_index,
-                new_last_applied_term,
-                Some(snapshot_request.config.clone()),
-            )
+            .handle_complete_snapshot_installation(CompleteSnapshotInstallation {
+                request_id: request_id,
+                success: true,
+                reason: None,
+                index: new_last_applied_index,
+                term: new_last_applied_term,
+                config: Some(ClusterConfig::empty()),
+            })
             .await;
 
         // 验证 RaftState 状态是否正确更新
@@ -1522,6 +1526,7 @@ pub mod tests {
             data: vec![],                   // 探测请求通常数据为空
             config: ClusterConfig::empty(), // 测试用空配置
             request_id: RequestId::new(),
+            snapshot_request_id: RequestId::new(),
             is_probe: true, // 标记为探测
         };
 
@@ -2074,6 +2079,7 @@ pub mod tests {
             data: vec![],
             config: ClusterConfig::empty(),    // 测试用空配置
             request_id: installing_request_id, // 使用相同的请求ID进行探测
+            snapshot_request_id: installing_request_id,
             is_probe: true,
         };
 
@@ -2140,6 +2146,7 @@ pub mod tests {
             data: vec![],
             config: ClusterConfig::empty(), // 测试用空配置
             request_id: RequestId::new(),   // 使用不同的request_id
+            snapshot_request_id: RequestId::new(),
             is_probe: true,
         };
 
@@ -2202,6 +2209,7 @@ pub mod tests {
             data: vec![1, 2, 3],
             config: ClusterConfig::empty(), // 测试用空配置
             request_id: RequestId::new(),
+            snapshot_request_id: RequestId::new(),
             is_probe: false,
         };
 
@@ -2224,7 +2232,7 @@ pub mod tests {
                 assert_eq!(sender, node_id);
                 assert_eq!(target, leader_id);
                 assert_eq!(resp.term, 5); // Response should have the follower's term
-                                          // Assuming rejection means not Installing/Success, could also check specific state if defined
+                // Assuming rejection means not Installing/Success, could also check specific state if defined
             }
             _ => panic!("Expected InstallSnapshotResponse"),
         }
@@ -2269,6 +2277,7 @@ pub mod tests {
             data: vec![1, 2, 3],
             config: ClusterConfig::empty(), // 测试用空配置
             request_id: RequestId::new(),
+            snapshot_request_id: RequestId::new(),
             is_probe: false,
         };
 
@@ -2699,9 +2708,9 @@ pub mod tests {
         // commit_index 的更新可以作为一个更复杂的测试。
         // 这里简单断言它至少没有减少，并且可能增加了。
         assert!(raft_state.commit_index >= initial_commit_index); // 至少不减少
-                                                                  // 如果 update_commit_index 逻辑正确，它应该增加到 15
-                                                                  // assert_eq!(raft_state.commit_index, 15); // 如果逻辑是提交到多数派最小值且所有日志同任期
-                                                                  // 为了测试的确定性，我们只验证 next_index 和 match_index
+        // 如果 update_commit_index 逻辑正确，它应该增加到 15
+        // assert_eq!(raft_state.commit_index, 15); // 如果逻辑是提交到多数派最小值且所有日志同任期
+        // 为了测试的确定性，我们只验证 next_index 和 match_index
     }
 
     // 4. 测试 Leader 处理当前任期的失败响应 (包含 matched_index)
@@ -3155,7 +3164,8 @@ pub mod tests {
             data: snapshot_data.clone(),
             config: ClusterConfig::empty(), // 测试用空配置
             request_id,
-            is_probe: false, // 关键：非探测
+            snapshot_request_id: request_id, //
+            is_probe: false,                 // 关键：非探测
         };
 
         // 处理快照安装请求
@@ -3175,15 +3185,16 @@ pub mod tests {
         // 或者验证是否有 pending snapshot request ID
 
         // 模拟业务层调用 complete_snapshot_installation
+
         raft_state
-            .complete_snapshot_installation(
+            .handle_complete_snapshot_installation(CompleteSnapshotInstallation {
+                index: last_included_index,
+                term: last_included_term,
+                success: true,
                 request_id,
-                true, // success
-                Some(String::from_utf8_lossy(&snapshot_data).to_string()),
-                last_included_index,
-                last_included_term,
-                Some(ClusterConfig::empty()),
-            )
+                reason: None,
+                config: Some(ClusterConfig::empty()),
+            })
             .await;
 
         // 验证最终状态更新
@@ -3442,10 +3453,7 @@ pub mod tests {
             .await;
 
         // 验证日志被追加 (从快照点之后开始)
-        let stored_entries = storage
-            .get_log_entries(&node_id, 6, 7)
-            .await
-            .unwrap();
+        let stored_entries = storage.get_log_entries(&node_id, 6, 7).await.unwrap();
         assert_eq!(stored_entries.len(), 1);
         assert_eq!(stored_entries[0].index, 6);
         assert_eq!(stored_entries[0].term, 2);
@@ -4032,8 +4040,10 @@ pub mod tests {
 
         // 应该检测到log_index不匹配
         assert!(validation_result.is_err());
-        assert!(validation_result
-            .unwrap_err()
-            .contains("log_index mismatch"));
+        assert!(
+            validation_result
+                .unwrap_err()
+                .contains("log_index mismatch")
+        );
     }
 }

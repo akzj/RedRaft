@@ -1,5 +1,6 @@
 // test_node.rs
 use crate::common::test_statemachine::TestStateMachine;
+use anyhow::Result;
 use raft_lite::message::{HardState, LogEntry};
 use raft_lite::mutl_raft_driver::{HandleEventTrait, MultiRaftDriver, Timers};
 use raft_lite::tests::mock::mock_network::{MockNetworkHub, MockNodeNetwork, NetworkEvent};
@@ -9,8 +10,8 @@ use raft_lite::*;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 use tokio::sync::Notify;
+use tokio::sync::{Mutex, oneshot};
 use tracing::{info, warn};
 
 pub struct TestNodeInner {
@@ -20,6 +21,7 @@ pub struct TestNodeInner {
     pub storage: MockStorage,
     pub network: MockNodeNetwork,
     pub remove_node: Arc<Notify>,
+    pub driver: MultiRaftDriver,
 }
 
 #[derive(Clone)]
@@ -91,6 +93,7 @@ impl TestNode {
         let storage = MockStorage::new_with_snapshot_storage(snapshot_storage);
         let target_id = id.clone();
         let driver = driver.clone();
+        let driver2 = driver.clone();
         // 初始化并保存集群配置，避免在 RaftState::new 时读取到 None
         {
             let (voters, learners) = if is_voter {
@@ -162,10 +165,10 @@ impl TestNode {
         let options = RaftStateOptions {
             id: id.clone(),
             peers: initial_peers_or_voters,
-            election_timeout_min: 150, // 更快的选举超时
-            election_timeout_max: 300,
-            heartbeat_interval: 25, // 更频繁的心跳
-            apply_interval: 10,     // 更快的应用间隔
+            election_timeout_min: Duration::from_millis(150), // 更快的选举超时
+            election_timeout_max: Duration::from_millis(300),
+            heartbeat_interval: Duration::from_millis(25), // 更频繁的心跳
+            apply_interval: Duration::from_millis(1),      // 更快的应用间隔
             config_change_timeout: Duration::from_secs(1),
             leader_transfer_timeout: Duration::from_secs(1),
             apply_batch_size: 50,
@@ -178,7 +181,7 @@ impl TestNode {
             feedback_window_size: 10,
             // 超极速智能超时配置 - 最激进的快速超时和重发
             base_request_timeout: Duration::from_millis(25), // 基础超时25ms
-            max_request_timeout: Duration::from_millis(500), // 最大超时500ms
+            max_request_timeout: Duration::from_millis(5000), // 最大超时500ms
             min_request_timeout: Duration::from_millis(10),  // 最小超时10ms
             timeout_response_factor: 2.0,                    // 响应时间因子2.0倍
         };
@@ -190,6 +193,7 @@ impl TestNode {
             storage,
             remove_node: Arc::new(Notify::new()),
             network,
+            driver: driver2,
         });
 
         // 创建 RaftState 实例
@@ -522,6 +526,19 @@ impl TimerService for TestNodeInner {
 }
 
 #[async_trait::async_trait]
+impl EventSender for TestNodeInner {
+    async fn send(&self, target: RaftId, event: Event) -> Result<()> {
+        match self.driver.dispatch_event(target, event) {
+            mutl_raft_driver::SendEventResult::Success => Ok(()),
+            mutl_raft_driver::SendEventResult::NotFound => Err(anyhow::anyhow!("Target not found")),
+            mutl_raft_driver::SendEventResult::SendFailed => {
+                Err(anyhow::anyhow!("Failed to send event"))
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
 impl RaftCallbacks for TestNodeInner {
     async fn client_response(
         &self,
@@ -552,7 +569,7 @@ impl RaftCallbacks for TestNodeInner {
             .await
     }
 
-    async fn process_snapshot(
+    fn process_snapshot(
         &self,
         from: &RaftId,
         index: u64,
@@ -560,9 +577,14 @@ impl RaftCallbacks for TestNodeInner {
         data: Vec<u8>,
         config: raft_lite::cluster_config::ClusterConfig,
         request_id: RequestId,
-    ) -> raft_lite::traits::SnapshotResult<()> {
-        self.state_machine
-            .install_snapshot(from.clone(), index, term, data, request_id)
+        oneshot: oneshot::Sender<SnapshotResult<()>>,
+    ) {
+        let state_machine = self.state_machine.clone();
+        let from = from.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = state_machine.install_snapshot(from, index, term, data, request_id);
+            oneshot.send(result).unwrap_or(());
+        });
     }
 
     async fn node_removed(

@@ -16,7 +16,7 @@ use rand::{Rng, SeedableRng};
 use std::collections::{HashMap, VecDeque}; // Changed from BinaryHeap
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -55,8 +55,8 @@ impl Default for MockNetworkHubConfig {
 impl Default for MockRaftNetworkConfig {
     fn default() -> Self {
         Self {
-            base_latency_ms: 10,
-            jitter_max_ms: 50,
+            base_latency_ms: 50,
+            jitter_max_ms: 10,
             drop_rate: 0.00,
             failure_rate: 0.00,
         }
@@ -301,7 +301,7 @@ impl MockNetworkHub {
 
                     // let mut rng = rand::thread_rng(); // [!code --]
                     let mut rng = rand::rngs::StdRng::from_os_rng(); // [!code ++]
-                                                                     // if rng.gen::<f64>() < failure_rate { // [!code --]
+                    // if rng.gen::<f64>() < failure_rate { // [!code --]
                     if rng.random::<f64>() < failure_rate {
                         // [!code ++]
                         info!(
@@ -464,7 +464,7 @@ impl MockNodeNetwork {
         let config = self.hub_inner.raft_config.read().await;
         let config = config.get(&from).cloned().unwrap_or_default();
         let mut rng = rand::rngs::StdRng::from_os_rng(); // [!code ++]
-                                                         // 1. 模拟丢包 (在入队前就决定是否丢弃)
+        // 1. 模拟丢包 (在入队前就决定是否丢弃)
 
         if rng.random::<f64>() < config.drop_rate {
             // [!code ++]
@@ -516,7 +516,7 @@ impl Network for MockNodeNetwork {
     async fn send_request_vote_request(
         &self,
         from: &RaftId,
-        target:& RaftId,
+        target: &RaftId,
         args: RequestVoteRequest,
     ) -> RpcResult<()> {
         self.send_to_target(
@@ -558,7 +558,7 @@ impl Network for MockNodeNetwork {
     async fn send_append_entries_response(
         &self,
         from: &RaftId,
-        target:& RaftId,
+        target: &RaftId,
         args: AppendEntriesResponse,
     ) -> RpcResult<()> {
         self.send_to_target(
@@ -572,7 +572,7 @@ impl Network for MockNodeNetwork {
     async fn send_install_snapshot_request(
         &self,
         from: &RaftId,
-        target:& RaftId,
+        target: &RaftId,
         args: InstallSnapshotRequest,
     ) -> RpcResult<()> {
         self.send_to_target(
@@ -586,7 +586,7 @@ impl Network for MockNodeNetwork {
     async fn send_install_snapshot_response(
         &self,
         from: &RaftId,
-        target:& RaftId,
+        target: &RaftId,
         args: InstallSnapshotResponse,
     ) -> RpcResult<()> {
         self.send_to_target(
@@ -1022,6 +1022,7 @@ mod tests {
             data: vec![1, 2, 3],
             config: ClusterConfig::simple(vec![sender.clone()].into_iter().collect(), 0),
             request_id: RequestId::new(),
+            snapshot_request_id: RequestId::new(),
             is_probe: false,
         };
         network
@@ -1197,7 +1198,7 @@ mod tests {
 mod additional_tests {
     use super::*;
     use crate::tests::mock::mock_network::tests::{create_test_raft_id, create_test_request_vote};
-    use tokio::time::{timeout, Instant};
+    use tokio::time::{Instant, timeout};
 
     /// 测试发送失败率（failure_rate）生效
     #[tokio::test]
@@ -1297,7 +1298,7 @@ mod additional_tests {
         let mut vote_req = create_test_request_vote();
         vote_req.term = 3;
         network
-            .send_request_vote_request(&sender,& receiver, vote_req)
+            .send_request_vote_request(&sender, &receiver, vote_req)
             .await
             .unwrap();
 

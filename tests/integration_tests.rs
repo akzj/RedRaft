@@ -48,7 +48,7 @@ async fn test_basic_raft_kv_cluster() {
         key: "key1".to_string(),
         value: "value1".to_string(),
     };
-    let set_cmd_data = set_cmd.encode();
+
     let request_id = RequestId::new();
 
     // 再次检查 Leader 状态，确保没有发生选举切换
@@ -68,18 +68,14 @@ async fn test_basic_raft_kv_cluster() {
 
         let final_role = new_leader.get_role();
         println!("Final leader role before sending command: {:?}", final_role);
-        cluster
-            .propose_command(&new_leader.id, set_cmd_data.clone())
-            .unwrap();
+        cluster.propose_command(&new_leader.id, &set_cmd).unwrap();
         println!(
             "Sent SET command for key1=value1 to new leader, request_id: {:?}",
             request_id
         );
     } else {
         // 如果 Leader 状态正常，直接发送命令
-        cluster
-            .propose_command(&leader_node.id, set_cmd_data.clone())
-            .unwrap();
+        cluster.propose_command(&leader_node.id, &set_cmd).unwrap();
 
         println!(
             "Sent SET command for key1=value1, request_id: {:?}",
@@ -126,7 +122,6 @@ async fn test_basic_raft_kv_cluster() {
         value: "value2".to_string(),
     };
 
-    let set_cmd2_data = set_cmd2.encode();
     let request_id2 = RequestId::new();
     println!(
         "Sending second SET command for key2=value2, request_id: {:?}",
@@ -144,7 +139,7 @@ async fn test_basic_raft_kv_cluster() {
     );
 
     cluster
-        .propose_command(&current_leader.id, set_cmd2_data.clone())
+        .propose_command(&current_leader.id, &set_cmd2)
         .unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -186,7 +181,7 @@ async fn test_basic_raft_kv_cluster() {
     for cmd in pipeline_commands {
         sleep(tokio::time::Duration::from_micros(100)).await; // 每个命令间隔 1ms
         cluster
-            .propose_command(&current_leader_for_pipeline.id, cmd.clone().encode())
+            .propose_command(&current_leader_for_pipeline.id, &cmd)
             .unwrap();
         //println!("Sent pipeline command for {:?}", cmd);
     }

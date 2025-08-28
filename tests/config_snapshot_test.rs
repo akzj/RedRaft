@@ -43,10 +43,10 @@ async fn test_snapshot_config_application() {
             key: format!("test_key_{}", i),
             value: format!("test_value_{}", i),
         };
-        let command_bytes = command.encode();
+
 
         cluster
-            .propose_command(&leader_id, command_bytes)
+            .propose_command(&leader_id, &command)
             .expect("Should be able to propose command");
     }
 

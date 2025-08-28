@@ -18,10 +18,22 @@ pub struct InstallSnapshotRequest {
     pub last_included_index: u64,
     pub last_included_term: u64,
     pub data: Vec<u8>,
-    pub config: ClusterConfig, // 快照包含的集群配置信息
-    pub request_id: RequestId,
+    pub config: ClusterConfig,          // 快照包含的集群配置信息
+    pub snapshot_request_id: RequestId, // 快照请求ID
+    pub request_id: RequestId,          // 请求ID
     // 空消息标记 - 用于探测安装状态
     pub is_probe: bool,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompleteSnapshotInstallation {
+    pub index: u64,
+    pub term: u64,
+    pub success: bool,
+    pub request_id: RequestId,
+    pub reason: Option<String>,
+    pub config: Option<ClusterConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -50,6 +62,7 @@ pub struct Snapshot {
 // 快照探测计划结构
 #[derive(Debug, Clone)]
 pub struct SnapshotProbeSchedule {
+    pub snapshot_request_id: RequestId,
     pub peer: RaftId,
     pub next_probe_time: Instant,
     pub interval: Duration, // 探测间隔

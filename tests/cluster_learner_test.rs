@@ -70,9 +70,8 @@ async fn test_cluster_learner_operate() {
             key: format!("key{}", i),
             value: format!("value{}", i),
         };
-        let command_bytes = command.encode();
 
-        match cluster.propose_command(&leader_id, command_bytes) {
+        match cluster.propose_command(&leader_id, &command) {
             Ok(()) => println!("✓ Successfully proposed command: {:?}", command),
             Err(e) => println!("✗ Failed to propose command {:?}: {}", command, e),
         }
@@ -185,9 +184,8 @@ async fn test_cluster_learner_operate() {
             key: format!("final_key{}", i),
             value: format!("final_value{}", i),
         };
-        let command_bytes = command.encode();
 
-        match cluster.propose_command(&leader_id, command_bytes) {
+        match cluster.propose_command(&leader_id, &command) {
             Ok(()) => println!("✓ Final command {} accepted", i),
             Err(e) => println!("✗ Final command {} failed: {}", i, e),
         }

@@ -114,6 +114,7 @@ message InstallSnapshotRequest {
   uint64 request_id = 6;          // 请求 ID（用于匹配响应）
   bool is_probe = 7;              // 是否为探测请求（检查安装状态）
   ClusterConfig config = 8;       // config
+  uint64 snapshot_request_id = 9; // snapshot_request_id
 }
 
 /// 安装快照响应（对应 Rust 中的 InstallSnapshotResponse）

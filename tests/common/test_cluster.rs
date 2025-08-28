@@ -1,5 +1,6 @@
 // test_cluster.rs
 use crate::common::test_node::TestNode;
+use crate::common::test_statemachine::KvCommand;
 use raft_lite::RaftId;
 use raft_lite::mutl_raft_driver::MultiRaftDriver;
 use raft_lite::tests::mock::mock_network::MockNetworkHub;
@@ -144,10 +145,11 @@ impl TestCluster {
     }
 
     // 发送业务命令
-    pub fn propose_command(&self, leader_id: &RaftId, command: Vec<u8>) -> Result<(), String> {
+    pub fn propose_command(&self, leader_id: &RaftId, command: &KvCommand) -> Result<(), String> {
         let request_id = raft_lite::RequestId::new();
+        let command_bytes = command.encode();
         let event = raft_lite::Event::ClientPropose {
-            cmd: command,
+            cmd: command_bytes,
             request_id,
         };
         // if let Some(node) = self.get_node(leader_id) {

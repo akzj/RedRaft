@@ -63,8 +63,17 @@ const LOG_SEGMENT_VERSION_V1: u32 = 1;
 
 pub struct SegmentTruncateLog {}
 
-// file format  | logEntry ... | hard_states ...| index ...| tail | tail size,crc (u32,u32) | version (u32)|
-
+// LogSegment file format:
+// |  EntryHeader[ logEntry |  clusterConfig | truncatePrefix | truncateSuffix ] ... | hard_states ...| index ...| tail | tail size,crc (u32,u32) | version (u32)|
+// SnapshotSegment file format:
+// |  EntryHeader[ snapshot ] ... |  index ...| tail | tail size,crc (u32,u32) | version (u32)|
+// 快照存储目录结构（以本地磁盘为例）：
+// /raft/snapshots/{raft_id}
+// ├─ {timestamp}_10000_5000/  # 快照目录名：时间戳_lastIncludedIndex_lastIncludedTerm（便于定位和清理）
+// │  ├─ snapshot.meta       # 元数据文件（小文件，~100B，快速读取）
+// │  ├─ data_000.dat        # 业务数据分片1（按固定大小分片，如100MB/片）
+// │  ├─ data_001.dat        # 业务数据分片2
+// │  └─ checksum.sha256     # 分片校验文件（记录每个data文件的SHA256，避免分片损坏）
 #[derive(Debug, Default, Decode, Encode)]
 pub struct LogSegmentTail {
     hard_states_offset: u64,
@@ -74,6 +83,10 @@ pub struct LogSegmentTail {
     index_offset: u64,
     index_size: u64,
     index_crc: u32,
+}
+
+pub struct LogStoreSnapshot {
+    //snapshots :HashMap<>
 }
 
 pub struct LogSegment {

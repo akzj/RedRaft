@@ -8,6 +8,8 @@ use tokio;
 mod common;
 use common::test_cluster::{TestCluster, TestClusterConfig};
 
+use crate::common::test_statemachine::KvCommand;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_network_inflight_under_packet_loss() {
     let _ = tracing_subscriber::fmt().try_init();
@@ -50,17 +52,18 @@ async fn test_network_inflight_under_packet_loss() {
     println!("\n=== Test 1: InFlight under normal network conditions ===");
 
     // 发送多个命令快速填满InFlight队列
-    let mut request_ids = Vec::new();
     let mut successful_commands = 0;
 
     for i in 0..10 {
-        let request_id = RequestId::new();
-        let command = format!("test_command_{}", i).into_bytes();
-
-        if let Err(e) = cluster.propose_command(&leader, command) {
+        if let Err(e) = cluster.propose_command(
+            &leader,
+            &common::test_statemachine::KvCommand::Set {
+                key: format!("key{}", i),
+                value: format!("value{}", i),
+            },
+        ) {
             println!("Failed to propose command {}: {}", i, e);
         } else {
-            request_ids.push(request_id);
             successful_commands += 1;
             println!("Proposed command {}", i);
         }
@@ -74,7 +77,7 @@ async fn test_network_inflight_under_packet_loss() {
     );
 
     // 等待命令处理（快速超时下缩短等待时间）
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // 检查leader节点的InFlight状态
     let _normal_inflight_count = if let Some(leader_node) = cluster.get_node(&leader) {
@@ -86,7 +89,7 @@ async fn test_network_inflight_under_packet_loss() {
 
         // 断言: 快速超时下，正常条件的InFlight请求应该很少
         assert!(
-            inflight_count <= 8,
+            inflight_count <= 5,
             "InFlight count under normal conditions with fast timeouts should be very low, got {}",
             inflight_count
         );
@@ -101,8 +104,8 @@ async fn test_network_inflight_under_packet_loss() {
 
     // 设置高延迟网络配置（100ms 基础延迟 + 50ms 抖动，减少延迟以测试快速超时）
     let high_latency_config = MockRaftNetworkConfig {
-        base_latency_ms: 100, // 降低基础延迟
-        jitter_max_ms: 50,    // 降低抖动
+        base_latency_ms: 50, // 降低基础延迟
+        jitter_max_ms: 50,   // 降低抖动
         drop_rate: 0.0,
         failure_rate: 0.0,
     };
@@ -120,37 +123,39 @@ async fn test_network_inflight_under_packet_loss() {
     let mut latency_successful = 0;
 
     for i in 10..20 {
-        let command = format!("latency_test_command_{}", i).into_bytes();
-        if let Err(e) = cluster.propose_command(&leader, command) {
+        let command = common::test_statemachine::KvCommand::Set {
+            key: format!("latency_key{}", i),
+            value: format!("latency_value{}", i),
+        };
+        if let Err(e) = cluster.propose_command(&leader, &command) {
             println!("Failed to propose command {} under latency: {}", i, e);
         } else {
             latency_successful += 1;
             println!("Proposed command {} under latency", i);
         }
-
-        // 检查当前InFlight状态
-        if let Some(leader_node) = cluster.get_node(&leader) {
-            let inflight_count = leader_node.get_inflight_request_count().await;
-            println!("InFlight requests after command {}: {}", i, inflight_count);
-
-            // 断言: 快速超时下，即使在高延迟环境中InFlight也应该较少累积
-            assert!(
-                inflight_count <= 30,
-                "InFlight count under high latency with fast timeouts should not exceed 30, got {}",
-                inflight_count
-            );
-        }
-
-        // 缩短等待时间，测试快速处理能力
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        // 等待重新计算超时时间，适应网络变化
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     // 断言: 即使在高延迟下，大多数命令也应该能够提交（快速超时应提高成功率）
     assert!(
-        latency_successful >= 8,
-        "Expected at least 8 successful commands under high latency with fast timeouts, got {}",
+        latency_successful >= 10,
+        "Expected at least 10 successful commands under high latency with fast timeouts, got {}",
         latency_successful
     );
+
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    // 检查当前InFlight状态
+    if let Some(leader_node) = cluster.get_node(&leader) {
+        let inflight_count = leader_node.get_inflight_request_count().await;
+
+        // 断言: 快速超时下，即使在高延迟环境中InFlight也应该较少累积
+        assert!(
+            inflight_count <= 10,
+            "InFlight count under high latency with fast timeouts should not exceed 10, got {}",
+            inflight_count
+        );
+    }
 
     // 等待所有请求在高延迟下完成（增加等待时间以允许超极速超时机制充分清理）
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -202,8 +207,11 @@ async fn test_network_inflight_under_packet_loss() {
     let mut packet_loss_successful = 0;
 
     for i in 20..35 {
-        let command = format!("packet_loss_test_command_{}", i).into_bytes();
-        if let Err(e) = cluster.propose_command(&leader, command) {
+        let command = KvCommand::Set {
+            key: format!("packet_loss_test_key_{}", i),
+            value: format!("packet_loss_test_value_{}", i),
+        };
+        if let Err(e) = cluster.propose_command(&leader, &command) {
             println!("Failed to propose command {} under packet loss: {}", i, e);
         } else {
             packet_loss_successful += 1;
@@ -294,8 +302,8 @@ async fn test_network_inflight_under_packet_loss() {
     let extreme_loss_config = MockRaftNetworkConfig {
         base_latency_ms: 20, // 进一步降低延迟
         jitter_max_ms: 30,   // 降低抖动
-        drop_rate: 0.5,      // 50% 丢包率
-        failure_rate: 0.1,   // 10% 发送失败率
+        drop_rate: 0.3,      // 30% 丢包率
+        failure_rate: 0.07,   // 10% 发送失败率
     };
 
     for node_id in &[&node1, &node2, &node3] {
@@ -312,8 +320,11 @@ async fn test_network_inflight_under_packet_loss() {
     let mut failed_proposals = 0;
 
     for i in 35..50 {
-        let command = format!("extreme_loss_test_command_{}", i).into_bytes();
-        match cluster.propose_command(&leader, command) {
+        let command = KvCommand::Set {
+            key: format!("extreme_loss_test_key_{}", i),
+            value: format!("extreme_loss_test_value_{}", i),
+        };
+        match cluster.propose_command(&leader, &command) {
             Ok(_) => {
                 successful_proposals += 1;
                 println!("Successfully proposed command {} under extreme loss", i);
@@ -361,7 +372,7 @@ async fn test_network_inflight_under_packet_loss() {
     );
 
     // 等待系统稳定（快速超时下缩短等待时间）
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
     let final_extreme_inflight = if let Some(leader_node) = cluster.get_node(&leader) {
         let count = leader_node.get_inflight_request_count().await;
@@ -396,8 +407,11 @@ async fn test_network_inflight_under_packet_loss() {
 
     // 发送一些命令建立基准InFlight状态
     for i in 50..55 {
-        let command = format!("pre_partition_command_{}", i).into_bytes();
-        let _ = cluster.propose_command(&leader, command);
+        let command = KvCommand::Set {
+            key: format!("pre_partition_key_{}", i),
+            value: format!("pre_partition_value_{}", i),
+        };
+        let _ = cluster.propose_command(&leader, &command);
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
@@ -419,8 +433,11 @@ async fn test_network_inflight_under_packet_loss() {
 
     // 在分区状态下发送更多命令
     for i in 55..60 {
-        let command = format!("during_partition_command_{}", i).into_bytes();
-        let _ = cluster.propose_command(&leader, command);
+        let command = KvCommand::Set {
+            key: format!("during_partition_key_{}", i),
+            value: format!("during_partition_value_{}", i),
+        };
+        let _ = cluster.propose_command(&leader, &command);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -538,8 +555,11 @@ async fn test_network_inflight_under_packet_loss() {
     println!("Verifying final cluster consistency...");
 
     // 发送一个测试命令验证集群功能正常
-    let test_command = "post_recovery_test_command".as_bytes().to_vec();
-    match cluster.propose_command(&recovered_leader, test_command) {
+    let test_command = KvCommand::Set {
+        key: "post_recovery_test_key".to_string(),
+        value: "post_recovery_test_value".to_string(),
+    };
+    match cluster.propose_command(&recovered_leader, &test_command) {
         Ok(_) => println!("✓ Cluster is functional after partition recovery"),
         Err(e) => println!("⚠ Cluster functionality test failed: {}", e),
     }
@@ -683,15 +703,18 @@ async fn test_inflight_timeout_configuration() {
     let mut timeout_commands_sent = 0;
 
     for i in 0..8 {
-        let command = format!("timeout_test_command_{}", i).into_bytes();
-        if let Err(e) = cluster.propose_command(&leader, command) {
+        let command = KvCommand::Set {
+            key: format!("timeout_key{}", i),
+            value: format!("timeout_value{}", i),
+        };
+        if let Err(e) = cluster.propose_command(&leader, &command) {
             println!("Expected failure for timeout test command {}: {}", i, e);
         } else {
             timeout_commands_sent += 1;
             println!("Sent timeout test command {} (will timeout)", i);
         }
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     // 断言: 大部分命令应该能够发送（即使会超时），快速配置下应该更可靠

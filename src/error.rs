@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use bincode::error;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{error, info, warn};
@@ -149,7 +150,7 @@ pub enum ApplyError {
 }
 
 /// 快照相关错误
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum SnapshotError {
     #[error("Snapshot at index {0} already exists")]
     AlreadyExists(u64),
@@ -158,7 +159,7 @@ pub enum SnapshotError {
     TooOld(u64),
 
     #[error("Snapshot data corrupted")]
-    DataCorrupted(anyhow::Error),
+    DataCorrupted(Arc<anyhow::Error>),
 
     #[error("Snapshot creation in progress")]
     InProgress,
@@ -168,6 +169,9 @@ pub enum SnapshotError {
 
     #[error("Snapshot not supported")]
     NotSupported,
+
+    #[error("Snapshot error: Unknown")]
+    Unknown,
 }
 
 /// 配置变更相关错误
@@ -317,6 +321,7 @@ impl ErrorHandler for SnapshotError {
             SnapshotError::InProgress => ErrorSeverity::Recoverable,
             SnapshotError::SizeExceeded => ErrorSeverity::Recoverable,
             SnapshotError::NotSupported => ErrorSeverity::Fatal,
+            SnapshotError::Unknown => ErrorSeverity::Fatal,
         }
     }
 
@@ -330,6 +335,7 @@ impl ErrorHandler for SnapshotError {
             SnapshotError::InProgress => "Snapshot creation in progress".to_string(),
             SnapshotError::SizeExceeded => "Snapshot size exceeds limit".to_string(),
             SnapshotError::NotSupported => "Snapshot not supported".to_string(),
+            SnapshotError::Unknown => "Unknown snapshot error".to_string(),
         }
     }
 }

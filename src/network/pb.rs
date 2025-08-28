@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::network::{pb, OutgoingMessage};
+use crate::network::{OutgoingMessage, pb};
 
 tonic::include_proto!("pb");
 
@@ -157,6 +157,7 @@ impl From<crate::InstallSnapshotRequest> for pb::InstallSnapshotRequest {
             leader_id: Some(req.leader_id.into()),
             request_id: req.request_id.into(),
             config: Some(req.config.into()),
+            snapshot_request_id: req.snapshot_request_id.into(),
         }
     }
 }
@@ -309,6 +310,7 @@ impl From<pb::InstallSnapshotRequest> for Result<crate::InstallSnapshotRequest> 
             last_included_index: req.last_included_index,
             last_included_term: req.last_included_term,
             request_id: req.request_id.into(),
+            snapshot_request_id: req.snapshot_request_id.into(),
             is_probe: req.is_probe,
             config: match req.config.map(crate::ClusterConfig::from) {
                 Some(config) => config,

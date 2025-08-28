@@ -1,3 +1,5 @@
+use tokio::sync::oneshot;
+
 use crate::{cluster_config::ClusterConfig, *};
 
 // 结果类型别名
@@ -133,7 +135,7 @@ pub trait Storage: Send + Sync {
     async fn load_cluster_config(&self, from: &RaftId) -> StorageResult<ClusterConfig>;
 }
 
-pub trait TimerService {
+pub trait TimerService: Send + Sync {
     fn del_timer(&self, from: &RaftId, timer_id: TimerId) -> ();
     fn set_leader_transfer_timer(&self, from: &RaftId, dur: Duration) -> TimerId;
     fn set_election_timer(&self, from: &RaftId, dur: Duration) -> TimerId;
@@ -143,7 +145,12 @@ pub trait TimerService {
 }
 
 #[async_trait]
-pub trait RaftCallbacks: Network + Storage + TimerService + Send + Sync {
+pub trait EventSender: Send + Sync {
+    async fn send(&self, target: RaftId, event: Event) -> Result<()>;
+}
+
+#[async_trait]
+pub trait RaftCallbacks: Network + Storage + TimerService + EventSender {
     // 客户端响应回调
     async fn client_response(
         &self,
@@ -165,7 +172,7 @@ pub trait RaftCallbacks: Network + Storage + TimerService + Send + Sync {
     ) -> ApplyResult<()>;
 
     // 处理快照数据
-    async fn process_snapshot(
+    fn process_snapshot(
         &self,
         from: &RaftId,
         index: u64,
@@ -173,7 +180,8 @@ pub trait RaftCallbacks: Network + Storage + TimerService + Send + Sync {
         data: Vec<u8>,
         config: ClusterConfig, // 添加配置信息参数
         request_id: RequestId,
-    ) -> SnapshotResult<()>;
+        oneshot: oneshot::Sender<SnapshotResult<()>>,
+    );
 
     // 节点被从集群中删除的回调，用于优雅退出
     async fn node_removed(&self, node_id: &RaftId) -> Result<(), StateChangeError>;
