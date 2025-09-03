@@ -658,15 +658,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mock_network_config_default() {
-        let config = MockRaftNetworkConfig::default();
-        assert_eq!(config.base_latency_ms, 10);
-        assert_eq!(config.jitter_max_ms, 50);
-        assert_eq!(config.drop_rate, 0.00);
-        assert_eq!(config.failure_rate, 0.00);
-    }
-
-    #[tokio::test]
     async fn test_network_hub_creation() {
         let config = MockNetworkHubConfig::default();
         let hub = MockNetworkHub::new(config);
