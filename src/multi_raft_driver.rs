@@ -5,12 +5,12 @@
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::Deref;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 use tracing::{debug, info, trace, warn};
 
 use crate::{Event, RaftId, TimerId};
@@ -166,7 +166,10 @@ impl Timers {
         self.inner.timer_heap.lock().push(timer_event);
         self.notify.notify_one();
 
-        trace!("Added timer {} for node {} with delay {:?}", timer_id, node_id, delay);
+        trace!(
+            "Added timer {} for node {} with delay {:?}",
+            timer_id, node_id, delay
+        );
         timer_id
     }
 
@@ -680,7 +683,11 @@ mod tests {
         manager.add_raft_group(group_id.clone(), Box::new(mock_handler.clone()));
 
         let timers = manager.get_timer_service();
-        timers.add_timer(&group_id, Event::HeartbeatTimeout, Duration::from_millis(100));
+        timers.add_timer(
+            &group_id,
+            Event::HeartbeatTimeout,
+            Duration::from_millis(100),
+        );
 
         sleep(Duration::from_millis(150)).await;
 
@@ -703,8 +710,12 @@ mod tests {
         manager.add_raft_group(group_id.clone(), Box::new(mock_handler.clone()));
 
         let timers = manager.get_timer_service();
-        let timer_id = timers.add_timer(&group_id, Event::HeartbeatTimeout, Duration::from_millis(100));
-        
+        let timer_id = timers.add_timer(
+            &group_id,
+            Event::HeartbeatTimeout,
+            Duration::from_millis(100),
+        );
+
         // 立即取消
         timers.del_timer(timer_id);
 
@@ -724,4 +735,3 @@ mod tests {
         assert!(matches!(result, SendEventResult::NotFound));
     }
 }
-
