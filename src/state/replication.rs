@@ -726,11 +726,20 @@ impl RaftState {
 
         let candidate_index = match self.config.quorum() {
             QuorumRequirement::Joint { old, new } => {
+                // 防御性检查：虽然在 Joint 分支，但仍需确保 joint() 返回有效值
+                let joint = match self.config.joint() {
+                    Some(j) => j,
+                    None => {
+                        error!("Node {} config.quorum() is Joint but joint() returns None", self.id);
+                        return;
+                    }
+                };
+                
                 let old_majority = self
-                    .find_majority_index(&self.config.joint().unwrap().old_voters, old)
+                    .find_majority_index(&joint.old_voters, old)
                     .await;
                 let new_majority = self
-                    .find_majority_index(&self.config.joint().unwrap().new_voters, new)
+                    .find_majority_index(&joint.new_voters, new)
                     .await;
 
                 match (old_majority, new_majority) {

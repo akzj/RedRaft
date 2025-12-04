@@ -263,9 +263,18 @@ impl RaftState {
             return;
         }
 
+        // 防御性检查：虽然 is_leader_joint_config() 已检查，但仍需安全处理
+        let elapsed = match self.config_change_start_time {
+            Some(start_time) => start_time.elapsed(),
+            None => {
+                error!("config_change_start_time is None after is_leader_joint_config check");
+                return;
+            }
+        };
+
         warn!(
             "Joint config timeout reached (elapsed: {:?}, timeout: {:?}), checking for rollback",
-            self.config_change_start_time.unwrap().elapsed(),
+            elapsed,
             self.config_change_timeout
         );
 
