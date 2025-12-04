@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use bincode::error;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{error, info, warn};

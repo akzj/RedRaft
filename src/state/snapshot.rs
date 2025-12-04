@@ -66,7 +66,7 @@ impl RaftState {
             .send_install_snapshot_request(&self.id, &target, req)
             .await
         {
-            log::error!(
+            error!(
                 "node {}: failed to send InstallSnapshotRequest: {}",
                 self.id,
                 err

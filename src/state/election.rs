@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use rand::Rng;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::RaftState;
 use crate::event::Role;
@@ -520,7 +520,7 @@ impl RaftState {
             .on_state_changed(&self.id, Role::Leader)
             .await
         {
-            log::error!(
+            error!(
                 "Failed to change state to Leader for node {}: {}",
                 self.id,
                 err

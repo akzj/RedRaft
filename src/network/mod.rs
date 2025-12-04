@@ -8,12 +8,16 @@ use crate::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{timeout, Duration};
 use tonic::transport::{Endpoint, Server};
 use tracing::{debug, error, info, warn};
+
+/// 网络消息通道容量
+const NETWORK_CHANNEL_CAPACITY: usize = 4096;
 
 pub mod pb;
 
@@ -97,7 +101,7 @@ impl ResolveNodeAddress for MultiRaftNetworkOptions {
 #[derive(Clone)]
 pub struct MultiRaftNetwork {
     options: MultiRaftNetworkOptions,
-    outgoing_tx: Arc<RwLock<HashMap<NodeId, mpsc::UnboundedSender<OutgoingMessage>>>>,
+    outgoing_tx: Arc<RwLock<HashMap<NodeId, mpsc::Sender<OutgoingMessage>>>>,
     node_map: Arc<tokio::sync::RwLock<HashMap<NodeId, String>>>,
     dispatch: Option<Arc<dyn MessageDispatcher>>,
     shutdown: Arc<Notify>,
@@ -116,17 +120,25 @@ impl MultiRaftNetwork {
         network
     }
 
-    fn get_outgoing_tx(&self, node_id: &NodeId) -> Option<mpsc::UnboundedSender<OutgoingMessage>> {
-        self.outgoing_tx.read().unwrap().get(node_id).cloned()
+    fn get_outgoing_tx(&self, node_id: &NodeId) -> Option<mpsc::Sender<OutgoingMessage>> {
+        self.outgoing_tx.read().get(node_id).cloned()
     }
 
     /// Helper method to send an outgoing message to a target node.
     /// Reduces code duplication across all Network trait methods.
     fn send_message(&self, target: &RaftId, msg: OutgoingMessage) -> RpcResult<()> {
-        self.get_outgoing_tx(&target.node)
-            .ok_or_else(|| RpcError::Network("No outgoing channel found for target node".into()))?
-            .send(msg)
-            .map_err(|_| RpcError::Network("Network channel closed".into()))
+        let tx = self
+            .get_outgoing_tx(&target.node)
+            .ok_or_else(|| RpcError::Network("No outgoing channel found for target node".into()))?;
+
+        tx.try_send(msg).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => {
+                RpcError::Network("Network channel full (backpressure)".into())
+            }
+            mpsc::error::TrySendError::Closed(_) => {
+                RpcError::Network("Network channel closed".into())
+            }
+        })
     }
 
     pub async fn add_node(&self, node_id: NodeId, address: String) {
@@ -164,7 +176,7 @@ impl MultiRaftNetwork {
     // 运行异步任务，批量发送消息到远程节点
     async fn run_message_sender(
         &self,
-        mut rx: mpsc::UnboundedReceiver<OutgoingMessage>,
+        mut rx: mpsc::Receiver<OutgoingMessage>,
         rpc_client: GrpcClient,
         shutdown: Arc<Notify>,
     ) {
@@ -235,7 +247,7 @@ impl MultiRaftNetwork {
                     }
                 }
                 Err(err) => {
-                    log::error!("Failed to send batch: {}", err);
+                    error!("Failed to send batch: {}", err);
                 }
             }
         }
@@ -275,11 +287,10 @@ impl MultiRaftNetwork {
                             }
                             match clone_self.create_client(node_id).await {
                                 Ok(client) => {
-                                    let (tx, rx) = mpsc::unbounded_channel();
+                                    let (tx, rx) = mpsc::channel(NETWORK_CHANNEL_CAPACITY);
                                     clone_self
                                         .outgoing_tx
                                         .write()
-                                        .unwrap()
                                         .insert(node_id.clone(), tx);
 
                                     let notify = Arc::new(Notify::new());

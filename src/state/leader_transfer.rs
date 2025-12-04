@@ -2,6 +2,7 @@
 
 use std::time::Instant;
 
+use tracing::error;
 
 use super::RaftState;
 use crate::error::ClientError;
@@ -171,7 +172,7 @@ impl RaftState {
             .send_request_vote_request(&self.id, &target, req)
             .await
         {
-            log::error!(
+            error!(
                 "Failed to send request vote request to {} during leader transfer: {}",
                 target,
                 err
@@ -184,7 +185,7 @@ impl RaftState {
                 .client_response(&self.id, request_id, Ok(0))
                 .await
             {
-                log::error!(
+                error!(
                     "Failed to send client response for leader transfer completion: {}",
                     err
                 );
