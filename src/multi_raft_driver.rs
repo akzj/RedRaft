@@ -507,35 +507,35 @@ impl MultiRaftDriver {
                         )
                         .is_ok()
                     {
-                        // 转换成功后，再次检查是否有新消息
-                        // 这解决了 is_empty 检查和状态转换之间的竞态
-                        match rx.try_recv() {
-                            Ok(event) => {
-                                // 有新消息，回到 Active 状态
-                                if core
-                                    .status
-                                    .compare_exchange(
-                                        RaftNodeStatus::Idle,
-                                        RaftNodeStatus::Active,
-                                        Ordering::AcqRel,
-                                        Ordering::Acquire,
-                                    )
-                                    .is_ok()
-                                {
-                                    core.handle_event.handle_event(event).await;
-                                    continue;
-                                } else {
-                                    // 其他 worker 已接管，将消息放回
-                                    // 由于无法放回，重新 dispatch
-                                    drop(rx);
-                                    let _ = core.sender.try_send(event);
-                                    break;
-                                }
-                            }
-                            Err(_) => {
-                                // 确实没有消息，退出
+                        // 转换成功后，检查是否有新消息（不移除）
+                        // 使用 is_empty() 而非 try_recv()，确保消息留在队列中
+                        if !rx.is_empty() {
+                            // 有新消息，尝试回到 Active 状态
+                            if core
+                                .status
+                                .compare_exchange(
+                                    RaftNodeStatus::Idle,
+                                    RaftNodeStatus::Active,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                )
+                                .is_ok()
+                            {
+                                // 成功回到 Active，继续处理
+                                continue;
+                            } else {
+                                // CAS 失败，说明 dispatch_event 已将状态改为 Pending
+                                // 并添加到 active_map，会有新 worker 接管
+                                // 消息仍在队列中，不会丢失
+                                trace!(
+                                    "Node {} yielding to new worker (status changed during idle check)",
+                                    node_id
+                                );
                                 break;
                             }
+                        } else {
+                            // 队列确实为空，退出
+                            break;
                         }
                     } else {
                         // 状态变更失败，退出
