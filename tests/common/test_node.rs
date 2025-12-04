@@ -181,8 +181,9 @@ impl TestNode {
             apply_batch_size: 50,
             schedule_snapshot_probe_interval: Duration::from_secs(5),
             schedule_snapshot_probe_retries: 3,
-            pre_vote_enabled: true,     // 启用 Pre-Vote
-            max_inflight_requests: 100, // 调整InFlight限制
+            pre_vote_enabled: true,      // 启用 Pre-Vote
+            leader_lease_enabled: false, // 禁用 LeaderLease（测试默认）
+            max_inflight_requests: 100,  // 调整InFlight限制
             initial_batch_size: 10,
             max_batch_size: 100,
             min_batch_size: 1,

@@ -64,6 +64,10 @@ pub struct RaftStateOptions {
     /// 是否启用 Pre-Vote（防止网络分区节点干扰集群）
     pub pre_vote_enabled: bool,
 
+    /// 是否启用 LeaderLease（0 RTT 读优化）
+    /// 注意：LeaderLease 依赖时钟同步，在时钟偏移较大的环境下可能有风险
+    pub leader_lease_enabled: bool,
+
     // 反馈控制相关配置
     /// 最大InFlight请求数
     pub max_inflight_requests: u64,
@@ -102,6 +106,7 @@ impl Default for RaftStateOptions {
             schedule_snapshot_probe_interval: Duration::from_secs(5),
             schedule_snapshot_probe_retries: 24 * 60 * 60 / 5, // 默认尝试24小时
             pre_vote_enabled: true, // 默认启用 Pre-Vote
+            leader_lease_enabled: false, // 默认禁用 LeaderLease（需要时钟同步）
             // 反馈控制默认配置
             max_inflight_requests: 64,
             initial_batch_size: 10,
@@ -190,6 +195,10 @@ pub struct RaftState {
     pub(crate) pending_read_indices: HashMap<RequestId, ReadIndexState>,
     /// 等待应用完成的读请求: request_id -> read_index
     pub(crate) pending_reads: HashMap<RequestId, u64>,
+
+    // LeaderLease 跟踪（0 RTT 读优化）
+    /// Leader 租约结束时间（None 表示无有效租约）
+    pub(crate) lease_end: Option<Instant>,
 
     // 快照请求跟踪（仅 Follower 有效）
     pub(crate) current_snapshot_request_id: Option<RequestId>,
@@ -313,6 +322,7 @@ impl RaftState {
             current_pre_vote_id: None,
             pending_read_indices: HashMap::new(),
             pending_reads: HashMap::new(),
+            lease_end: None,
             install_snapshot_success: None,
             current_snapshot_request_id: None,
             follower_snapshot_states: HashMap::new(),
@@ -385,6 +395,9 @@ impl RaftState {
         
         // 清理 ReadIndex 状态
         self.clear_read_index_state();
+        
+        // 清理 LeaderLease 状态
+        self.lease_end = None;
         
         // 清理快照状态
         self.follower_snapshot_states.clear();

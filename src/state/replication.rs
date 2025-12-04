@@ -577,6 +577,9 @@ impl RaftState {
                 
                 // 处理 ReadIndex 确认（心跳成功表示仍是 Leader）
                 self.handle_read_index_ack(&peer).await;
+                
+                // 尝试延长 LeaderLease
+                self.try_extend_lease_from_majority();
             } else {
                 warn!(
                     "Node {} received log conflict from {}: index={:?}, term={:?}",
