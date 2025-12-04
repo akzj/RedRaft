@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, Notify};
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{timeout, Duration};
 use tonic::transport::{Endpoint, Server};
 use tracing::{debug, error, info, warn};
 
@@ -107,6 +107,15 @@ impl MultiRaftNetwork {
 
     fn get_outgoing_tx(&self, node_id: &NodeId) -> Option<mpsc::UnboundedSender<OutgoingMessage>> {
         self.outgoing_tx.read().unwrap().get(node_id).cloned()
+    }
+
+    /// Helper method to send an outgoing message to a target node.
+    /// Reduces code duplication across all Network trait methods.
+    fn send_message(&self, target: &RaftId, msg: OutgoingMessage) -> RpcResult<()> {
+        self.get_outgoing_tx(&target.node)
+            .ok_or_else(|| RpcError::Network("No outgoing channel found for target node".into()))?
+            .send(msg)
+            .map_err(|_| RpcError::Network("Network channel closed".into()))
     }
 
     pub async fn add_node(&self, node_id: NodeId, address: String) {
@@ -346,81 +355,41 @@ impl RaftService for MultiRaftNetwork {
 impl Network for MultiRaftNetwork {
     async fn send_request_vote_request(
         &self,
-        from:& RaftId, // 本地 RaftId，可能用于日志
-        target:& RaftId,
+        from: &RaftId,
+        target: &RaftId,
         args: RequestVoteRequest,
     ) -> RpcResult<()> {
-        // 注意：args 中应该已经包含了 from 和 target 信息
-        if let Some(tx) = self.get_outgoing_tx(&target.node) {
-            if tx
-                .send(OutgoingMessage::RequestVote {
-                    from: from.clone(),
-                    target: target.clone(),
-                    args: args,
-                })
-                .is_err()
-            {
-                Err(RpcError::Network("Network channel closed".into()))
-            } else {
-                Ok(())
-            }
-        } else {
-            Err(RpcError::Network(
-                "No outgoing channel found for target node".into(),
-            ))
-        }
+        self.send_message(target, OutgoingMessage::RequestVote {
+            from: from.clone(),
+            target: target.clone(),
+            args,
+        })
     }
 
     async fn send_request_vote_response(
         &self,
         from: &RaftId,
-        target:& RaftId,
+        target: &RaftId,
         args: RequestVoteResponse,
     ) -> RpcResult<()> {
-        if let Some(tx) = self.get_outgoing_tx(&target.node) {
-            if tx
-                .send(OutgoingMessage::RequestVoteResponse {
-                    from: from.clone(),
-                    target: target.clone(),
-                    args: args,
-                })
-                .is_err()
-            {
-                Err(RpcError::Network("Network channel closed".into()))
-            } else {
-                Ok(())
-            }
-        } else {
-            Err(RpcError::Network(
-                "No outgoing channel found for target node".into(),
-            ))
-        }
+        self.send_message(target, OutgoingMessage::RequestVoteResponse {
+            from: from.clone(),
+            target: target.clone(),
+            args,
+        })
     }
 
     async fn send_append_entries_request(
         &self,
         from: &RaftId,
-        target:& RaftId,
+        target: &RaftId,
         args: AppendEntriesRequest,
     ) -> RpcResult<()> {
-        if let Some(tx) = self.get_outgoing_tx(&target.node) {
-            if tx
-                .send(OutgoingMessage::AppendEntries {
-                    from: from.clone(),
-                    target: target.clone(),
-                    args: args,
-                })
-                .is_err()
-            {
-                Err(RpcError::Network("Network channel closed".into()))
-            } else {
-                Ok(())
-            }
-        } else {
-            Err(RpcError::Network(
-                "No outgoing channel found for target node".into(),
-            ))
-        }
+        self.send_message(target, OutgoingMessage::AppendEntries {
+            from: from.clone(),
+            target: target.clone(),
+            args,
+        })
     }
 
     async fn send_append_entries_response(
@@ -429,50 +398,24 @@ impl Network for MultiRaftNetwork {
         target: &RaftId,
         args: AppendEntriesResponse,
     ) -> RpcResult<()> {
-        if let Some(tx) = self.get_outgoing_tx(&target.node) {
-            if tx
-                .send(OutgoingMessage::AppendEntriesResponse {
-                    from: from.clone(),
-                    target: target.clone(),
-                    args: args,
-                })
-                .is_err()
-            {
-                Err(RpcError::Network("Network channel closed".into()))
-            } else {
-                Ok(())
-            }
-        } else {
-            Err(RpcError::Network(
-                "No outgoing channel found for target node".into(),
-            ))
-        }
+        self.send_message(target, OutgoingMessage::AppendEntriesResponse {
+            from: from.clone(),
+            target: target.clone(),
+            args,
+        })
     }
 
     async fn send_install_snapshot_request(
         &self,
         from: &RaftId,
-        target:& RaftId,
+        target: &RaftId,
         args: InstallSnapshotRequest,
     ) -> RpcResult<()> {
-        if let Some(tx) = self.get_outgoing_tx(&target.node) {
-            if tx
-                .send(OutgoingMessage::InstallSnapshot {
-                    from: from.clone(),
-                    target: target.clone(),
-                    args: args,
-                })
-                .is_err()
-            {
-                Err(RpcError::Network("Network channel closed".into()))
-            } else {
-                Ok(())
-            }
-        } else {
-            Err(RpcError::Network(
-                "No outgoing channel found for target node".into(),
-            ))
-        }
+        self.send_message(target, OutgoingMessage::InstallSnapshot {
+            from: from.clone(),
+            target: target.clone(),
+            args,
+        })
     }
 
     async fn send_install_snapshot_response(
@@ -481,23 +424,10 @@ impl Network for MultiRaftNetwork {
         target: &RaftId,
         args: InstallSnapshotResponse,
     ) -> RpcResult<()> {
-        if let Some(tx) = self.get_outgoing_tx(&target.node) {
-            if tx
-                .send(OutgoingMessage::InstallSnapshotResponse {
-                    from: from.clone(),
-                    target: target.clone(),
-                    args: args,
-                })
-                .is_err()
-            {
-                Err(RpcError::Network("Network channel closed".into()))
-            } else {
-                Ok(())
-            }
-        } else {
-            Err(RpcError::Network(
-                "No outgoing channel found for target node".into(),
-            ))
-        }
+        self.send_message(target, OutgoingMessage::InstallSnapshotResponse {
+            from: from.clone(),
+            target: target.clone(),
+            args,
+        })
     }
 }

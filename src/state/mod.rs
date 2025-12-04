@@ -132,6 +132,8 @@ pub struct RaftState {
     pub(crate) client_requests: HashMap<RequestId, u64>,
     /// 日志索引 -> 客户端请求ID
     pub(crate) client_requests_revert: HashMap<u64, RequestId>,
+    /// 客户端请求ID -> 创建时间（用于过期清理）
+    pub(crate) client_request_timestamps: HashMap<RequestId, Instant>,
 
     // 配置变更相关状态
     pub(crate) config_change_in_progress: bool,
@@ -264,6 +266,7 @@ impl RaftState {
             match_index: HashMap::new(),
             client_requests: HashMap::new(),
             client_requests_revert: HashMap::new(),
+            client_request_timestamps: HashMap::new(),
             config_change_in_progress: false,
             config_change_start_time: None,
             heartbeat_interval_timer_id: None,
@@ -319,6 +322,101 @@ impl RaftState {
     /// 获取当前InFlight请求总数
     pub fn get_inflight_request_count(&self) -> usize {
         self.pipeline.get_inflight_request_count()
+    }
+
+    /// 统一保存 HardState（集中管理持久化）
+    pub(crate) async fn persist_hard_state(&mut self) {
+        use crate::message::HardState;
+        let hard_state = HardState {
+            raft_id: self.id.clone(),
+            term: self.current_term,
+            voted_for: self.voted_for.clone(),
+        };
+        let _ = self
+            .error_handler
+            .handle_void(
+                self.callbacks.save_hard_state(&self.id, hard_state).await,
+                "save_hard_state",
+                None,
+            )
+            .await;
+    }
+
+    /// 清理 Leader 专用状态（角色切换时调用）
+    pub(crate) fn clear_leader_state(&mut self) {
+        // 清理复制状态
+        self.next_index.clear();
+        self.match_index.clear();
+        
+        // 清理客户端请求跟踪
+        self.client_requests.clear();
+        self.client_requests_revert.clear();
+        self.client_request_timestamps.clear();
+        
+        // 清理快照状态
+        self.follower_snapshot_states.clear();
+        self.follower_last_snapshot_index.clear();
+        self.snapshot_probe_schedules.clear();
+        
+        // 清理配置变更状态
+        self.config_change_in_progress = false;
+        self.config_change_start_time = None;
+        self.joint_config_log_index = 0;
+        
+        // 清理领导权转移状态
+        self.leader_transfer_target = None;
+        self.leader_transfer_request_id = None;
+        self.leader_transfer_start_time = None;
+        
+        // 清理 Pipeline 状态
+        self.pipeline.clear_all();
+        
+        // 清理心跳定时器
+        if let Some(timer_id) = self.heartbeat_interval_timer_id.take() {
+            self.callbacks.del_timer(&self.id, timer_id);
+        }
+        
+        // 清理配置变更定时器
+        if let Some(timer_id) = self.config_change_timer.take() {
+            self.callbacks.del_timer(&self.id, timer_id);
+        }
+        
+        // 清理领导权转移定时器
+        if let Some(timer_id) = self.leader_transfer_timer.take() {
+            self.callbacks.del_timer(&self.id, timer_id);
+        }
+    }
+
+    /// 从 Leader 降级为 Follower
+    pub(crate) async fn step_down_to_follower(&mut self, new_term: Option<u64>) {
+        if let Some(term) = new_term {
+            if term > self.current_term {
+                self.current_term = term;
+            }
+        }
+        
+        let was_leader = self.role == Role::Leader;
+        self.role = Role::Follower;
+        self.voted_for = None;
+        self.leader_id = None;
+        
+        // 清理 Leader 状态
+        if was_leader {
+            self.clear_leader_state();
+        }
+        
+        // 持久化状态变更
+        self.persist_hard_state().await;
+        
+        // 通知上层
+        let _ = self
+            .error_handler
+            .handle_void(
+                self.callbacks.on_state_changed(&self.id, Role::Follower).await,
+                "state_changed",
+                None,
+            )
+            .await;
     }
 
     /// 处理事件（主入口）

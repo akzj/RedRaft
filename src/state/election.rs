@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 
 use super::RaftState;
 use crate::event::Role;
-use crate::message::{HardState, RequestVoteRequest, RequestVoteResponse};
+use crate::message::{RequestVoteRequest, RequestVoteResponse};
 use crate::types::RequestId;
 
 impl RaftState {
@@ -37,23 +37,7 @@ impl RaftState {
         self.voted_for = Some(self.id.clone());
 
         // 持久化状态变更
-        let _ = self
-            .error_handler
-            .handle_void(
-                self.callbacks
-                    .save_hard_state(
-                        &self.id,
-                        HardState {
-                            raft_id: self.id.clone(),
-                            term: self.current_term,
-                            voted_for: self.voted_for.clone(),
-                        },
-                    )
-                    .await,
-                "save_hard_state",
-                None,
-            )
-            .await;
+        self.persist_hard_state().await;
 
         // 重置选举定时器
         self.reset_election().await;
@@ -136,39 +120,7 @@ impl RaftState {
                 "Node {} stepping down to Follower, updating term from {} to {}",
                 self.id, self.current_term, request.term
             );
-            self.current_term = request.term;
-            self.role = Role::Follower;
-            self.voted_for = None;
-            self.leader_id = None;
-
-            let _ = self
-                .error_handler
-                .handle_void(
-                    self.callbacks
-                        .save_hard_state(
-                            &self.id,
-                            HardState {
-                                raft_id: self.id.clone(),
-                                term: self.current_term,
-                                voted_for: self.voted_for.clone(),
-                            },
-                        )
-                        .await,
-                    "save_hard_state",
-                    None,
-                )
-                .await;
-
-            let _ = self
-                .error_handler
-                .handle_void(
-                    self.callbacks
-                        .on_state_changed(&self.id, Role::Follower)
-                        .await,
-                    "state_changed",
-                    None,
-                )
-                .await;
+            self.step_down_to_follower(Some(request.term)).await;
         }
 
         // 决定是否投票
@@ -190,23 +142,7 @@ impl RaftState {
                     self.id, request.candidate_id, self.current_term
                 );
 
-                let _ = self
-                    .error_handler
-                    .handle_void(
-                        self.callbacks
-                            .save_hard_state(
-                                &self.id,
-                                HardState {
-                                    raft_id: self.id.clone(),
-                                    term: self.current_term,
-                                    voted_for: self.voted_for.clone(),
-                                },
-                            )
-                            .await,
-                        "save_hard_state",
-                        None,
-                    )
-                    .await;
+                self.persist_hard_state().await;
             } else {
                 info!(
                     "Node {} rejecting vote for {}, logs not up-to-date",
@@ -283,40 +219,9 @@ impl RaftState {
                 "Stepping down from candidate due to higher term {} from peer {} (current term {})",
                 response.term, peer, self.current_term
             );
-            self.current_term = response.term;
-            self.role = Role::Follower;
-            self.voted_for = None;
+            self.step_down_to_follower(Some(response.term)).await;
             self.election_votes.clear();
             self.reset_election().await;
-
-            let _ = self
-                .error_handler
-                .handle_void(
-                    self.callbacks
-                        .save_hard_state(
-                            &self.id,
-                            HardState {
-                                raft_id: self.id.clone(),
-                                term: self.current_term,
-                                voted_for: self.voted_for.clone(),
-                            },
-                        )
-                        .await,
-                    "save_hard_state",
-                    None,
-                )
-                .await;
-
-            let _ = self
-                .error_handler
-                .handle_void(
-                    self.callbacks
-                        .on_state_changed(&self.id, Role::Follower)
-                        .await,
-                    "state_changed",
-                    None,
-                )
-                .await;
             return;
         }
 

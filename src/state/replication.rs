@@ -6,9 +6,7 @@ use tracing::{debug, error, info, warn};
 
 use super::RaftState;
 use crate::event::Role;
-use crate::message::{
-    AppendEntriesRequest, AppendEntriesResponse, HardState,
-};
+use crate::message::{AppendEntriesRequest, AppendEntriesResponse};
 use crate::types::{RaftId, RequestId};
 
 impl RaftState {
@@ -265,55 +263,21 @@ impl RaftState {
             );
             self.current_term = request.term;
             self.voted_for = None;
-
-            let _ = self
-                .error_handler
-                .handle_void(
-                    self.callbacks
-                        .save_hard_state(
-                            &self.id,
-                            HardState {
-                                raft_id: self.id.clone(),
-                                term: self.current_term,
-                                voted_for: self.voted_for.clone(),
-                            },
-                        )
-                        .await,
-                    "save_hard_state",
-                    None,
-                )
-                .await;
+            self.persist_hard_state().await;
         } else if was_candidate && request.term == self.current_term {
             self.voted_for = None;
-            let _ = self
-                .error_handler
-                .handle_void(
-                    self.callbacks
-                        .save_hard_state(
-                            &self.id,
-                            HardState {
-                                raft_id: self.id.clone(),
-                                term: self.current_term,
-                                voted_for: self.voted_for.clone(),
-                            },
-                        )
-                        .await,
-                    "save_hard_state",
-                    None,
-                )
-                .await;
+            self.persist_hard_state().await;
         }
         self.last_heartbeat = Instant::now();
         self.reset_election().await;
 
-        // 日志连续性检查
-        let prev_log_ok = if request.prev_log_index == 0 {
-            true
+        // 日志连续性检查 - 缓存本地日志 term 避免重复查询
+        let local_prev_log_term: Option<u64> = if request.prev_log_index == 0 {
+            Some(0) // index 0 的 term 是 0
         } else if request.prev_log_index <= self.last_snapshot_index {
-            request.prev_log_term == self.last_snapshot_term
+            Some(self.last_snapshot_term)
         } else {
-            let local_prev_log_term_result = self
-                .error_handler
+            self.error_handler
                 .handle(
                     self.callbacks
                         .get_log_term(&self.id, request.prev_log_index)
@@ -321,17 +285,19 @@ impl RaftState {
                     "get_log_term",
                     Some(&request.leader_id),
                 )
-                .await;
+                .await
+        };
 
-            match local_prev_log_term_result {
-                Some(local_term) => local_term == request.prev_log_term,
-                None => {
-                    warn!(
-                        "Node {} failed to get local log term for index {} during consistency check, rejecting AppendEntries",
-                        self.id, request.prev_log_index
-                    );
-                    false
-                }
+        let prev_log_ok = match local_prev_log_term {
+            // 对于 index 0，local_prev_log_term 是 Some(0)，
+            // 需要验证 request.prev_log_term 也是 0（Raft 协议要求）
+            Some(local_term) => local_term == request.prev_log_term,
+            None => {
+                warn!(
+                    "Node {} failed to get local log term for index {} during consistency check, rejecting AppendEntries",
+                    self.id, request.prev_log_index
+                );
+                false
             }
         };
 
@@ -342,14 +308,7 @@ impl RaftState {
                 request.leader_id,
                 request.prev_log_index,
                 request.prev_log_term,
-                if request.prev_log_index <= self.last_snapshot_index {
-                    Some(self.last_snapshot_term)
-                } else {
-                    self.callbacks
-                        .get_log_term(&self.id, request.prev_log_index)
-                        .await
-                        .ok()
-                }
+                local_prev_log_term
             );
 
             let local_last_log_index = self.get_last_log_index();
@@ -359,19 +318,8 @@ impl RaftState {
                 Some(request.prev_log_index)
             };
 
-            conflict_term = if request.prev_log_index <= self.last_snapshot_index {
-                Some(self.last_snapshot_term)
-            } else {
-                self.error_handler
-                    .handle(
-                        self.callbacks
-                            .get_log_term(&self.id, request.prev_log_index)
-                            .await,
-                        "get_log_term",
-                        Some(&request.leader_id),
-                    )
-                    .await
-            };
+            // 复用已查询的 local_prev_log_term
+            conflict_term = local_prev_log_term;
 
             let resp = AppendEntriesResponse {
                 success: false,
@@ -589,40 +537,7 @@ impl RaftState {
                 "Node {} stepping down to Follower, found higher term {} from {} (current term {})",
                 self.id, response.term, peer, self.current_term
             );
-            self.current_term = response.term;
-            self.role = Role::Follower;
-            self.voted_for = None;
-            self.leader_id = None;
-
-            let _ = self
-                .error_handler
-                .handle_void(
-                    self.callbacks
-                        .save_hard_state(
-                            &self.id,
-                            HardState {
-                                raft_id: self.id.clone(),
-                                term: self.current_term,
-                                voted_for: self.voted_for.clone(),
-                            },
-                        )
-                        .await,
-                    "save_hard_state",
-                    None,
-                )
-                .await;
-
-            let _ = self
-                .error_handler
-                .handle_void(
-                    self.callbacks
-                        .on_state_changed(&self.id, Role::Follower)
-                        .await,
-                    "state_changed",
-                    None,
-                )
-                .await;
-
+            self.step_down_to_follower(Some(response.term)).await;
             return;
         }
 

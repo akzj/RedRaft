@@ -1,7 +1,7 @@
 //! Client request handling for Raft state machine
 
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracing::{debug, error, info, warn};
 
@@ -11,6 +11,9 @@ use crate::error::ClientError;
 use crate::event::Role;
 use crate::message::LogEntry;
 use crate::types::{Command, RaftId, RequestId};
+
+/// 客户端请求的默认超时时间（30秒）
+const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl RaftState {
     /// 处理客户端提议
@@ -41,9 +44,10 @@ impl RaftState {
             return;
         }
 
-        // 如果已经提交，直接返回结果
+        // 如果请求已存在，检查状态
         if let Some(&index) = self.client_requests.get(&request_id) {
             if index <= self.commit_index {
+                // 已提交，直接返回成功
                 self.error_handler
                     .handle_void(
                         self.callbacks
@@ -55,8 +59,31 @@ impl RaftState {
                     .await;
                 return;
             }
+            // 未提交但正在处理中，返回处理中状态
+            debug!(
+                "Node {} request {} already in progress at index {}",
+                self.id, request_id, index
+            );
+            self.error_handler
+                .handle_void(
+                    self.callbacks
+                        .client_response(
+                            &self.id,
+                            request_id,
+                            Err(ClientError::Conflict(anyhow::anyhow!(
+                                "Request already in progress at index {}", index
+                            ))),
+                        )
+                        .await,
+                    "client_response",
+                    None,
+                )
+                .await;
             return;
         }
+        
+        // 清理过期的客户端请求
+        self.cleanup_expired_client_requests().await;
 
         // 生成日志条目
         let index = self.get_last_log_index() + 1;
@@ -116,6 +143,7 @@ impl RaftState {
         // 记录客户端请求与日志索引的映射
         self.client_requests.insert(request_id, index);
         self.client_requests_revert.insert(index, request_id);
+        self.client_request_timestamps.insert(request_id, Instant::now());
 
         // 立即同步日志
         info!(
@@ -362,26 +390,64 @@ impl RaftState {
         );
     }
 
-    /// 检查客户端响应
+    /// 检查客户端响应（使用 O(1) 查找）
     pub(crate) async fn check_client_response(&mut self, log_index: u64) {
-        let mut completed = vec![];
-        for (req_id, idx) in &self.client_requests {
-            if *idx == log_index {
+        // 使用 client_requests_revert 进行 O(1) 查找
+        if let Some(&req_id) = self.client_requests_revert.get(&log_index) {
+            self.error_handler
+                .handle_void(
+                    self.callbacks
+                        .client_response(&self.id, req_id, Ok(log_index))
+                        .await,
+                    "client_response",
+                    None,
+                )
+                .await;
+            
+            // 清理所有相关映射
+            self.client_requests.remove(&req_id);
+            self.client_requests_revert.remove(&log_index);
+            self.client_request_timestamps.remove(&req_id);
+        }
+    }
+
+    /// 清理过期的客户端请求
+    pub(crate) async fn cleanup_expired_client_requests(&mut self) {
+        let now = Instant::now();
+        let mut expired_requests = Vec::new();
+
+        // 找出过期的请求
+        for (req_id, timestamp) in &self.client_request_timestamps {
+            if now.duration_since(*timestamp) > CLIENT_REQUEST_TIMEOUT {
+                expired_requests.push(*req_id);
+            }
+        }
+
+        // 清理过期请求并发送超时错误
+        for req_id in expired_requests {
+            if let Some(index) = self.client_requests.remove(&req_id) {
+                self.client_requests_revert.remove(&index);
+                self.client_request_timestamps.remove(&req_id);
+                
+                warn!(
+                    "Node {} cleaning up expired client request {} at index {}",
+                    self.id, req_id, index
+                );
+                
                 self.error_handler
                     .handle_void(
                         self.callbacks
-                            .client_response(&self.id, *req_id, Ok(log_index))
+                            .client_response(
+                                &self.id,
+                                req_id,
+                                Err(ClientError::Timeout),
+                            )
                             .await,
                         "client_response",
                         None,
                     )
                     .await;
-                completed.push(*req_id);
             }
-        }
-
-        for req_id in completed {
-            self.client_requests.remove(&req_id);
         }
     }
 }

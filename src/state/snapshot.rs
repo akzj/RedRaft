@@ -9,7 +9,7 @@ use super::RaftState;
 use crate::event::Role;
 use crate::error::SnapshotError;
 use crate::message::{
-    CompleteSnapshotInstallation, HardState, InstallSnapshotRequest, InstallSnapshotResponse,
+    CompleteSnapshotInstallation, InstallSnapshotRequest, InstallSnapshotResponse,
     InstallSnapshotState, Snapshot, SnapshotProbeSchedule,
 };
 use crate::types::{RaftId, RequestId};
@@ -202,7 +202,7 @@ impl RaftState {
                             } else {
                                 InstallSnapshotState::Failed(format!(
                                     "Snapshot installation failed: {}",
-                                    error.unwrap()
+                                    error.map(|e| e.to_string()).unwrap_or_else(|| "Unknown error".to_string())
                                 ))
                             }
                         }
@@ -486,35 +486,12 @@ impl RaftState {
         }
 
         if response.term > self.current_term {
-            self.current_term = response.term;
-            self.role = Role::Follower;
-            self.voted_for = None;
-            self.error_handler
-                .handle_void(
-                    self.callbacks
-                        .save_hard_state(
-                            &self.id,
-                            HardState {
-                                raft_id: self.id.clone(),
-                                term: self.current_term,
-                                voted_for: self.voted_for.clone(),
-                            },
-                        )
-                        .await,
-                    "save_hard_state",
-                    None,
-                )
-                .await;
-            self.error_handler
-                .handle_void(
-                    self.callbacks
-                        .on_state_changed(&self.id, Role::Follower)
-                        .await,
-                    "state_changed",
-                    None,
-                )
-                .await;
-            self.remove_snapshot_probe(&peer);
+            warn!(
+                "Node {} stepping down to Follower, found higher term {} from {} (current term {})",
+                self.id, response.term, peer, self.current_term
+            );
+            // step_down_to_follower will clear all snapshot probes via clear_leader_state
+            self.step_down_to_follower(Some(response.term)).await;
             return;
         }
 

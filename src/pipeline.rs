@@ -388,4 +388,13 @@ impl PipelineState {
             .map(|peer_requests| peer_requests.len())
             .sum()
     }
+
+    /// 清理所有状态（角色切换时调用）
+    pub fn clear_all(&mut self) {
+        self.inflight_requests.clear();
+        self.current_batch_size.clear();
+        self.response_times.clear();
+        self.success_rates.clear();
+        self.inflight_timeout_queue.clear();
+    }
 }
