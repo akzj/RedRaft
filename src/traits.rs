@@ -1,5 +1,10 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
 use tokio::sync::oneshot;
 
+use crate::error::StateChangeError;
 use crate::{cluster_config::ClusterConfig, *};
 
 // 结果类型别名
@@ -156,7 +161,7 @@ pub trait TimerService: Send + Sync {
 
 #[async_trait]
 pub trait EventSender: Send + Sync {
-    async fn send(&self, target: RaftId, event: Event) -> Result<()>;
+    async fn send(&self, target: RaftId, event: Event) -> anyhow::Result<()>;
 }
 
 #[async_trait]

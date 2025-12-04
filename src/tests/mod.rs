@@ -3,12 +3,21 @@ pub mod mock;
 pub mod tests {
     use super::*;
     use crate::cluster_config::ClusterConfig;
-    use crate::traits::{ApplyResult, ClientResult, Network, RpcResult, StorageResult};
+    use crate::error::StateChangeError;
+    use crate::message::{CompleteSnapshotInstallation, SnapshotProbeSchedule};
+    use crate::traits::{
+        ApplyResult, ClientResult, ClusterConfigStorage, EventNotify, EventSender,
+        HardStateStorage, LogEntryStorage, Network, RaftCallbacks, RpcResult, SnapshotResult,
+        SnapshotStorage, StateMachine, Storage, StorageResult, TimerService,
+    };
     use crate::*;
+    use async_trait::async_trait;
     use mock::mock_network::{MockNetworkHub, MockNetworkHubConfig, NetworkEvent};
     use mock::mock_storage::MockStorage;
+    use std::collections::HashSet;
     use std::sync::Arc;
-    use tokio::sync::Mutex;
+    use std::time::Instant;
+    use tokio::sync::{Mutex, oneshot};
     use tokio::time::{Duration, sleep, timeout};
 
     // 测试用的简单回调实现
@@ -221,7 +230,7 @@ pub mod tests {
 
     #[async_trait]
     impl EventSender for TestCallbacks {
-        async fn send(&self, _target: RaftId, _event: Event) -> Result<()> {
+        async fn send(&self, _target: RaftId, _event: Event) -> anyhow::Result<()> {
             Ok(())
         }
     }

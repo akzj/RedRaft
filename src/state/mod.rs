@@ -1,0 +1,384 @@
+//! Raft State Machine Module
+//!
+//! This module contains the core `RaftState` struct and its implementation,
+//! split across multiple files for maintainability:
+//!
+//! - `mod.rs` - State struct definition and options
+//! - `election.rs` - Election handling
+//! - `replication.rs` - Log replication
+//! - `snapshot.rs` - Snapshot management
+//! - `client.rs` - Client request handling
+//! - `config.rs` - Configuration changes
+//! - `leader_transfer.rs` - Leadership transfer
+
+mod client;
+mod config;
+mod election;
+mod leader_transfer;
+mod replication;
+mod snapshot;
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use tracing::{error, info};
+
+use crate::cluster_config::ClusterConfig;
+use crate::error::{CallbackErrorHandler, RaftError};
+use crate::event::Role;
+use crate::message::{InstallSnapshotState, Snapshot, SnapshotProbeSchedule};
+use crate::pipeline;
+use crate::traits::RaftCallbacks;
+use crate::types::{RaftId, RequestId, TimerId};
+
+/// Raft 状态机配置选项
+#[derive(Debug, Clone)]
+pub struct RaftStateOptions {
+    pub id: RaftId,
+    pub peers: Vec<RaftId>,
+    pub election_timeout_min: Duration,
+    pub election_timeout_max: Duration,
+    pub heartbeat_interval: Duration,
+    pub apply_interval: Duration,
+    pub config_change_timeout: Duration,
+    pub leader_transfer_timeout: Duration,
+    /// 每次应用到状态机的日志条数
+    pub apply_batch_size: u64,
+    pub schedule_snapshot_probe_interval: Duration,
+    pub schedule_snapshot_probe_retries: u32,
+
+    // 反馈控制相关配置
+    /// 最大InFlight请求数
+    pub max_inflight_requests: u64,
+    /// 初始批次大小
+    pub initial_batch_size: u64,
+    /// 最大批次大小
+    pub max_batch_size: u64,
+    /// 最小批次大小
+    pub min_batch_size: u64,
+    /// 反馈窗口大小（用于计算平均值）
+    pub feedback_window_size: usize,
+
+    // 智能超时配置
+    /// 基础请求超时时间 (默认3秒)
+    pub base_request_timeout: Duration,
+    /// 最大请求超时时间 (默认30秒)
+    pub max_request_timeout: Duration,
+    /// 最小请求超时时间 (默认1秒)
+    pub min_request_timeout: Duration,
+    /// 响应时间权重因子 (默认2.0，表示超时=2倍平均响应时间)
+    pub timeout_response_factor: f64,
+}
+
+impl Default for RaftStateOptions {
+    fn default() -> Self {
+        Self {
+            id: RaftId::new("".to_string(), "".to_string()),
+            peers: vec![],
+            election_timeout_min: Duration::from_millis(150),
+            election_timeout_max: Duration::from_millis(300),
+            heartbeat_interval: Duration::from_millis(50),
+            apply_interval: Duration::from_millis(1),
+            apply_batch_size: 54,
+            config_change_timeout: Duration::from_secs(10),
+            leader_transfer_timeout: Duration::from_secs(10),
+            schedule_snapshot_probe_interval: Duration::from_secs(5),
+            schedule_snapshot_probe_retries: 24 * 60 * 60 / 5, // 默认尝试24小时
+            // 反馈控制默认配置
+            max_inflight_requests: 64,
+            initial_batch_size: 10,
+            max_batch_size: 100,
+            min_batch_size: 1,
+            feedback_window_size: 10,
+            // 智能超时默认配置
+            base_request_timeout: Duration::from_secs(3),
+            max_request_timeout: Duration::from_secs(30),
+            min_request_timeout: Duration::from_secs(1),
+            timeout_response_factor: 2.0,
+        }
+    }
+}
+
+/// Raft 状态机（可变状态，无 Clone）
+pub struct RaftState {
+    // 节点标识与配置
+    pub(crate) id: RaftId,
+    pub(crate) leader_id: Option<RaftId>,
+    pub(crate) config: ClusterConfig,
+
+    // 核心状态
+    pub(crate) role: Role,
+    pub(crate) current_term: u64,
+    pub(crate) voted_for: Option<RaftId>,
+
+    // 日志与提交状态
+    pub(crate) commit_index: u64,
+    pub(crate) last_applied: u64,
+    /// 最后一个快照的索引
+    pub(crate) last_snapshot_index: u64,
+    /// 最后一个快照的任期
+    pub(crate) last_snapshot_term: u64,
+    /// 最后一个日志条目的索引
+    pub(crate) last_log_index: u64,
+    /// 最后一个日志条目的任期
+    pub(crate) last_log_term: u64,
+
+    // Leader 专用状态
+    pub(crate) next_index: HashMap<RaftId, u64>,
+    pub(crate) match_index: HashMap<RaftId, u64>,
+    /// 客户端请求ID -> 日志索引
+    pub(crate) client_requests: HashMap<RequestId, u64>,
+    /// 日志索引 -> 客户端请求ID
+    pub(crate) client_requests_revert: HashMap<u64, RequestId>,
+
+    // 配置变更相关状态
+    pub(crate) config_change_in_progress: bool,
+    pub(crate) config_change_start_time: Option<Instant>,
+    pub(crate) config_change_timeout: Duration,
+    /// 联合配置的日志索引
+    pub(crate) joint_config_log_index: u64,
+
+    // 定时器配置
+    pub(crate) election_timeout_min: Duration,
+    pub(crate) election_timeout_max: Duration,
+    pub(crate) heartbeat_interval: Duration,
+    pub(crate) heartbeat_interval_timer_id: Option<TimerId>,
+    /// 日志应用到状态机的间隔
+    pub(crate) apply_interval: Duration,
+    pub(crate) apply_interval_timer: Option<TimerId>,
+    pub(crate) config_change_timer: Option<TimerId>,
+
+    pub(crate) last_heartbeat: Instant,
+
+    // 外部依赖
+    pub(crate) callbacks: Arc<dyn RaftCallbacks>,
+
+    // 统一错误处理器
+    pub(crate) error_handler: CallbackErrorHandler,
+
+    // 选举跟踪（仅 Candidate 状态有效）
+    pub(crate) election_votes: HashMap<RaftId, bool>,
+    pub(crate) election_max_term: u64,
+    pub(crate) current_election_id: Option<RequestId>,
+
+    // 快照请求跟踪（仅 Follower 有效）
+    pub(crate) current_snapshot_request_id: Option<RequestId>,
+    /// 安装快照成功标志
+    pub(crate) install_snapshot_success: Option<(bool, RequestId, Option<crate::error::SnapshotError>)>,
+
+    // 快照相关状态（Leader 用）
+    pub(crate) follower_snapshot_states: HashMap<RaftId, InstallSnapshotState>,
+    pub(crate) follower_last_snapshot_index: HashMap<RaftId, u64>,
+    pub(crate) snapshot_probe_schedules: Vec<SnapshotProbeSchedule>,
+    pub(crate) schedule_snapshot_probe_interval: Duration,
+    pub(crate) schedule_snapshot_probe_retries: u32,
+
+    // 领导人转移相关状态
+    pub(crate) leader_transfer_target: Option<RaftId>,
+    pub(crate) leader_transfer_request_id: Option<RequestId>,
+    pub(crate) leader_transfer_timeout: Duration,
+    pub(crate) leader_transfer_start_time: Option<Instant>,
+
+    /// 选举定时器ID
+    pub(crate) election_timer: Option<TimerId>,
+    /// 领导人转移定时器ID
+    pub(crate) leader_transfer_timer: Option<TimerId>,
+
+    // Pipeline 状态管理（反馈控制和超时管理）
+    pub(crate) pipeline: pipeline::PipelineState,
+
+    // 其他状态（可扩展）
+    pub(crate) options: RaftStateOptions,
+}
+
+impl RaftState {
+    /// 初始化状态
+    pub async fn new(options: RaftStateOptions, callbacks: Arc<dyn RaftCallbacks>) -> Result<Self> {
+        // 从回调加载持久化状态
+        let (current_term, voted_for) = match callbacks.load_hard_state(&options.id).await {
+            Ok(Some(hard_state)) => (hard_state.term, hard_state.voted_for),
+            Ok(None) => (0, None),
+            Err(err) => {
+                error!("Failed to load hard state: {}", err);
+                return Err(RaftError::Storage(err).into());
+            }
+        };
+
+        let loaded_config = match callbacks.load_cluster_config(&options.id).await {
+            Ok(conf) => conf,
+            Err(err) => {
+                error!("Failed to load cluster config: {}", err);
+                return Err(RaftError::Storage(err).into());
+            }
+        };
+
+        let snap = match callbacks.load_snapshot(&options.id).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                info!("Node {} No snapshot found", options.id);
+                Snapshot {
+                    index: 0,
+                    term: 0,
+                    data: vec![],
+                    config: ClusterConfig::empty(),
+                }
+            }
+            Err(err) => {
+                error!("Failed to load snapshot: {}", err);
+                return Err(RaftError::Storage(err).into());
+            }
+        };
+
+        let (last_log_index, last_log_term) = match callbacks.get_last_log_index(&options.id).await
+        {
+            Ok((index, term)) => (index, term),
+            Err(err) => {
+                error!("Failed to get last log index: {}", err);
+                return Err(RaftError::Storage(err).into());
+            }
+        };
+
+        Ok(RaftState {
+            schedule_snapshot_probe_interval: options.schedule_snapshot_probe_interval,
+            schedule_snapshot_probe_retries: options.schedule_snapshot_probe_retries,
+            error_handler: CallbackErrorHandler::new(options.id.clone()),
+            leader_id: None,
+            leader_transfer_request_id: None,
+            leader_transfer_start_time: None,
+            leader_transfer_target: None,
+            leader_transfer_timeout: options.leader_transfer_timeout,
+            id: options.id.clone(),
+            config: loaded_config,
+            role: Role::Follower,
+            current_term,
+            voted_for,
+            commit_index: snap.index,
+            last_applied: snap.index,
+            last_log_index,
+            last_log_term,
+            last_snapshot_index: snap.index,
+            last_snapshot_term: snap.term,
+            next_index: HashMap::new(),
+            match_index: HashMap::new(),
+            client_requests: HashMap::new(),
+            client_requests_revert: HashMap::new(),
+            config_change_in_progress: false,
+            config_change_start_time: None,
+            heartbeat_interval_timer_id: None,
+            config_change_timeout: options.config_change_timeout,
+            joint_config_log_index: 0,
+            election_timeout_min: options.election_timeout_min,
+            election_timeout_max: options.election_timeout_max,
+            heartbeat_interval: options.heartbeat_interval,
+            apply_interval: options.apply_interval,
+            apply_interval_timer: None,
+            config_change_timer: None,
+            last_heartbeat: Instant::now(),
+            callbacks,
+            election_votes: HashMap::new(),
+            election_max_term: current_term,
+            current_election_id: None,
+            install_snapshot_success: None,
+            current_snapshot_request_id: None,
+            follower_snapshot_states: HashMap::new(),
+            follower_last_snapshot_index: HashMap::new(),
+            snapshot_probe_schedules: Vec::new(),
+            election_timer: None,
+            leader_transfer_timer: None,
+            pipeline: pipeline::PipelineState::new(options.clone()),
+            options,
+        })
+    }
+
+    /// 获取有效的对等节点列表
+    pub(crate) fn get_effective_peers(&self) -> Vec<RaftId> {
+        self.config
+            .get_all_nodes()
+            .into_iter()
+            .filter(|id| *id != self.id)
+            .collect()
+    }
+
+    /// 获取最后一个日志条目的索引
+    pub(crate) fn get_last_log_index(&self) -> u64 {
+        std::cmp::max(self.last_log_index, self.last_snapshot_index)
+    }
+
+    /// 获取最后一个日志条目的任期
+    pub(crate) fn get_last_log_term(&self) -> u64 {
+        self.last_log_term
+    }
+
+    /// 获取当前角色
+    pub fn get_role(&self) -> Role {
+        self.role
+    }
+
+    /// 获取当前InFlight请求总数
+    pub fn get_inflight_request_count(&self) -> usize {
+        self.pipeline.get_inflight_request_count()
+    }
+
+    /// 处理事件（主入口）
+    pub async fn handle_event(&mut self, event: crate::Event) {
+        use crate::Event;
+        
+        match event {
+            Event::ElectionTimeout => self.handle_election_timeout().await,
+            Event::RequestVoteRequest(sender, request) => {
+                self.handle_request_vote(sender, request).await
+            }
+            Event::AppendEntriesRequest(sender, request) => {
+                self.handle_append_entries_request(sender, request).await
+            }
+            Event::RequestVoteResponse(sender, response) => {
+                self.handle_request_vote_response(sender, response).await
+            }
+            Event::AppendEntriesResponse(sender, response) => {
+                self.handle_append_entries_response(sender, response).await
+            }
+            Event::HeartbeatTimeout => self.handle_heartbeat_timeout().await,
+            Event::ClientPropose { cmd, request_id } => {
+                self.handle_client_propose(cmd, request_id).await
+            }
+            Event::InstallSnapshotRequest(sender, request) => {
+                self.handle_install_snapshot(sender, request).await
+            }
+            Event::InstallSnapshotResponse(sender, response) => {
+                self.handle_install_snapshot_response(sender, response).await
+            }
+            Event::ApplyLogTimeout => self.apply_committed_logs().await,
+            Event::ConfigChangeTimeout => self.handle_config_change_timeout().await,
+            Event::ChangeConfig {
+                new_voters,
+                request_id,
+            } => self.handle_change_config(new_voters, request_id).await,
+            Event::AddLearner {
+                learner,
+                request_id,
+            } => {
+                self.handle_add_learner(learner, request_id).await;
+            }
+            Event::RemoveLearner {
+                learner,
+                request_id,
+            } => {
+                self.handle_remove_learner(learner, request_id).await;
+            }
+            Event::LeaderTransfer { target, request_id } => {
+                self.handle_leader_transfer(target, request_id).await;
+            }
+            Event::LeaderTransferTimeout => {
+                self.handle_leader_transfer_timeout().await;
+            }
+            Event::CreateSnapshot => self.create_snapshot().await,
+            Event::CompleteSnapshotInstallation(complete_snapshot_installation) => {
+                self.handle_complete_snapshot_installation(complete_snapshot_installation)
+                    .await;
+            }
+        }
+    }
+}
+
