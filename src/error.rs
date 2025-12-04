@@ -77,6 +77,9 @@ pub enum StorageError {
 
     #[error("Consistency check failed: {0}")]
     Consistency(String),
+
+    #[error("Channel closed")]
+    ChannelClosed,
 }
 
 /// 定时器相关错误
@@ -244,6 +247,7 @@ impl ErrorHandler for StorageError {
             StorageError::ConfigNotFound => ErrorSeverity::Recoverable,
             StorageError::SnapshotCreationFailed(_) => ErrorSeverity::Recoverable,
             StorageError::Consistency(_) => ErrorSeverity::Fatal,
+            StorageError::ChannelClosed => ErrorSeverity::Fatal,
         }
     }
 
@@ -259,6 +263,7 @@ impl ErrorHandler for StorageError {
                 format!("Snapshot creation failed: {}", msg)
             }
             StorageError::Consistency(msg) => format!("Consistency check failed: {}", msg),
+            StorageError::ChannelClosed => "Storage channel closed".to_string(),
         }
     }
 }

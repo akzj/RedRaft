@@ -118,8 +118,26 @@ pub struct AppendEntriesResponse {
     pub matched_index: u64, // 用于快速同步
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, Default)]
 pub struct HardStateMap(HashMap<RaftId, HardState>);
+
+impl HardStateMap {
+    pub fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    pub fn insert(&mut self, key: RaftId, value: HardState) {
+        self.0.insert(key, value);
+    }
+
+    pub fn get(&self, key: &RaftId) -> Option<&HardState> {
+        self.0.get(key)
+    }
+
+    pub fn remove(&mut self, key: &RaftId) -> Option<HardState> {
+        self.0.remove(key)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct HardState {
