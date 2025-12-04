@@ -21,6 +21,7 @@ use crate::{
 
 use super::{
     entry::{EntryMeta, LogEntryRecord},
+    manager::{SegmentManager, SegmentManagerOptions, DiskStats},
     segment::LogSegment,
 };
 
@@ -48,6 +49,26 @@ pub struct LogEntryStoreOptions {
     // max number of I/O threads for log segment file read
     #[allow(dead_code)]
     pub(crate) max_io_threads: usize,
+    /// Maximum segment size in bytes before rotation (default: 64MB)
+    pub(crate) max_segment_size: u64,
+    /// Directory for storing log segments
+    pub(crate) dir: PathBuf,
+    /// Whether to sync after each write
+    pub(crate) sync_on_write: bool,
+}
+
+impl Default for LogEntryStoreOptions {
+    fn default() -> Self {
+        Self {
+            memtable_memory_size: 64 * 1024 * 1024,
+            batch_size: 100,
+            cache_entries_size: 1000,
+            max_io_threads: 4,
+            max_segment_size: 64 * 1024 * 1024, // 64MB
+            dir: PathBuf::from("./data/logs"),
+            sync_on_write: true,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -613,6 +634,426 @@ impl LogEntryStorage for LogEntryStore {
 
     async fn get_log_term(&self, from: &RaftId, idx: u64) -> StorageResult<u64> {
         self.inner.get_log_term(from, idx).await
+    }
+}
+
+// =============================================================================
+// ManagedLogEntryStore - New implementation using SegmentManager
+// =============================================================================
+
+/// Log entry store with automatic segment management.
+/// 
+/// This store provides:
+/// - Automatic segment rotation when max size is reached
+/// - Cross-segment read operations
+/// - Obsolete segment cleanup after truncatePrefix
+/// - Disk space monitoring
+/// 
+/// Use this for production deployments where disk management is important.
+#[derive(Clone)]
+pub struct ManagedLogEntryStore {
+    options: LogEntryStoreOptions,
+    manager: Arc<SegmentManager>,
+    cache_table: Arc<RwLock<HashMap<RaftId, VecDeque<LogEntry>>>>,
+    op_sender: mpsc::UnboundedSender<LogEntryOpRequest>,
+}
+
+/// Options for creating a ManagedLogEntryStore
+#[derive(Clone, Debug)]
+pub struct ManagedLogEntryStoreOptions {
+    /// Maximum segment size in bytes before rotation (default: 64MB)
+    pub max_segment_size: u64,
+    /// Directory for storing log segments
+    pub dir: PathBuf,
+    /// Maximum number of I/O threads
+    pub max_io_threads: usize,
+    /// Whether to sync after each write
+    pub sync_on_write: bool,
+    /// Batch size for processing operations
+    pub batch_size: usize,
+    /// Cache size for recent entries
+    pub cache_entries_size: usize,
+    /// Minimum free disk space to maintain (bytes)
+    pub min_free_disk_space: u64,
+}
+
+impl Default for ManagedLogEntryStoreOptions {
+    fn default() -> Self {
+        Self {
+            max_segment_size: 64 * 1024 * 1024, // 64MB
+            dir: PathBuf::from("./data/logs"),
+            max_io_threads: 4,
+            sync_on_write: true,
+            batch_size: 100,
+            cache_entries_size: 1000,
+            min_free_disk_space: 100 * 1024 * 1024, // 100MB
+        }
+    }
+}
+
+impl ManagedLogEntryStore {
+    /// Create a new managed log entry store
+    pub fn new(options: ManagedLogEntryStoreOptions) -> Result<(Self, mpsc::UnboundedReceiver<LogEntryOpRequest>), StorageError> {
+        let manager_options = SegmentManagerOptions {
+            dir: options.dir.clone(),
+            max_segment_size: options.max_segment_size,
+            max_io_threads: options.max_io_threads,
+            sync_on_write: options.sync_on_write,
+            min_free_disk_space: options.min_free_disk_space,
+        };
+
+        let manager = SegmentManager::new(manager_options)
+            .map_err(|e| StorageError::Io(Arc::new(e)))?;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        
+        let store_options = LogEntryStoreOptions {
+            memtable_memory_size: 64 * 1024 * 1024,
+            batch_size: options.batch_size,
+            cache_entries_size: options.cache_entries_size,
+            max_io_threads: options.max_io_threads,
+            max_segment_size: options.max_segment_size,
+            dir: options.dir,
+            sync_on_write: options.sync_on_write,
+        };
+
+        Ok((
+            Self {
+                options: store_options,
+                manager: Arc::new(manager),
+                cache_table: Arc::new(RwLock::new(HashMap::new())),
+                op_sender: tx,
+            },
+            rx,
+        ))
+    }
+
+    /// Start the background operation processor
+    pub fn start(&self, mut receiver: mpsc::UnboundedReceiver<LogEntryOpRequest>) {
+        let manager = self.manager.clone();
+        let cache_table = self.cache_table.clone();
+        let cache_size = self.options.cache_entries_size;
+        let batch_size = self.options.batch_size;
+
+        tokio::spawn(async move {
+            loop {
+                let mut buf = Vec::with_capacity(batch_size);
+                let size = receiver.recv_many(&mut buf, batch_size).await;
+                if size == 0 {
+                    warn!("Managed log entry receiver closed");
+                    break;
+                }
+
+                let mut results: Vec<StorageResult<()>> = Vec::with_capacity(buf.len());
+                let mut i = 0;
+
+                while i < buf.len() {
+                    match &buf[i].log_entry_op {
+                        LogEntryOp::Append(_) => {
+                            // Batch consecutive appends
+                            let start = i;
+                            while i < buf.len() && matches!(&buf[i].log_entry_op, LogEntryOp::Append(_)) {
+                                i += 1;
+                            }
+
+                            // Process all appends
+                            let mut batch_result = Ok(());
+                            for req in &buf[start..i] {
+                                if let LogEntryOp::Append(entries) = &req.log_entry_op {
+                                    // Write to manager (with rotation check)
+                                    if let Err(e) = manager.write_log_entries(&req.from, entries.clone()) {
+                                        warn!("Failed to append log entries: {}", e);
+                                        batch_result = Err(StorageError::Io(Arc::new(e)));
+                                        break;
+                                    }
+
+                                    // Update cache
+                                    let mut cache = cache_table.write();
+                                    let entry_cache = cache.entry(req.from.clone()).or_default();
+                                    for entry in entries {
+                                        entry_cache.push_back(entry.clone());
+                                        if entry_cache.len() > cache_size {
+                                            entry_cache.pop_front();
+                                        }
+                                    }
+                                }
+                            }
+
+                            // All appends in this batch share the result
+                            for _ in start..i {
+                                results.push(batch_result.clone());
+                            }
+                        }
+                        LogEntryOp::TruncateLogPrefix(index) => {
+                            let result = manager
+                                .write_truncate_prefix(&buf[i].from, *index)
+                                .map_err(|e| StorageError::Io(Arc::new(e)));
+
+                            // Update cache
+                            if result.is_ok() {
+                                let mut cache = cache_table.write();
+                                if let Some(entry_cache) = cache.get_mut(&buf[i].from) {
+                                    while let Some(front) = entry_cache.front() {
+                                        if front.index < *index {
+                                            entry_cache.pop_front();
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            results.push(result);
+                            i += 1;
+                        }
+                        LogEntryOp::TruncateLogSuffix(index) => {
+                            let result = manager
+                                .write_truncate_suffix(&buf[i].from, *index)
+                                .map_err(|e| StorageError::Io(Arc::new(e)));
+
+                            // Update cache
+                            if result.is_ok() {
+                                let mut cache = cache_table.write();
+                                if let Some(entry_cache) = cache.get_mut(&buf[i].from) {
+                                    while let Some(back) = entry_cache.back() {
+                                        if back.index > *index {
+                                            entry_cache.pop_back();
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            results.push(result);
+                            i += 1;
+                        }
+                    }
+                }
+
+                // Send results back
+                for (req, result) in buf.into_iter().zip(results.into_iter()) {
+                    let _ = req.response_tx.send(result);
+                }
+            }
+        });
+    }
+
+    /// Get disk usage statistics
+    pub fn get_disk_stats(&self) -> DiskStats {
+        self.manager.get_disk_stats()
+    }
+
+    /// Get total disk usage in bytes
+    pub fn get_disk_usage(&self) -> u64 {
+        self.manager.get_disk_usage()
+    }
+
+    /// Get number of segments (active + sealed)
+    pub fn segment_count(&self) -> usize {
+        self.manager.segment_count()
+    }
+
+    /// Force segment rotation
+    pub fn force_rotation(&self) -> Result<(), StorageError> {
+        self.manager
+            .rotate_segment()
+            .map_err(|e| StorageError::Io(Arc::new(e)))
+    }
+
+    /// Cleanup obsolete segments
+    pub fn cleanup_obsolete_segments(&self) -> Result<usize, StorageError> {
+        self.manager
+            .cleanup_obsolete_segments()
+            .map_err(|e| StorageError::Io(Arc::new(e)))
+    }
+
+    /// Check if disk space is low
+    pub fn is_disk_space_low(&self) -> bool {
+        self.manager.is_disk_space_low()
+    }
+
+    /// Get entries from cache if available
+    fn get_from_cache(&self, from: &RaftId, low: u64, high: u64) -> Option<Vec<LogEntry>> {
+        let cache = self.cache_table.read();
+        let entry_cache = cache.get(from)?;
+
+        if entry_cache.is_empty() {
+            return None;
+        }
+
+        let first_cached = entry_cache.front()?.index;
+        let last_cached = entry_cache.back()?.index;
+
+        if low >= first_cached && high <= last_cached + 1 {
+            let start_offset = (low - first_cached) as usize;
+            let count = (high - low) as usize;
+
+            let entries: Vec<LogEntry> = entry_cache
+                .iter()
+                .skip(start_offset)
+                .take(count)
+                .cloned()
+                .collect();
+
+            if entries.len() == count {
+                return Some(entries);
+            }
+        }
+        None
+    }
+
+    /// Get term from cache if available
+    fn get_term_from_cache(&self, from: &RaftId, idx: u64) -> Option<u64> {
+        let cache = self.cache_table.read();
+        let entry_cache = cache.get(from)?;
+
+        if entry_cache.is_empty() {
+            return None;
+        }
+
+        let first_cached = entry_cache.front()?.index;
+        let last_cached = entry_cache.back()?.index;
+
+        if idx >= first_cached && idx <= last_cached {
+            let offset = (idx - first_cached) as usize;
+            return entry_cache.get(offset).map(|e| e.term);
+        }
+        None
+    }
+}
+
+#[async_trait::async_trait]
+impl HardStateStorage for ManagedLogEntryStore {
+    async fn save_hard_state(&self, from: &RaftId, hard_state: HardState) -> StorageResult<()> {
+        self.manager.save_hard_state(from, hard_state);
+        Ok(())
+    }
+
+    async fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<HardState>> {
+        Ok(self.manager.load_hard_state(from))
+    }
+}
+
+#[async_trait::async_trait]
+impl LogEntryStorage for ManagedLogEntryStore {
+    async fn append_log_entries(&self, from: &RaftId, entries: &[LogEntry]) -> StorageResult<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let (tx, rx) = sync::oneshot::channel();
+        let request = LogEntryOpRequest {
+            from: from.clone(),
+            log_entry_op: LogEntryOp::Append(entries.to_vec()),
+            response_tx: tx,
+        };
+
+        self.op_sender.send(request).map_err(|e| {
+            warn!("Failed to send append log entries request: {}", e);
+            StorageError::ChannelClosed
+        })?;
+
+        rx.await.map_err(|e| {
+            warn!("Failed to receive append log entries response: {}", e);
+            StorageError::ChannelClosed
+        })?
+    }
+
+    async fn get_log_entries(
+        &self,
+        from: &RaftId,
+        low: u64,
+        high: u64,
+    ) -> StorageResult<Vec<LogEntry>> {
+        // Try cache first
+        if let Some(entries) = self.get_from_cache(from, low, high) {
+            return Ok(entries);
+        }
+
+        // Read from manager (handles cross-segment reads)
+        self.manager
+            .get_log_entries(from, low, high)
+            .await
+            .map_err(|e| StorageError::Io(Arc::new(e)))
+    }
+
+    async fn get_log_entries_term(
+        &self,
+        from: &RaftId,
+        low: u64,
+        high: u64,
+    ) -> StorageResult<Vec<(u64, u64)>> {
+        let entries = self.get_log_entries(from, low, high).await?;
+        Ok(entries.into_iter().map(|e| (e.index, e.term)).collect())
+    }
+
+    async fn truncate_log_suffix(&self, from: &RaftId, idx: u64) -> StorageResult<()> {
+        let (tx, rx) = sync::oneshot::channel();
+        let request = LogEntryOpRequest {
+            from: from.clone(),
+            log_entry_op: LogEntryOp::TruncateLogSuffix(idx),
+            response_tx: tx,
+        };
+
+        self.op_sender.send(request).map_err(|e| {
+            warn!("Failed to send truncate log suffix request: {}", e);
+            StorageError::ChannelClosed
+        })?;
+
+        rx.await.map_err(|e| {
+            warn!("Failed to receive truncate log suffix response: {}", e);
+            StorageError::ChannelClosed
+        })?
+    }
+
+    async fn truncate_log_prefix(&self, from: &RaftId, idx: u64) -> StorageResult<()> {
+        let (tx, rx) = sync::oneshot::channel();
+        let request = LogEntryOpRequest {
+            from: from.clone(),
+            log_entry_op: LogEntryOp::TruncateLogPrefix(idx),
+            response_tx: tx,
+        };
+
+        self.op_sender.send(request).map_err(|e| {
+            warn!("Failed to send truncate log prefix request: {}", e);
+            StorageError::ChannelClosed
+        })?;
+
+        rx.await.map_err(|e| {
+            warn!("Failed to receive truncate log prefix response: {}", e);
+            StorageError::ChannelClosed
+        })?
+    }
+
+    async fn get_last_log_index(&self, from: &RaftId) -> StorageResult<(u64, u64)> {
+        // Try cache first
+        {
+            let cache = self.cache_table.read();
+            if let Some(entry_cache) = cache.get(from) {
+                if let Some(last) = entry_cache.back() {
+                    return Ok((last.index, last.term));
+                }
+            }
+        }
+
+        // Fall back to manager
+        Ok(self.manager.get_last_log_index(from))
+    }
+
+    async fn get_log_term(&self, from: &RaftId, idx: u64) -> StorageResult<u64> {
+        // Try cache first
+        if let Some(term) = self.get_term_from_cache(from, idx) {
+            return Ok(term);
+        }
+
+        // Read from manager
+        let entry = self.manager
+            .read_entry(from, idx)
+            .await
+            .map_err(|e| StorageError::Io(Arc::new(e)))?;
+
+        Ok(entry.term)
     }
 }
 

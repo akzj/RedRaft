@@ -747,6 +747,9 @@ mod store_tests {
             batch_size: 10,
             cache_entries_size: 100,
             max_io_threads: 4,
+            max_segment_size: 64 * 1024 * 1024,
+            dir: dir.path().to_path_buf(),
+            sync_on_write: false,
         };
 
         LogEntryStore::new(options, inner)
