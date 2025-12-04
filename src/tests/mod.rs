@@ -319,6 +319,16 @@ pub mod tests {
             Ok(())
         }
 
+        async fn read_index_response(
+            &self,
+            _from: &RaftId,
+            _request_id: RequestId,
+            _result: ClientResult<u64>,
+        ) -> ClientResult<()> {
+            // 测试环境下不做特殊处理
+            Ok(())
+        }
+
         fn process_snapshot(
             &self,
             _from: &RaftId,

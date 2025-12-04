@@ -574,6 +574,9 @@ impl RaftState {
                 }
 
                 self.update_commit_index().await;
+                
+                // 处理 ReadIndex 确认（心跳成功表示仍是 Leader）
+                self.handle_read_index_ack(&peer).await;
             } else {
                 warn!(
                     "Node {} received log conflict from {}: index={:?}, term={:?}",

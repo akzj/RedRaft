@@ -48,6 +48,11 @@ pub enum Event {
         request_id: RequestId,
     },
 
+    /// ReadIndex 请求（用于线性一致性读）
+    ReadIndex {
+        request_id: RequestId,
+    },
+
     // 配置变更事件
     ChangeConfig {
         new_voters: HashSet<RaftId>,

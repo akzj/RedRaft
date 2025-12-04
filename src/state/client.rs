@@ -367,6 +367,9 @@ impl RaftState {
             }
         }
 
+        // 检查 ReadIndex 待处理的读请求
+        self.check_pending_reads().await;
+
         self.adjust_apply_interval().await;
     }
 

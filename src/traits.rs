@@ -218,6 +218,16 @@ pub trait StateMachine: Send + Sync {
         request_id: RequestId,
         result: ClientResult<u64>,
     ) -> ClientResult<()>;
+
+    /// ReadIndex 响应回调（用于线性一致性读）
+    /// result: Ok(read_index) 表示成功，返回可安全读取的索引
+    /// result: Err(e) 表示失败（如 NotLeader, Timeout）
+    async fn read_index_response(
+        &self,
+        from: &RaftId,
+        request_id: RequestId,
+        result: ClientResult<u64>,
+    ) -> ClientResult<()>;
 }
 
 #[async_trait]

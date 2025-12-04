@@ -15,10 +15,11 @@ mod client;
 mod config;
 mod election;
 mod leader_transfer;
+mod read_index;
 mod replication;
 mod snapshot;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,17 @@ use crate::message::{InstallSnapshotState, Snapshot, SnapshotProbeSchedule};
 use crate::pipeline;
 use crate::traits::RaftCallbacks;
 use crate::types::{RaftId, RequestId, TimerId};
+
+/// ReadIndex 请求状态
+#[derive(Debug, Clone)]
+pub struct ReadIndexState {
+    /// 读取索引
+    pub read_index: u64,
+    /// 已确认的节点
+    pub acks: HashSet<RaftId>,
+    /// 请求时间（用于超时）
+    pub request_time: Instant,
+}
 
 /// Raft 状态机配置选项
 #[derive(Debug, Clone)]
@@ -173,6 +185,12 @@ pub struct RaftState {
     pub(crate) pre_vote_votes: HashMap<RaftId, bool>,
     pub(crate) current_pre_vote_id: Option<RequestId>,
 
+    // ReadIndex 跟踪（用于线性一致性读）
+    /// 待确认的 ReadIndex 请求: request_id -> ReadIndexState
+    pub(crate) pending_read_indices: HashMap<RequestId, ReadIndexState>,
+    /// 等待应用完成的读请求: request_id -> read_index
+    pub(crate) pending_reads: HashMap<RequestId, u64>,
+
     // 快照请求跟踪（仅 Follower 有效）
     pub(crate) current_snapshot_request_id: Option<RequestId>,
     /// 安装快照成功标志
@@ -293,6 +311,8 @@ impl RaftState {
             current_election_id: None,
             pre_vote_votes: HashMap::new(),
             current_pre_vote_id: None,
+            pending_read_indices: HashMap::new(),
+            pending_reads: HashMap::new(),
             install_snapshot_success: None,
             current_snapshot_request_id: None,
             follower_snapshot_states: HashMap::new(),
@@ -362,6 +382,9 @@ impl RaftState {
         self.client_requests.clear();
         self.client_requests_revert.clear();
         self.client_request_timestamps.clear();
+        
+        // 清理 ReadIndex 状态
+        self.clear_read_index_state();
         
         // 清理快照状态
         self.follower_snapshot_states.clear();
@@ -450,6 +473,9 @@ impl RaftState {
             Event::HeartbeatTimeout => self.handle_heartbeat_timeout().await,
             Event::ClientPropose { cmd, request_id } => {
                 self.handle_client_propose(cmd, request_id).await
+            }
+            Event::ReadIndex { request_id } => {
+                self.handle_read_index(request_id).await
             }
             Event::InstallSnapshotRequest(sender, request) => {
                 self.handle_install_snapshot(sender, request).await

@@ -181,7 +181,7 @@ impl TestNode {
             apply_batch_size: 50,
             schedule_snapshot_probe_interval: Duration::from_secs(5),
             schedule_snapshot_probe_retries: 3,
-            pre_vote_enabled: true, // 启用 Pre-Vote
+            pre_vote_enabled: true,     // 启用 Pre-Vote
             max_inflight_requests: 100, // 调整InFlight限制
             initial_batch_size: 10,
             max_batch_size: 100,
@@ -402,9 +402,7 @@ impl Network for TestNodeInner {
             "Node {:?} sending PreVote to {:?} for prospective term {}",
             from, target, args.term
         );
-        self.network
-            .send_pre_vote_request(from, target, args)
-            .await
+        self.network.send_pre_vote_request(from, target, args).await
     }
 
     async fn send_pre_vote_response(
@@ -588,6 +586,16 @@ impl StateMachine for TestNodeInner {
         _request_id: RequestId,
         _result: raft_lite::traits::ClientResult<u64>,
     ) -> raft_lite::traits::ClientResult<()> {
+        Ok(())
+    }
+
+    async fn read_index_response(
+        &self,
+        _from: &RaftId,
+        _request_id: RequestId,
+        _result: raft_lite::traits::ClientResult<u64>,
+    ) -> raft_lite::traits::ClientResult<()> {
+        // ReadIndex 响应（测试环境下简单处理）
         Ok(())
     }
 

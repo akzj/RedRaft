@@ -116,6 +116,21 @@ pub struct PreVoteResponse {
     pub request_id: RequestId,
 }
 
+/// ReadIndex 请求（用于线性一致性读）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadIndexRequest {
+    pub request_id: RequestId,
+}
+
+/// ReadIndex 响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadIndexResponse {
+    pub request_id: RequestId,
+    pub read_index: u64,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppendEntriesRequest {
     pub term: u64,
