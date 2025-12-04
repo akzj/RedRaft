@@ -1,6 +1,7 @@
 use crate::network::pb::raft_service_client::RaftServiceClient;
 use crate::network::pb::raft_service_server::{RaftService, RaftServiceServer};
 // network.rs
+use crate::message::{PreVoteRequest, PreVoteResponse};
 use crate::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
     Network, NodeId, RaftId, RequestVoteRequest, RequestVoteResponse, RpcError, RpcResult,
@@ -62,6 +63,16 @@ pub enum OutgoingMessage {
         from: RaftId,
         target: RaftId,
         args: InstallSnapshotResponse,
+    },
+    PreVote {
+        from: RaftId,
+        target: RaftId,
+        args: PreVoteRequest,
+    },
+    PreVoteResponse {
+        from: RaftId,
+        target: RaftId,
+        args: PreVoteResponse,
     },
 }
 
@@ -425,6 +436,32 @@ impl Network for MultiRaftNetwork {
         args: InstallSnapshotResponse,
     ) -> RpcResult<()> {
         self.send_message(target, OutgoingMessage::InstallSnapshotResponse {
+            from: from.clone(),
+            target: target.clone(),
+            args,
+        })
+    }
+
+    async fn send_pre_vote_request(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: PreVoteRequest,
+    ) -> RpcResult<()> {
+        self.send_message(target, OutgoingMessage::PreVote {
+            from: from.clone(),
+            target: target.clone(),
+            args,
+        })
+    }
+
+    async fn send_pre_vote_response(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: PreVoteResponse,
+    ) -> RpcResult<()> {
+        self.send_message(target, OutgoingMessage::PreVoteResponse {
             from: from.clone(),
             target: target.clone(),
             args,

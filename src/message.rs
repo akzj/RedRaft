@@ -97,6 +97,25 @@ pub struct RequestVoteResponse {
     pub request_id: RequestId,
 }
 
+/// Pre-Vote 请求（不增加 term，用于防止网络分区节点干扰集群）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreVoteRequest {
+    /// 候选人期望的任期（current_term + 1），但不实际递增
+    pub term: u64,
+    pub candidate_id: RaftId,
+    pub last_log_index: u64,
+    pub last_log_term: u64,
+    pub request_id: RequestId,
+}
+
+/// Pre-Vote 响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreVoteResponse {
+    pub term: u64,
+    pub vote_granted: bool,
+    pub request_id: RequestId,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppendEntriesRequest {
     pub term: u64,

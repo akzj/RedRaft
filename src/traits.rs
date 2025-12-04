@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use tokio::sync::oneshot;
 
 use crate::error::StateChangeError;
+use crate::message::{PreVoteRequest, PreVoteResponse};
 use crate::{cluster_config::ClusterConfig, *};
 
 // 结果类型别名
@@ -59,6 +60,21 @@ pub trait Network: Send + Sync {
         from: &RaftId,
         target: &RaftId,
         args: InstallSnapshotResponse,
+    ) -> RpcResult<()>;
+
+    // Pre-Vote RPC（防止网络分区节点干扰集群）
+    async fn send_pre_vote_request(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: PreVoteRequest,
+    ) -> RpcResult<()>;
+
+    async fn send_pre_vote_response(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: PreVoteResponse,
     ) -> RpcResult<()>;
 }
 

@@ -8,8 +8,8 @@ use tracing::{debug, info, warn};
 
 use super::RaftState;
 use crate::event::Role;
-use crate::message::{RequestVoteRequest, RequestVoteResponse};
-use crate::types::RequestId;
+use crate::message::{PreVoteRequest, PreVoteResponse, RequestVoteRequest, RequestVoteResponse};
+use crate::types::{RaftId, RequestId};
 
 impl RaftState {
     /// 处理选举超时
@@ -25,11 +25,84 @@ impl RaftState {
             return;
         }
 
+        // 检查是否启用 Pre-Vote
+        if self.options.pre_vote_enabled {
+            self.start_pre_vote().await;
+        } else {
+            self.start_real_election().await;
+        }
+    }
+
+    /// 开始 Pre-Vote 阶段（不增加 term）
+    pub(crate) async fn start_pre_vote(&mut self) {
         info!(
-            "Node {} starting election for term {}",
+            "Node {} starting pre-vote for prospective term {}",
             self.id,
             self.current_term + 1
         );
+
+        // 生成 Pre-Vote ID 并初始化跟踪状态
+        let pre_vote_id = RequestId::new();
+        self.current_pre_vote_id = Some(pre_vote_id);
+        self.pre_vote_votes.clear();
+        self.pre_vote_votes.insert(self.id.clone(), true); // 自己投自己
+
+        // 重置选举定时器
+        self.reset_election().await;
+
+        // 获取日志信息
+        let last_log_index = self.get_last_log_index();
+        let last_log_term = self.get_last_log_term();
+
+        let req = PreVoteRequest {
+            term: self.current_term + 1, // 使用 prospective term，但不实际递增
+            candidate_id: self.id.clone(),
+            last_log_index,
+            last_log_term,
+            request_id: pre_vote_id,
+        };
+
+        // 发送 Pre-Vote 请求
+        for peer in self.config.get_effective_voters() {
+            if *peer != self.id {
+                let target = peer;
+                let args = req.clone();
+
+                let result = self
+                    .error_handler
+                    .handle(
+                        self.callbacks
+                            .send_pre_vote_request(&self.id, &target, args)
+                            .await,
+                        "send_pre_vote_request",
+                        Some(&target),
+                    )
+                    .await;
+
+                if result.is_none() {
+                    warn!(
+                        "Failed to send PreVote to {}, will retry or ignore based on error severity",
+                        target
+                    );
+                }
+            }
+        }
+
+        // 单节点集群：立即检查结果
+        self.check_pre_vote_result().await;
+    }
+
+    /// 开始真实选举（递增 term）
+    pub(crate) async fn start_real_election(&mut self) {
+        info!(
+            "Node {} starting real election for term {}",
+            self.id,
+            self.current_term + 1
+        );
+
+        // 清理 Pre-Vote 状态
+        self.current_pre_vote_id = None;
+        self.pre_vote_votes.clear();
 
         // 切换为 Candidate 并递增任期
         self.current_term += 1;
@@ -98,6 +171,145 @@ impl RaftState {
                 None,
             )
             .await;
+
+        // 单节点集群：立即检查结果
+        self.check_election_result().await;
+    }
+
+    /// 处理 Pre-Vote 请求
+    pub(crate) async fn handle_pre_vote_request(&mut self, sender: RaftId, request: PreVoteRequest) {
+        if sender != request.candidate_id {
+            warn!(
+                "Node {} received pre-vote request from {}, but candidate is {}",
+                self.id, sender, request.candidate_id
+            );
+            return;
+        }
+
+        let mut vote_granted = false;
+
+        // Pre-Vote 条件检查（注意：不修改自身状态！）
+        // 1. prospective term >= 当前 term
+        // 2. 日志必须足够新
+        // 3. 最近没有收到 Leader 心跳（防止干扰正常运行的集群）
+        let leader_active = self.last_heartbeat.elapsed() < self.election_timeout_min;
+
+        if request.term >= self.current_term {
+            if leader_active {
+                info!(
+                    "Node {} rejecting pre-vote for {} because leader is still active (last heartbeat: {:?} ago)",
+                    self.id, request.candidate_id, self.last_heartbeat.elapsed()
+                );
+            } else {
+                let log_ok = self
+                    .is_log_up_to_date(request.last_log_index, request.last_log_term)
+                    .await;
+
+                if log_ok {
+                    vote_granted = true;
+                    info!(
+                        "Node {} granting pre-vote to {} for prospective term {}",
+                        self.id, request.candidate_id, request.term
+                    );
+                } else {
+                    info!(
+                        "Node {} rejecting pre-vote for {}, logs not up-to-date",
+                        self.id, request.candidate_id
+                    );
+                }
+            }
+        } else {
+            info!(
+                "Node {} rejecting pre-vote for {} in term {} (prospective term {} < current term {})",
+                self.id, request.candidate_id, request.term, request.term, self.current_term
+            );
+        }
+
+        // 发送响应（使用自己的 current_term）
+        let resp = PreVoteResponse {
+            term: self.current_term,
+            vote_granted,
+            request_id: request.request_id,
+        };
+
+        let _ = self
+            .error_handler
+            .handle(
+                self.callbacks
+                    .send_pre_vote_response(&self.id, &request.candidate_id, resp)
+                    .await,
+                "send_pre_vote_response",
+                Some(&request.candidate_id),
+            )
+            .await;
+    }
+
+    /// 处理 Pre-Vote 响应
+    pub(crate) async fn handle_pre_vote_response(&mut self, peer: RaftId, response: PreVoteResponse) {
+        // 检查是否是当前 Pre-Vote 轮次
+        if self.current_pre_vote_id != Some(response.request_id) {
+            debug!(
+                "Node {} ignoring stale pre-vote response from {} (expected {:?}, got {:?})",
+                self.id, peer, self.current_pre_vote_id, response.request_id
+            );
+            return;
+        }
+
+        // 过滤无效投票者
+        if !self.config.voters_contains(&peer) {
+            warn!(
+                "Node {}: received pre-vote response from unknown peer {}",
+                self.id, peer
+            );
+            return;
+        }
+
+        // 如果发现更高的 term，不需要降级（因为 Pre-Vote 不增加 term）
+        // 但需要更新对集群状态的认知
+        if response.term > self.current_term {
+            info!(
+                "Node {} discovered higher term {} from {} during pre-vote (current term {})",
+                self.id, response.term, peer, self.current_term
+            );
+            // 放弃当前 Pre-Vote
+            self.current_pre_vote_id = None;
+            self.pre_vote_votes.clear();
+            return;
+        }
+
+        // 记录 Pre-Vote 结果
+        self.pre_vote_votes.insert(peer.clone(), response.vote_granted);
+        info!(
+            "Node {} received pre-vote response from {}: granted={}",
+            self.id, peer, response.vote_granted
+        );
+
+        // 检查是否获得多数
+        self.check_pre_vote_result().await;
+    }
+
+    /// 检查 Pre-Vote 结果
+    pub(crate) async fn check_pre_vote_result(&mut self) {
+        if self.current_pre_vote_id.is_none() {
+            return;
+        }
+
+        let granted_votes: HashSet<_> = self
+            .pre_vote_votes
+            .iter()
+            .filter_map(|(id, &granted)| if granted { Some(id.clone()) } else { None })
+            .collect();
+
+        let win = self.config.majority(&granted_votes);
+        if win {
+            info!(
+                "Node {} won pre-vote with {} votes, starting real election",
+                self.id,
+                granted_votes.len()
+            );
+            // Pre-Vote 成功，开始真实选举
+            self.start_real_election().await;
+        }
     }
 
     /// 处理投票请求

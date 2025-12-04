@@ -49,6 +49,9 @@ pub struct RaftStateOptions {
     pub schedule_snapshot_probe_interval: Duration,
     pub schedule_snapshot_probe_retries: u32,
 
+    /// 是否启用 Pre-Vote（防止网络分区节点干扰集群）
+    pub pre_vote_enabled: bool,
+
     // 反馈控制相关配置
     /// 最大InFlight请求数
     pub max_inflight_requests: u64,
@@ -86,6 +89,7 @@ impl Default for RaftStateOptions {
             leader_transfer_timeout: Duration::from_secs(10),
             schedule_snapshot_probe_interval: Duration::from_secs(5),
             schedule_snapshot_probe_retries: 24 * 60 * 60 / 5, // 默认尝试24小时
+            pre_vote_enabled: true, // 默认启用 Pre-Vote
             // 反馈控制默认配置
             max_inflight_requests: 64,
             initial_batch_size: 10,
@@ -164,6 +168,10 @@ pub struct RaftState {
     pub(crate) election_votes: HashMap<RaftId, bool>,
     pub(crate) election_max_term: u64,
     pub(crate) current_election_id: Option<RequestId>,
+
+    // Pre-Vote 跟踪
+    pub(crate) pre_vote_votes: HashMap<RaftId, bool>,
+    pub(crate) current_pre_vote_id: Option<RequestId>,
 
     // 快照请求跟踪（仅 Follower 有效）
     pub(crate) current_snapshot_request_id: Option<RequestId>,
@@ -283,6 +291,8 @@ impl RaftState {
             election_votes: HashMap::new(),
             election_max_term: current_term,
             current_election_id: None,
+            pre_vote_votes: HashMap::new(),
+            current_pre_vote_id: None,
             install_snapshot_success: None,
             current_snapshot_request_id: None,
             follower_snapshot_states: HashMap::new(),
@@ -446,6 +456,12 @@ impl RaftState {
             }
             Event::InstallSnapshotResponse(sender, response) => {
                 self.handle_install_snapshot_response(sender, response).await
+            }
+            Event::PreVoteRequest(sender, request) => {
+                self.handle_pre_vote_request(sender, request).await
+            }
+            Event::PreVoteResponse(sender, response) => {
+                self.handle_pre_vote_response(sender, response).await
             }
             Event::ApplyLogTimeout => self.apply_committed_logs().await,
             Event::ConfigChangeTimeout => self.handle_config_change_timeout().await,

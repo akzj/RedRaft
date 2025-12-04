@@ -11,6 +11,7 @@ use crate::{
     RequestVoteResponse,
     RpcResult,
 };
+use crate::message::{PreVoteRequest, PreVoteResponse};
 use async_trait::async_trait;
 use rand::{Rng, SeedableRng};
 use std::collections::{HashMap, VecDeque}; // Changed from BinaryHeap
@@ -427,6 +428,8 @@ pub enum NetworkEvent {
     AppendEntriesResponse(RaftId, RaftId, AppendEntriesResponse),
     InstallSnapshotRequest(RaftId, RaftId, InstallSnapshotRequest),
     InstallSnapshotResponse(RaftId, RaftId, InstallSnapshotResponse),
+    PreVote(RaftId, RaftId, PreVoteRequest),
+    PreVoteResponse(RaftId, RaftId, PreVoteResponse),
 }
 
 impl MockNodeNetwork {
@@ -596,6 +599,34 @@ impl Network for MockNodeNetwork {
         )
         .await
     }
+
+    async fn send_pre_vote_request(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: PreVoteRequest,
+    ) -> RpcResult<()> {
+        self.send_to_target(
+            from.clone(),
+            target.clone(),
+            NetworkEvent::PreVote(from.clone(), target.clone(), args),
+        )
+        .await
+    }
+
+    async fn send_pre_vote_response(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: PreVoteResponse,
+    ) -> RpcResult<()> {
+        self.send_to_target(
+            from.clone(),
+            target.clone(),
+            NetworkEvent::PreVoteResponse(from.clone(), target.clone(), args),
+        )
+        .await
+    }
 }
 
 // --- 辅助函数：将内部事件分发回 Raft 状态机 ---
@@ -620,6 +651,10 @@ pub fn dispatch_network_event(event: NetworkEvent) -> Option<Event> {
         }
         NetworkEvent::InstallSnapshotResponse(source, _, resp) => {
             Some(Event::InstallSnapshotResponse(source, resp))
+        }
+        NetworkEvent::PreVote(source, _, req) => Some(Event::PreVoteRequest(source, req)),
+        NetworkEvent::PreVoteResponse(source, _, resp) => {
+            Some(Event::PreVoteResponse(source, resp))
         }
     }
 }

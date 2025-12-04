@@ -83,6 +83,22 @@ message RequestVoteResponse {
   uint64 request_id = 3; // 对应请求的 ID
 }
 
+/// Pre-Vote 请求（防止网络分区节点干扰集群）
+message PreVoteRequest {
+  uint64 term = 1;           // 候选人期望的任期（current_term + 1），但不实际递增
+  RaftId candidate_id = 2;   // 候选人 ID
+  uint64 last_log_index = 3; // 候选人最后日志的索引
+  uint64 last_log_term = 4;  // 候选人最后日志的任期
+  uint64 request_id = 5;     // 请求 ID（用于匹配响应）
+}
+
+/// Pre-Vote 响应
+message PreVoteResponse {
+  uint64 term = 1;       // 当前任期
+  bool vote_granted = 2; // 是否授予 Pre-Vote
+  uint64 request_id = 3; // 对应请求的 ID
+}
+
 /// 追加日志请求（对应 Rust 中的 AppendEntriesRequest）
 message AppendEntriesRequest {
   uint64 term = 1;               // 领导者任期
@@ -145,6 +161,8 @@ message RpcMessage {
     AppendEntriesResponse append_entries_response = 4;
     InstallSnapshotRequest install_snapshot = 5;
     InstallSnapshotResponse install_snapshot_response = 6;
+    PreVoteRequest pre_vote = 9;
+    PreVoteResponse pre_vote_response = 10;
   }
   RaftId from = 7; // 来源节点 ID
   RaftId target = 8; // 目标节点

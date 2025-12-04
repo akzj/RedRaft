@@ -177,8 +177,31 @@ impl From<crate::InstallSnapshotState> for i32 {
     fn from(value: crate::InstallSnapshotState) -> Self {
         match value {
             crate::InstallSnapshotState::Installing => 2,
-            crate::InstallSnapshotState::Failed(msg) => 1,
+            crate::InstallSnapshotState::Failed(_msg) => 1,
             crate::InstallSnapshotState::Success => 3,
+        }
+    }
+}
+
+// Pre-Vote 转换
+impl From<crate::message::PreVoteRequest> for pb::PreVoteRequest {
+    fn from(req: crate::message::PreVoteRequest) -> Self {
+        pb::PreVoteRequest {
+            term: req.term,
+            candidate_id: Some(req.candidate_id.into()),
+            last_log_index: req.last_log_index,
+            last_log_term: req.last_log_term,
+            request_id: req.request_id.into(),
+        }
+    }
+}
+
+impl From<crate::message::PreVoteResponse> for pb::PreVoteResponse {
+    fn from(resp: crate::message::PreVoteResponse) -> Self {
+        pb::PreVoteResponse {
+            term: resp.term,
+            vote_granted: resp.vote_granted,
+            request_id: resp.request_id.into(),
         }
     }
 }
@@ -217,6 +240,16 @@ impl From<OutgoingMessage> for pb::RpcMessage {
                 message: Some(pb::rpc_message::Message::InstallSnapshotResponse(
                     args.into(),
                 )),
+            },
+            OutgoingMessage::PreVote { from, target, args } => pb::RpcMessage {
+                from: Some(from.into()),
+                target: Some(target.into()),
+                message: Some(pb::rpc_message::Message::PreVote(args.into())),
+            },
+            OutgoingMessage::PreVoteResponse { from, target, args } => pb::RpcMessage {
+                from: Some(from.into()),
+                target: Some(target.into()),
+                message: Some(pb::rpc_message::Message::PreVoteResponse(args.into())),
             },
         }
     }
@@ -350,6 +383,34 @@ impl From<i32> for crate::InstallSnapshotState {
     }
 }
 
+// Pre-Vote 反向转换
+impl From<pb::PreVoteRequest> for Result<crate::message::PreVoteRequest> {
+    fn from(req: pb::PreVoteRequest) -> Self {
+        Ok(crate::message::PreVoteRequest {
+            term: req.term,
+            candidate_id: match req.candidate_id.map(crate::RaftId::from) {
+                Some(candidate_id) => candidate_id,
+                None => {
+                    return Err(anyhow::anyhow!("Missing candidate_id"));
+                }
+            },
+            last_log_index: req.last_log_index,
+            last_log_term: req.last_log_term,
+            request_id: req.request_id.into(),
+        })
+    }
+}
+
+impl From<pb::PreVoteResponse> for crate::message::PreVoteResponse {
+    fn from(resp: pb::PreVoteResponse) -> Self {
+        crate::message::PreVoteResponse {
+            term: resp.term,
+            vote_granted: resp.vote_granted,
+            request_id: resp.request_id.into(),
+        }
+    }
+}
+
 impl From<pb::RpcMessage> for Result<OutgoingMessage> {
     fn from(msg: pb::RpcMessage) -> Self {
         match msg.message {
@@ -439,6 +500,35 @@ impl From<pb::RpcMessage> for Result<OutgoingMessage> {
                             None => Err(anyhow::anyhow!("Missing target field"))?,
                         },
                         args: install_snapshot_response.into(),
+                    })
+                }
+                rpc_message::Message::PreVote(pre_vote_request) => {
+                    Ok(OutgoingMessage::PreVote {
+                        from: match msg.from {
+                            Some(from) => from.into(),
+                            None => Err(anyhow::anyhow!("Missing from field"))?,
+                        },
+                        target: match msg.target {
+                            Some(target) => target.into(),
+                            None => Err(anyhow::anyhow!("Missing target field"))?,
+                        },
+                        args: match pre_vote_request.into() {
+                            Ok(args) => args,
+                            Err(e) => return Err(e),
+                        },
+                    })
+                }
+                rpc_message::Message::PreVoteResponse(pre_vote_response) => {
+                    Ok(OutgoingMessage::PreVoteResponse {
+                        from: match msg.from {
+                            Some(from) => from.into(),
+                            None => Err(anyhow::anyhow!("Missing from field"))?,
+                        },
+                        target: match msg.target {
+                            Some(target) => target.into(),
+                            None => Err(anyhow::anyhow!("Missing target field"))?,
+                        },
+                        args: pre_vote_response.into(),
                     })
                 }
             },

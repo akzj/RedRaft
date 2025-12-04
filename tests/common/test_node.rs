@@ -144,6 +144,12 @@ impl TestNode {
                         NetworkEvent::InstallSnapshotResponse(source, _target, resp) => {
                             raft_lite::Event::InstallSnapshotResponse(source, resp)
                         }
+                        NetworkEvent::PreVote(source, _target, req) => {
+                            raft_lite::Event::PreVoteRequest(source, req)
+                        }
+                        NetworkEvent::PreVoteResponse(source, _target, resp) => {
+                            raft_lite::Event::PreVoteResponse(source, resp)
+                        }
                     };
 
                     //info!("Dispatching event from {} to {:?}", target_id, event);
@@ -175,6 +181,7 @@ impl TestNode {
             apply_batch_size: 50,
             schedule_snapshot_probe_interval: Duration::from_secs(5),
             schedule_snapshot_probe_retries: 3,
+            pre_vote_enabled: true, // 启用 Pre-Vote
             max_inflight_requests: 100, // 调整InFlight限制
             initial_batch_size: 10,
             max_batch_size: 100,
@@ -382,6 +389,36 @@ impl Network for TestNodeInner {
     ) -> RpcResult<()> {
         self.network
             .send_install_snapshot_response(from, target, args)
+            .await
+    }
+
+    async fn send_pre_vote_request(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: raft_lite::message::PreVoteRequest,
+    ) -> RpcResult<()> {
+        info!(
+            "Node {:?} sending PreVote to {:?} for prospective term {}",
+            from, target, args.term
+        );
+        self.network
+            .send_pre_vote_request(from, target, args)
+            .await
+    }
+
+    async fn send_pre_vote_response(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: raft_lite::message::PreVoteResponse,
+    ) -> RpcResult<()> {
+        info!(
+            "Node {:?} sending PreVoteResponse to {:?}: vote_granted={}, term={}",
+            from, target, args.vote_granted, args.term
+        );
+        self.network
+            .send_pre_vote_response(from, target, args)
             .await
     }
 }

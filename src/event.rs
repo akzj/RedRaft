@@ -3,7 +3,8 @@ use std::fmt::{self, Display};
 
 use crate::message::{
     AppendEntriesRequest, AppendEntriesResponse, CompleteSnapshotInstallation,
-    InstallSnapshotRequest, InstallSnapshotResponse, RequestVoteRequest, RequestVoteResponse,
+    InstallSnapshotRequest, InstallSnapshotResponse, PreVoteRequest, PreVoteResponse,
+    RequestVoteRequest, RequestVoteResponse,
 };
 use crate::types::{Command, RaftId, RequestId};
 
@@ -29,6 +30,10 @@ pub enum Event {
     RequestVoteResponse(RaftId, RequestVoteResponse),
     AppendEntriesResponse(RaftId, AppendEntriesResponse),
     InstallSnapshotResponse(RaftId, InstallSnapshotResponse),
+
+    // Pre-Vote 事件（防止网络分区节点干扰集群）
+    PreVoteRequest(RaftId, PreVoteRequest),
+    PreVoteResponse(RaftId, PreVoteResponse),
 
     // 领导人转移相关事件
     LeaderTransfer {

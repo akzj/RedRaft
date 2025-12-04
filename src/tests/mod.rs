@@ -5,6 +5,7 @@ pub mod tests {
     use crate::cluster_config::ClusterConfig;
     use crate::error::StateChangeError;
     use crate::message::{CompleteSnapshotInstallation, SnapshotProbeSchedule};
+    use crate::message::{PreVoteRequest, PreVoteResponse};
     use crate::traits::{
         ApplyResult, ClientResult, ClusterConfigStorage, EventNotify, EventSender,
         HardStateStorage, LogEntryStorage, Network, RaftCallbacks, RpcResult, SnapshotResult,
@@ -112,6 +113,28 @@ pub mod tests {
         ) -> RpcResult<()> {
             self.network
                 .send_install_snapshot_response(from, target, args)
+                .await
+        }
+
+        async fn send_pre_vote_request(
+            &self,
+            from: &RaftId,
+            target: &RaftId,
+            args: PreVoteRequest,
+        ) -> RpcResult<()> {
+            self.network
+                .send_pre_vote_request(from, target, args)
+                .await
+        }
+
+        async fn send_pre_vote_response(
+            &self,
+            from: &RaftId,
+            target: &RaftId,
+            args: PreVoteResponse,
+        ) -> RpcResult<()> {
+            self.network
+                .send_pre_vote_response(from, target, args)
                 .await
         }
     }
@@ -397,6 +420,7 @@ pub mod tests {
             leader_transfer_timeout: Duration::from_secs(5),
             schedule_snapshot_probe_interval: Duration::from_secs(1),
             schedule_snapshot_probe_retries: 3,
+            pre_vote_enabled: false, // 禁用 Pre-Vote 以保持现有测试兼容
             // 反馈控制配置
             max_inflight_requests: 10,
             initial_batch_size: 10,
