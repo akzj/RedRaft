@@ -144,20 +144,14 @@ impl PipelineState {
     /// 记录响应反馈数据
     fn record_response_feedback(&mut self, peer: &RaftId, response_time: Duration, success: bool) {
         // 记录响应时间
-        let response_times = self
-            .response_times
-            .entry(peer.clone())
-            .or_insert_with(VecDeque::new);
+        let response_times = self.response_times.entry(peer.clone()).or_default();
         response_times.push_back(response_time);
         if response_times.len() > self.options.feedback_window_size {
             response_times.pop_front();
         }
 
         // 记录成功率
-        let success_rates = self
-            .success_rates
-            .entry(peer.clone())
-            .or_insert_with(VecDeque::new);
+        let success_rates = self.success_rates.entry(peer.clone()).or_default();
         success_rates.push_back(success);
         if success_rates.len() > self.options.feedback_window_size {
             success_rates.pop_front();
@@ -239,7 +233,7 @@ impl PipelineState {
             
             // 保留仍在 inflight_requests 中的条目
             queue.retain(|(req_id, _)| {
-                inflight.map_or(false, |reqs| reqs.contains_key(req_id))
+                inflight.is_some_and(|reqs| reqs.contains_key(req_id))
             });
             
             cleaned += before_len - queue.len();

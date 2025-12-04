@@ -25,6 +25,9 @@ impl RaftState {
         if self.config.is_joint() {
             self.check_joint_exit_condition().await;
         }
+
+        // 定期清理超时的 ReadIndex 请求
+        self.cleanup_timeout_read_indices().await;
     }
 
     /// 广播 AppendEntries 请求
@@ -449,21 +452,19 @@ impl RaftState {
                 if !append_result {
                     error!("Node {} failed to append log entries", self.id);
                     success = false;
-                } else {
-                    if let Some(last_entry) = request.entries.last() {
-                        matched_index = last_entry.index;
-                        self.last_log_index = last_entry.index;
-                        self.last_log_term = last_entry.term;
-                        info!(
-                            "Node {} successfully appended log entries, updated matched_index to {}, last_log_index to {}",
-                            self.id, matched_index, self.last_log_index
-                        );
-                        let after_append_last_index = self.get_last_log_index();
-                        debug!(
-                            "Node {} last_log_index after append: {}",
-                            self.id, after_append_last_index
-                        );
-                    }
+                } else if let Some(last_entry) = request.entries.last() {
+                    matched_index = last_entry.index;
+                    self.last_log_index = last_entry.index;
+                    self.last_log_term = last_entry.term;
+                    info!(
+                        "Node {} successfully appended log entries, updated matched_index to {}, last_log_index to {}",
+                        self.id, matched_index, self.last_log_index
+                    );
+                    let after_append_last_index = self.get_last_log_index();
+                    debug!(
+                        "Node {} last_log_index after append: {}",
+                        self.id, after_append_last_index
+                    );
                 }
             }
         }
@@ -601,11 +602,13 @@ impl RaftState {
             }
 
             // 检查领导权转移状态
-            if let Some(transfer_target) = &self.leader_transfer_target {
-                if &peer == transfer_target {
-                    self.process_leader_transfer_target_response(peer.clone(), response.clone())
-                        .await;
-                }
+            if self
+                .leader_transfer_target
+                .as_ref()
+                .is_some_and(|t| t == &peer)
+            {
+                self.process_leader_transfer_target_response(peer.clone(), response.clone())
+                    .await;
             }
 
             // 若当前处于联合配置，更新确认状态

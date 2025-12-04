@@ -173,15 +173,15 @@ impl RaftState {
             return;
         }
 
-        if let Some(ref current_leader) = self.leader_id {
-            if current_leader != &request.leader_id {
-                warn!(
-                    "Node {} received InstallSnapshot, old leader is {} , new leader is {}",
-                    self.id,
-                    current_leader,
-                    request.leader_id,
-                );
-            }
+        if self
+            .leader_id
+            .as_ref()
+            .is_some_and(|current| current != &request.leader_id)
+        {
+            warn!(
+                "Node {} received InstallSnapshot, old leader is {:?} , new leader is {}",
+                self.id, self.leader_id, request.leader_id,
+            );
         }
 
         self.leader_id = Some(request.leader_id.clone());

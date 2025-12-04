@@ -380,7 +380,8 @@ mod entry_tests {
 #[cfg(test)]
 mod segment_tests {
     use std::fs::OpenOptions;
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
+    use parking_lot::RwLock;
     use tempfile::TempDir;
     use tokio::sync::Semaphore;
 
@@ -684,7 +685,8 @@ mod segment_tests {
 mod store_tests {
     use std::collections::HashMap;
     use std::fs::OpenOptions;
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
+    use parking_lot::RwLock;
     use tempfile::TempDir;
     use tokio::sync::Semaphore;
 

@@ -104,7 +104,7 @@ impl RaftState {
             .error_handler
             .handle_void(
                 self.callbacks
-                    .append_log_entries(&self.id, &[new_entry.clone()])
+                    .append_log_entries(&self.id, std::slice::from_ref(&new_entry))
                     .await,
                 "append_log_entries",
                 None,
@@ -191,8 +191,7 @@ impl RaftState {
             }
         };
 
-        let mut i = 0;
-        for entry in entries {
+        for (i, entry) in entries.into_iter().enumerate() {
             let expected_index = start + i as u64;
 
             if entry.index != expected_index {
@@ -202,7 +201,6 @@ impl RaftState {
                 );
                 break;
             }
-            i += 1;
 
             if entry.index <= self.last_applied || entry.index > self.commit_index {
                 continue;

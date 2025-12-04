@@ -4,8 +4,10 @@ use std::{
     io::Write,
     os::unix::fs::FileExt,
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
+
+use parking_lot::RwLock;
 
 use anyhow::{Result, anyhow};
 use bincode::{Decode, Encode};
@@ -104,7 +106,7 @@ impl LogSegment {
     #[allow(dead_code)]
     pub fn complete_write(&mut self) -> Result<()> {
         let mut tail = LogSegmentTail::default();
-        let hard_state = self.hard_states.read().unwrap();
+        let hard_state = self.hard_states.read();
 
         // write hard_state map
         let buff =

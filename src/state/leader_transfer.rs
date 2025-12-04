@@ -180,16 +180,16 @@ impl RaftState {
         }
 
         if let Some(request_id) = self.leader_transfer_request_id.take() {
-            if let Err(err) = self
+            let _ = self
                 .callbacks
                 .client_response(&self.id, request_id, Ok(0))
                 .await
-            {
-                error!(
-                    "Failed to send client response for leader transfer completion: {}",
-                    err
-                );
-            }
+                .inspect_err(|err| {
+                    error!(
+                        "Failed to send client response for leader transfer completion: {}",
+                        err
+                    );
+                });
         }
 
         self.leader_transfer_target = None;

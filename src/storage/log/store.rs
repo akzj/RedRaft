@@ -2,8 +2,10 @@ use std::{
     collections::{HashMap, VecDeque},
     os::unix::fs::FileExt,
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
+
+use parking_lot::RwLock;
 
 use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
@@ -76,7 +78,7 @@ impl LogEntryStoreInner {
     pub(crate) fn append_to_cache(&self, log_entries: Vec<(&RaftId, &Vec<LogEntry>)>) {
         // write to cache
         for (from, entries) in log_entries {
-            let mut cache_table = self.cache_table.write().unwrap();
+            let mut cache_table = self.cache_table.write();
             let cache = cache_table.entry(from.clone()).or_default();
             for log_entry in entries {
                 cache.push_back(log_entry.clone());
@@ -88,7 +90,7 @@ impl LogEntryStoreInner {
     }
 
     pub(crate) fn truncate_cache_prefix(&self, from: &RaftId, index: u64) {
-        let mut cache_table = self.cache_table.write().unwrap();
+        let mut cache_table = self.cache_table.write();
         if let Some(cache) = cache_table.get_mut(from) {
             // Remove entries with index < truncate_index
             while let Some(front) = cache.front() {
@@ -102,7 +104,7 @@ impl LogEntryStoreInner {
     }
 
     pub(crate) fn truncate_cache_suffix(&self, from: &RaftId, index: u64) {
-        let mut cache_table = self.cache_table.write().unwrap();
+        let mut cache_table = self.cache_table.write();
         if let Some(cache) = cache_table.get_mut(from) {
             // Remove entries with index > truncate_index
             while let Some(back) = cache.back() {
@@ -120,7 +122,7 @@ impl LogEntryStoreInner {
         log_entries: Vec<(&RaftId, &Vec<LogEntry>)>,
     ) -> StorageResult<()> {
         // write to log segment file
-        let mut segment = self.current_segment.write().unwrap();
+        let mut segment = self.current_segment.write();
         for (from, entries) in log_entries {
             segment
                 .write_log_entries(from, entries.clone())
@@ -160,7 +162,7 @@ impl LogEntryStoreInner {
         self.truncate_cache_prefix(from, index);
 
         // Write truncate operation to segment
-        let mut segment = self.current_segment.write().unwrap();
+        let mut segment = self.current_segment.write();
         segment.write_truncate_prefix(from, index).map_err(|e| {
             warn!("Failed to write truncate prefix to segment: {}", e);
             StorageError::Io(Arc::new(e))
@@ -183,7 +185,7 @@ impl LogEntryStoreInner {
         self.truncate_cache_suffix(from, index);
 
         // Write truncate operation to segment
-        let mut segment = self.current_segment.write().unwrap();
+        let mut segment = self.current_segment.write();
         segment.write_truncate_suffix(from, index).map_err(|e| {
             warn!("Failed to write truncate suffix to segment: {}", e);
             StorageError::Io(Arc::new(e))
@@ -200,7 +202,7 @@ impl LogEntryStoreInner {
 
     /// Get log entries from cache if available
     fn get_from_cache(&self, from: &RaftId, low: u64, high: u64) -> Option<Vec<LogEntry>> {
-        let cache_table = self.cache_table.read().unwrap();
+        let cache_table = self.cache_table.read();
         let cache = cache_table.get(from)?;
         
         if cache.is_empty() {
@@ -231,7 +233,7 @@ impl LogEntryStoreInner {
 
     /// Get log entry term from cache if available
     fn get_term_from_cache(&self, from: &RaftId, idx: u64) -> Option<u64> {
-        let cache_table = self.cache_table.read().unwrap();
+        let cache_table = self.cache_table.read();
         let cache = cache_table.get(from)?;
         
         if cache.is_empty() {
@@ -257,7 +259,7 @@ impl LogEntryStoreInner {
 
         // Get the data we need from segment without holding lock across await
         let (file, io_semaphore, entry_metas) = {
-            let segment = self.current_segment.read().unwrap();
+            let segment = self.current_segment.read();
             let file = segment.file.clone();
             let io_semaphore = segment.io_semaphore.clone();
             
@@ -324,7 +326,7 @@ impl LogEntryStoreInner {
     pub(crate) fn get_last_log_index(&self, from: &RaftId) -> StorageResult<(u64, u64)> {
         // Check cache first
         {
-            let cache_table = self.cache_table.read().unwrap();
+            let cache_table = self.cache_table.read();
             if let Some(cache) = cache_table.get(from) {
                 if let Some(last) = cache.back() {
                     return Ok((last.index, last.term));
@@ -333,7 +335,7 @@ impl LogEntryStoreInner {
         }
 
         // Check segment index
-        let segment = self.current_segment.read().unwrap();
+        let segment = self.current_segment.read();
         if let Some(meta) = segment.last_entry(from) {
             return Ok((meta.log_index, meta.term));
         }
@@ -351,7 +353,7 @@ impl LogEntryStoreInner {
 
         // Get the data we need from segment without holding lock across await
         let (file, io_semaphore, meta) = {
-            let segment = self.current_segment.read().unwrap();
+            let segment = self.current_segment.read();
             let file = segment.file.clone();
             let io_semaphore = segment.io_semaphore.clone();
             
@@ -394,16 +396,16 @@ impl LogEntryStoreInner {
 
     /// Save hard state for a raft node
     pub(crate) fn save_hard_state(&self, from: &RaftId, hard_state: HardState) -> StorageResult<()> {
-        let segment = self.current_segment.write().unwrap();
-        let mut hard_states = segment.hard_states.write().unwrap();
+        let segment = self.current_segment.write();
+        let mut hard_states = segment.hard_states.write();
         hard_states.insert(from.clone(), hard_state);
         Ok(())
     }
 
     /// Load hard state for a raft node
     pub(crate) fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<HardState>> {
-        let segment = self.current_segment.read().unwrap();
-        let hard_states = segment.hard_states.read().unwrap();
+        let segment = self.current_segment.read();
+        let hard_states = segment.hard_states.read();
         Ok(hard_states.get(from).cloned())
     }
 }

@@ -72,10 +72,10 @@ impl RaftState {
                     .error_handler
                     .handle(
                         self.callbacks
-                            .send_pre_vote_request(&self.id, &target, args)
+                            .send_pre_vote_request(&self.id, target, args)
                             .await,
                         "send_pre_vote_request",
-                        Some(&target),
+                        Some(target),
                     )
                     .await;
 
@@ -144,10 +144,10 @@ impl RaftState {
                     .error_handler
                     .handle(
                         self.callbacks
-                            .send_request_vote_request(&self.id, &target, args)
+                            .send_request_vote_request(&self.id, target, args)
                             .await,
                         "send_request_vote_request",
-                        Some(&target),
+                        Some(target),
                     )
                     .await;
 

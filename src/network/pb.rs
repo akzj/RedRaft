@@ -41,7 +41,7 @@ impl From<crate::LogEntry> for pb::LogEntry {
             term: entry.term,
             index: entry.index,
             is_config: entry.is_config,
-            command: entry.command.into(),
+            command: entry.command,
             client_request_id: entry.client_request_id.map(|id| id.into()),
         }
     }
@@ -297,7 +297,7 @@ impl From<pb::LogEntry> for crate::LogEntry {
             term: entry.term,
             index: entry.index,
             is_config: entry.is_config,
-            command: entry.command.into(),
+            command: entry.command,
             client_request_id: entry.client_request_id.map(|id| id.into()),
         }
     }
@@ -425,10 +425,7 @@ impl From<pb::RpcMessage> for Result<OutgoingMessage> {
                             Some(target) => target.into(),
                             None => Err(anyhow::anyhow!("Missing target field"))?,
                         },
-                        args: match request_vote_request.into() {
-                            Ok(args) => args,
-                            Err(e) => return Err(e),
-                        },
+                        args: Result::<crate::RequestVoteRequest>::from(request_vote_request)?,
                     })
                 }
                 rpc_message::Message::RequestVoteResponse(request_vote_response) => {
@@ -454,10 +451,7 @@ impl From<pb::RpcMessage> for Result<OutgoingMessage> {
                             Some(target) => target.into(),
                             None => Err(anyhow::anyhow!("Missing target field"))?,
                         },
-                        args: match append_entries_request.into() {
-                            Ok(args) => args,
-                            Err(e) => return Err(e),
-                        },
+                        args: Result::<crate::AppendEntriesRequest>::from(append_entries_request)?,
                     })
                 }
                 rpc_message::Message::AppendEntriesResponse(append_entries_response) => {
@@ -483,10 +477,7 @@ impl From<pb::RpcMessage> for Result<OutgoingMessage> {
                             Some(target) => target.into(),
                             None => Err(anyhow::anyhow!("Missing target field"))?,
                         },
-                        args: match install_snapshot_request.into() {
-                            Ok(args) => args,
-                            Err(e) => return Err(e),
-                        },
+                        args: Result::<crate::InstallSnapshotRequest>::from(install_snapshot_request)?,
                     })
                 }
                 rpc_message::Message::InstallSnapshotResponse(install_snapshot_response) => {
@@ -532,9 +523,7 @@ impl From<pb::RpcMessage> for Result<OutgoingMessage> {
                     })
                 }
             },
-            None => {
-                return Err(anyhow::anyhow!("Missing message"));
-            }
+            None => Err(anyhow::anyhow!("Missing message")),
         }
     }
 }

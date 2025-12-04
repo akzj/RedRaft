@@ -47,8 +47,9 @@ impl ClusterConfig {
     }
 
     pub fn log_index(&self) -> u64 {
-        self.is_joint()
-            .then(|| self.joint.as_ref().unwrap().log_index)
+        self.joint
+            .as_ref()
+            .map(|j| j.log_index)
             .unwrap_or(self.log_index)
     }
 
@@ -94,23 +95,11 @@ impl ClusterConfig {
         }
 
         // 验证 Learners 不能同时是 Voters (在任何配置中)
-        if old_voters.iter().any(|v| {
-            old_learners
-                .as_ref()
-                .map_or(false, |learners| learners.contains(v))
-        }) || old_voters.iter().any(|v| {
-            new_learners
-                .as_ref()
-                .map_or(false, |learners| learners.contains(v))
-        }) || new_voters.iter().any(|v| {
-            old_learners
-                .as_ref()
-                .map_or(false, |learners| learners.contains(v))
-        }) || new_voters.iter().any(|v| {
-            new_learners
-                .as_ref()
-                .map_or(false, |learners| learners.contains(v))
-        }) {
+        let voter_in_learners = |v: &RaftId| {
+            old_learners.as_ref().is_some_and(|l| l.contains(v))
+                || new_learners.as_ref().is_some_and(|l| l.contains(v))
+        };
+        if old_voters.iter().any(voter_in_learners) || new_voters.iter().any(voter_in_learners) {
             return Err(ConfigError::InvalidJoint(
                 "A node cannot be both a Voter and a Learner in the same configuration".into(),
             ));
@@ -166,10 +155,10 @@ impl ClusterConfig {
 
     pub fn majority(&self, votes: &HashSet<RaftId>) -> bool {
         if let Some(j) = &self.joint {
-            votes.intersection(&j.old_voters).count() >= j.old_voters.len() / 2 + 1
-                && votes.intersection(&j.new_voters).count() >= j.new_voters.len() / 2 + 1
+            votes.intersection(&j.old_voters).count() > j.old_voters.len() / 2
+                && votes.intersection(&j.new_voters).count() > j.new_voters.len() / 2
         } else {
-            votes.len() >= self.voters.len() / 2 + 1
+            votes.len() > self.voters.len() / 2
         }
     }
 
@@ -196,6 +185,11 @@ impl ClusterConfig {
         }
 
         true
+    }
+
+    /// 检查是否是单节点集群
+    pub fn is_single_voter(&self) -> bool {
+        self.voters.len() == 1 && !self.is_joint()
     }
 
     // === Learner 管理方法 ===
@@ -242,9 +236,7 @@ impl ClusterConfig {
     }
 
     pub fn learners_contains(&self, id: &RaftId) -> bool {
-        self.learners
-            .as_ref()
-            .map_or(false, |learners| learners.contains(id))
+        self.learners.as_ref().is_some_and(|l| l.contains(id))
     }
 
     pub fn get_all_nodes(&self) -> HashSet<RaftId> {

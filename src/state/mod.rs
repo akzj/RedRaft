@@ -438,10 +438,8 @@ impl RaftState {
 
     /// 从 Leader 降级为 Follower
     pub(crate) async fn step_down_to_follower(&mut self, new_term: Option<u64>) {
-        if let Some(term) = new_term {
-            if term > self.current_term {
-                self.current_term = term;
-            }
+        if let Some(term) = new_term.filter(|&t| t > self.current_term) {
+            self.current_term = term;
         }
         
         let was_leader = self.role == Role::Leader;
