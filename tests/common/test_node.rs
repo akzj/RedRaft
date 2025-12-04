@@ -3,7 +3,7 @@ use crate::common::test_statemachine::TestStateMachine;
 use anyhow::Result;
 use raft_lite::cluster_config::ClusterConfig;
 use raft_lite::message::{HardState, LogEntry};
-use raft_lite::mutl_raft_driver::{HandleEventTrait, MultiRaftDriver, Timers};
+use raft_lite::multi_raft_driver::{HandleEventTrait, MultiRaftDriver, Timers};
 use raft_lite::tests::mock::mock_network::{MockNetworkHub, MockNodeNetwork, NetworkEvent};
 use raft_lite::tests::mock::mock_storage::{MockStorage, SnapshotMemStore};
 use raft_lite::traits::*;
@@ -156,7 +156,7 @@ impl TestNode {
                     let result = driver.dispatch_event(target_id.clone(), event);
                     if !matches!(
                         result,
-                        raft_lite::mutl_raft_driver::SendEventResult::Success
+                        raft_lite::multi_raft_driver::SendEventResult::Success
                     ) {
                         info!("send event failed {:?}", result);
                     }
@@ -545,9 +545,9 @@ impl TimerService for TestNodeInner {
 impl EventSender for TestNodeInner {
     async fn send(&self, target: RaftId, event: Event) -> Result<()> {
         match self.driver.dispatch_event(target, event) {
-            mutl_raft_driver::SendEventResult::Success => Ok(()),
-            mutl_raft_driver::SendEventResult::NotFound => Err(anyhow::anyhow!("Target not found")),
-            mutl_raft_driver::SendEventResult::SendFailed => {
+            multi_raft_driver::SendEventResult::Success => Ok(()),
+            multi_raft_driver::SendEventResult::NotFound => Err(anyhow::anyhow!("Target not found")),
+            multi_raft_driver::SendEventResult::SendFailed | multi_raft_driver::SendEventResult::ChannelFull => {
                 Err(anyhow::anyhow!("Failed to send event"))
             }
         }

@@ -2,7 +2,7 @@
 use crate::common::test_node::TestNode;
 use crate::common::test_statemachine::KvCommand;
 use raft_lite::RaftId;
-use raft_lite::mutl_raft_driver::MultiRaftDriver;
+use raft_lite::multi_raft_driver::MultiRaftDriver;
 use raft_lite::tests::mock::mock_network::MockNetworkHub;
 use raft_lite::tests::mock::mock_network::MockNetworkHubConfig;
 use raft_lite::tests::mock::mock_network::MockRaftNetworkConfig;
@@ -160,14 +160,14 @@ impl TestCluster {
         // }
 
         match self.driver.dispatch_event(leader_id.clone(), event) {
-            raft_lite::mutl_raft_driver::SendEventResult::Success => {
+            raft_lite::multi_raft_driver::SendEventResult::Success => {
                 return Ok(());
             }
-            raft_lite::mutl_raft_driver::SendEventResult::NotFound => {
+            raft_lite::multi_raft_driver::SendEventResult::NotFound => {
                 warn!("Node {:?} not found for command proposal", leader_id);
                 return Err(format!("Node {:?} not found", leader_id));
             }
-            raft_lite::mutl_raft_driver::SendEventResult::SendFailed => {
+            raft_lite::multi_raft_driver::SendEventResult::SendFailed | raft_lite::multi_raft_driver::SendEventResult::ChannelFull => {
                 warn!("Failed to send event to node {:?}", leader_id);
                 return Err(format!("Failed to send event to node {:?}", leader_id));
             }
@@ -180,14 +180,14 @@ impl TestCluster {
         let event = raft_lite::Event::CreateSnapshot {};
 
         match self.driver.dispatch_event(leader_id.clone(), event) {
-            raft_lite::mutl_raft_driver::SendEventResult::Success => {
+            raft_lite::multi_raft_driver::SendEventResult::Success => {
                 return Ok(());
             }
-            raft_lite::mutl_raft_driver::SendEventResult::NotFound => {
+            raft_lite::multi_raft_driver::SendEventResult::NotFound => {
                 warn!("Node {:?} not found for command proposal", leader_id);
                 return Err(format!("Node {:?} not found", leader_id));
             }
-            raft_lite::mutl_raft_driver::SendEventResult::SendFailed => {
+            raft_lite::multi_raft_driver::SendEventResult::SendFailed | raft_lite::multi_raft_driver::SendEventResult::ChannelFull => {
                 warn!("Failed to send event to node {:?}", leader_id);
                 return Err(format!("Failed to send event to node {:?}", leader_id));
             }
@@ -245,13 +245,13 @@ impl TestCluster {
                 .driver
                 .dispatch_event(leader_id.clone(), config_change_event)
             {
-                raft_lite::mutl_raft_driver::SendEventResult::Success => {
+                raft_lite::multi_raft_driver::SendEventResult::Success => {
                     info!("Config change event sent to leader {:?}", leader_id);
                 }
-                raft_lite::mutl_raft_driver::SendEventResult::NotFound => {
+                raft_lite::multi_raft_driver::SendEventResult::NotFound => {
                     return Err(format!("Leader node {:?} not found", leader_id));
                 }
-                raft_lite::mutl_raft_driver::SendEventResult::SendFailed => {
+                raft_lite::multi_raft_driver::SendEventResult::SendFailed | raft_lite::multi_raft_driver::SendEventResult::ChannelFull => {
                     return Err(format!(
                         "Failed to send config change event to leader {:?}",
                         leader_id
@@ -353,13 +353,13 @@ impl TestCluster {
                 .driver
                 .dispatch_event(leader_id.clone(), config_change_event)
             {
-                raft_lite::mutl_raft_driver::SendEventResult::Success => {
+                raft_lite::multi_raft_driver::SendEventResult::Success => {
                     info!("Config change event sent to leader {:?}", leader_id);
                 }
-                raft_lite::mutl_raft_driver::SendEventResult::NotFound => {
+                raft_lite::multi_raft_driver::SendEventResult::NotFound => {
                     return Err(format!("Leader node {:?} not found", leader_id));
                 }
-                raft_lite::mutl_raft_driver::SendEventResult::SendFailed => {
+                raft_lite::multi_raft_driver::SendEventResult::SendFailed | raft_lite::multi_raft_driver::SendEventResult::ChannelFull => {
                     return Err(format!(
                         "Failed to send config change event to leader {:?}",
                         leader_id
@@ -510,13 +510,13 @@ impl TestCluster {
             .driver
             .dispatch_event(leader_id.clone(), add_learner_event)
         {
-            raft_lite::mutl_raft_driver::SendEventResult::Success => {
+            raft_lite::multi_raft_driver::SendEventResult::Success => {
                 info!("Add learner event sent to leader {:?}", leader_id);
             }
-            raft_lite::mutl_raft_driver::SendEventResult::NotFound => {
+            raft_lite::multi_raft_driver::SendEventResult::NotFound => {
                 return Err(format!("Leader node {:?} not found", leader_id));
             }
-            raft_lite::mutl_raft_driver::SendEventResult::SendFailed => {
+            raft_lite::multi_raft_driver::SendEventResult::SendFailed | raft_lite::multi_raft_driver::SendEventResult::ChannelFull => {
                 return Err(format!(
                     "Failed to send add learner event to leader {:?}",
                     leader_id
@@ -581,13 +581,13 @@ impl TestCluster {
             .driver
             .dispatch_event(leader_id.clone(), remove_learner_event)
         {
-            raft_lite::mutl_raft_driver::SendEventResult::Success => {
+            raft_lite::multi_raft_driver::SendEventResult::Success => {
                 info!("Remove learner event sent to leader {:?}", leader_id);
             }
-            raft_lite::mutl_raft_driver::SendEventResult::NotFound => {
+            raft_lite::multi_raft_driver::SendEventResult::NotFound => {
                 return Err(format!("Leader node {:?} not found", leader_id));
             }
-            raft_lite::mutl_raft_driver::SendEventResult::SendFailed => {
+            raft_lite::multi_raft_driver::SendEventResult::SendFailed | raft_lite::multi_raft_driver::SendEventResult::ChannelFull => {
                 return Err(format!(
                     "Failed to send remove learner event to leader {:?}",
                     leader_id

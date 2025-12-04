@@ -20,7 +20,7 @@ pub mod cluster_config;
 pub mod error;
 pub mod event;
 pub mod message;
-pub mod mutl_raft_driver;
+pub mod multi_raft_driver;
 pub mod network;
 pub mod pipeline;
 pub mod state;
