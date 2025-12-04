@@ -443,6 +443,7 @@ pub mod tests {
             max_request_timeout: Duration::from_secs(30),
             min_request_timeout: Duration::from_secs(1),
             timeout_response_factor: 2.0,
+            target_response_time: Duration::from_millis(100),
         }
     }
 

@@ -89,6 +89,8 @@ pub struct RaftStateOptions {
     pub min_request_timeout: Duration,
     /// 响应时间权重因子 (默认2.0，表示超时=2倍平均响应时间)
     pub timeout_response_factor: f64,
+    /// 批次调整的目标响应时间 (默认100ms)
+    pub target_response_time: Duration,
 }
 
 impl Default for RaftStateOptions {
@@ -118,6 +120,7 @@ impl Default for RaftStateOptions {
             max_request_timeout: Duration::from_secs(30),
             min_request_timeout: Duration::from_secs(1),
             timeout_response_factor: 2.0,
+            target_response_time: Duration::from_millis(100),
         }
     }
 }

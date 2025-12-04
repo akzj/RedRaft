@@ -192,7 +192,8 @@ impl TestNode {
             base_request_timeout: Duration::from_millis(25), // 基础超时25ms
             max_request_timeout: Duration::from_millis(5000), // 最大超时500ms
             min_request_timeout: Duration::from_millis(10),  // 最小超时10ms
-            timeout_response_factor: 2.0,                    // 响应时间因子2.0倍
+            timeout_response_factor: 2.0,                     // 响应时间因子2.0倍
+            target_response_time: Duration::from_millis(100), // 目标响应时间
         };
 
         let inner = Arc::new(TestNodeInner {
