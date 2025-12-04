@@ -489,6 +489,42 @@ impl TestCluster {
         nodes.get(node_id).map(|node| node.get_all_data())
     }
 
+    /// 发送 ReadIndex 请求（用于线性一致性读测试）
+    pub fn send_read_index(&self, leader_id: &RaftId) -> Result<raft_lite::RequestId, String> {
+        let request_id = raft_lite::RequestId::new();
+        let event = raft_lite::Event::ReadIndex { request_id };
+
+        match self.driver.dispatch_event(leader_id.clone(), event) {
+            raft_lite::multi_raft_driver::SendEventResult::Success => Ok(request_id),
+            raft_lite::multi_raft_driver::SendEventResult::NotFound => {
+                Err(format!("Node {:?} not found", leader_id))
+            }
+            raft_lite::multi_raft_driver::SendEventResult::SendFailed
+            | raft_lite::multi_raft_driver::SendEventResult::ChannelFull => {
+                Err(format!("Failed to send ReadIndex to node {:?}", leader_id))
+            }
+        }
+    }
+
+    /// 获取节点的当前 term
+    pub async fn get_node_term(&self, node_id: &RaftId) -> Option<u64> {
+        if let Some(node) = self.get_node(node_id) {
+            Some(node.get_term().await)
+        } else {
+            None
+        }
+    }
+
+    /// 获取所有节点的 term（用于验证 Pre-Vote 不会导致 term 膨胀）
+    pub async fn get_all_terms(&self) -> HashMap<RaftId, u64> {
+        let nodes = self.nodes.lock().unwrap();
+        let mut terms = HashMap::new();
+        for (id, node) in nodes.iter() {
+            terms.insert(id.clone(), node.get_term().await);
+        }
+        terms
+    }
+
     // 添加 learner 到集群
     pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
         info!("Adding learner {:?} to cluster", learner_id);

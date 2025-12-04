@@ -295,6 +295,24 @@ impl TestNode {
         let state = self.raft_state.lock().await;
         state.get_inflight_request_count()
     }
+
+    /// 获取当前节点的 term
+    pub async fn get_term(&self) -> u64 {
+        let state = self.raft_state.lock().await;
+        state.get_current_term()
+    }
+
+    /// 获取当前节点的 commit_index
+    pub async fn get_commit_index(&self) -> u64 {
+        let state = self.raft_state.lock().await;
+        state.get_commit_index()
+    }
+
+    /// 获取当前节点的 last_applied
+    pub async fn get_last_applied(&self) -> u64 {
+        let state = self.raft_state.lock().await;
+        state.get_last_applied()
+    }
 }
 
 #[async_trait::async_trait]

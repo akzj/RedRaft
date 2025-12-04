@@ -362,6 +362,21 @@ impl RaftState {
         self.role
     }
 
+    /// 获取当前 term
+    pub fn get_current_term(&self) -> u64 {
+        self.current_term
+    }
+
+    /// 获取当前 commit_index
+    pub fn get_commit_index(&self) -> u64 {
+        self.commit_index
+    }
+
+    /// 获取当前 last_applied
+    pub fn get_last_applied(&self) -> u64 {
+        self.last_applied
+    }
+
     /// 获取当前InFlight请求总数
     pub fn get_inflight_request_count(&self) -> usize {
         self.pipeline.get_inflight_request_count()
