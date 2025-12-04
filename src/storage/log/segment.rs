@@ -58,7 +58,7 @@ pub struct LogStoreSnapshot {
 
 pub struct LogSegment {
     #[allow(dead_code)]
-    file_name: PathBuf,
+    pub(crate) file_name: PathBuf,
     pub(crate) entry_index: Index,
     pub(crate) file: Arc<File>,
     pub(crate) io_semaphore: Arc<Semaphore>,

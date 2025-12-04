@@ -24,28 +24,28 @@ use super::{
 
 pub struct LogEntryStoreInner {
     #[allow(dead_code)]
-    dir: PathBuf,
-    cache_entries_size: usize,
+    pub(crate) dir: PathBuf,
+    pub(crate) cache_entries_size: usize,
     #[allow(dead_code)]
-    io_semaphore: Arc<Semaphore>,
+    pub(crate) io_semaphore: Arc<Semaphore>,
     // read_only segments
     #[allow(dead_code)]
-    segments: RwLock<Vec<LogSegment>>,
+    pub(crate) segments: RwLock<Vec<LogSegment>>,
     // current writeable segment
     pub(crate) current_segment: RwLock<LogSegment>,
-    cache_table: RwLock<HashMap<RaftId, VecDeque<LogEntry>>>,
+    pub(crate) cache_table: RwLock<HashMap<RaftId, VecDeque<LogEntry>>>,
 }
 
 #[derive(Clone)]
 pub struct LogEntryStoreOptions {
     #[allow(dead_code)]
-    memtable_memory_size: usize,
+    pub(crate) memtable_memory_size: usize,
     pub(crate) batch_size: usize,
     #[allow(dead_code)]
-    cache_entries_size: usize,
+    pub(crate) cache_entries_size: usize,
     // max number of I/O threads for log segment file read
     #[allow(dead_code)]
-    max_io_threads: usize,
+    pub(crate) max_io_threads: usize,
 }
 
 #[derive(Clone)]

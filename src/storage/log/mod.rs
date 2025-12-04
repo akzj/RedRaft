@@ -14,6 +14,9 @@ mod entry;
 mod segment;
 mod store;
 
+#[cfg(test)]
+mod tests;
+
 // Re-export public types
 pub use entry::{
     EntryHeader, EntryMeta, EntryType, Index, LogEntryRecord, 

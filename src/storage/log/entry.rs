@@ -188,14 +188,14 @@ impl EntryHeader {
             return Err(anyhow!("Invalid length"));
         }
 
-        // Parse size (u32, 4 bytes)
+        // Parse size (u32, 4 bytes) - offset 0..4
         let mut size_bytes = [0u8; 4];
         size_bytes.copy_from_slice(&data[0..4]);
         let size = u32::from_le_bytes(size_bytes);
 
-        // Parse entry_type (u32, 4 bytes)
+        // Parse entry_type (u32, 4 bytes) - offset 4..8
         let mut type_bytes = [0u8; 4];
-        type_bytes.copy_from_slice(&data[8..12]);
+        type_bytes.copy_from_slice(&data[4..8]);
         let type_code = u32::from_le_bytes(type_bytes);
         let entry_type = match type_code {
             1 => EntryType::LogEntry,
@@ -206,14 +206,14 @@ impl EntryHeader {
             _ => return Err(anyhow!("Invalid entry type")),
         };
 
-        // Parse magic_num (u32, 4 bytes)
+        // Parse magic_num (u32, 4 bytes) - offset 8..12
         let mut magic_bytes = [0u8; 4];
-        magic_bytes.copy_from_slice(&data[12..16]);
+        magic_bytes.copy_from_slice(&data[8..12]);
         let magic_num = u32::from_le_bytes(magic_bytes);
 
-        // Parse crc (u32, 4 bytes)
+        // Parse crc (u32, 4 bytes) - offset 12..16
         let mut crc_bytes = [0u8; 4];
-        crc_bytes.copy_from_slice(&data[16..20]);
+        crc_bytes.copy_from_slice(&data[12..16]);
         let crc = u32::from_le_bytes(crc_bytes);
 
         if magic_num != ENTRY_MAGIC_NUM {
