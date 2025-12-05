@@ -90,9 +90,17 @@ let loaded_entries = storage.get_log_entries(&raft_id, 1, 10).await?;
 
 ## 运行示例
 
+运行 FileStorage 使用示例：
+
 ```bash
-cargo run --example simple
+cargo run --example file_storage_example
 ```
+
+该示例演示了：
+- 创建和配置 FileStorage
+- 保存和加载硬状态、集群配置、日志条目、快照
+- 存储统计信息
+- 数据持久化验证（重启后数据恢复）
 
 ## 测试
 
