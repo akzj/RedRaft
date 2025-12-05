@@ -763,8 +763,11 @@ mod store_tests {
     #[tokio::test]
     async fn test_store_hard_state() {
         let dir = TempDir::new().unwrap();
-        let (store, _rx) = create_test_store(&dir);
+        let (store, rx) = create_test_store(&dir);
         let raft_id = test_raft_id("1");
+
+        // Start background processor (required for save_hard_state to work)
+        store.start(rx);
 
         // Initially no hard state
         let result = store.load_hard_state(&raft_id).await.unwrap();
