@@ -171,6 +171,10 @@ impl HardStateMap {
     pub fn remove(&mut self, key: &RaftId) -> Option<HardState> {
         self.0.remove(key)
     }
+
+    pub fn clear(&mut self) {
+        self.0.clear()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]

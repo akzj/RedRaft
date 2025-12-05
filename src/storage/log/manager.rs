@@ -723,7 +723,7 @@ impl SegmentManager {
     /// Check if disk space is low
     pub fn is_disk_space_low(&self) -> bool {
         // Try to get available disk space
-        if let Ok(metadata) = fs::metadata(&self.options.dir) {
+        if let Ok(_metadata) = fs::metadata(&self.options.dir) {
             // On Unix systems, we'd use statvfs. For now, just check total usage
             let total_usage = self.get_disk_usage();
             // Simple heuristic: if we're using more than 10GB, consider it potentially low
@@ -733,11 +733,17 @@ impl SegmentManager {
         }
     }
 
-    /// Save hard state
-    pub fn save_hard_state(&self, from: &RaftId, hard_state: HardState) {
-        let segment = self.active_segment.read();
-        let mut hard_states = segment.hard_states.write();
-        hard_states.insert(from.clone(), hard_state);
+    /// Save hard state to the log segment.
+    /// Hard state is persisted to disk and cached in memory for quick access.
+    pub fn save_hard_state(&self, hard_state: &HardState) -> Result<()> {
+        let mut segment = self.active_segment.write();
+        segment.write_hard_state(hard_state)?;
+        
+        if self.options.sync_on_write {
+            segment.sync_data()?;
+        }
+        
+        Ok(())
     }
 
     /// Load hard state
@@ -974,13 +980,58 @@ mod tests {
             voted_for: Some(voted_for_id.clone()),
         };
 
-        manager.save_hard_state(&raft_id, hard_state.clone());
+        // Save hard state (now persists to disk)
+        manager.save_hard_state(&hard_state).unwrap();
 
         let loaded = manager.load_hard_state(&raft_id);
         assert!(loaded.is_some());
         let loaded = loaded.unwrap();
         assert_eq!(loaded.term, 5);
         assert_eq!(loaded.voted_for, Some(voted_for_id));
+    }
+
+    #[test]
+    fn test_hard_state_replay() {
+        let temp_dir = TempDir::new().unwrap();
+        let raft_id = create_test_raft_id("1");
+        let voted_for_id = create_test_raft_id("2");
+
+        let hard_state = HardState {
+            raft_id: raft_id.clone(),
+            term: 5,
+            voted_for: Some(voted_for_id.clone()),
+        };
+
+        // Create manager and save hard state
+        {
+            let options = SegmentManagerOptions {
+                dir: temp_dir.path().to_path_buf(),
+                max_segment_size: 1024,
+                max_io_threads: 2,
+                sync_on_write: true,  // Ensure data is synced to disk
+                min_free_disk_space: 0,
+            };
+            let manager = SegmentManager::new(options).unwrap();
+            manager.save_hard_state(&hard_state).unwrap();
+        }
+
+        // Create a new manager (simulates restart) and verify hard state is recovered
+        {
+            let options = SegmentManagerOptions {
+                dir: temp_dir.path().to_path_buf(),
+                max_segment_size: 1024,
+                max_io_threads: 2,
+                sync_on_write: true,
+                min_free_disk_space: 0,
+            };
+            let manager = SegmentManager::new(options).unwrap();
+
+            let loaded = manager.load_hard_state(&raft_id);
+            assert!(loaded.is_some(), "Hard state should be recovered from disk");
+            let loaded = loaded.unwrap();
+            assert_eq!(loaded.term, 5);
+            assert_eq!(loaded.voted_for, Some(voted_for_id));
+        }
     }
 }
 

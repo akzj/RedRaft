@@ -50,10 +50,13 @@ pub struct LogEntryStoreOptions {
     #[allow(dead_code)]
     pub(crate) max_io_threads: usize,
     /// Maximum segment size in bytes before rotation (default: 64MB)
+    #[allow(dead_code)]
     pub(crate) max_segment_size: u64,
     /// Directory for storing log segments
+    #[allow(dead_code)]
     pub(crate) dir: PathBuf,
     /// Whether to sync after each write
+    #[allow(dead_code)]
     pub(crate) sync_on_write: bool,
 }
 
@@ -415,11 +418,18 @@ impl LogEntryStoreInner {
         Ok(term)
     }
 
-    /// Save hard state for a raft node
-    pub(crate) fn save_hard_state(&self, from: &RaftId, hard_state: HardState) -> StorageResult<()> {
-        let segment = self.current_segment.write();
-        let mut hard_states = segment.hard_states.write();
-        hard_states.insert(from.clone(), hard_state);
+    /// Save hard state for a raft node to the log segment.
+    /// Hard state is persisted to disk and cached in memory.
+    pub(crate) fn save_hard_state(&self, hard_state: &HardState) -> StorageResult<()> {
+        let mut segment = self.current_segment.write();
+        segment.write_hard_state(hard_state).map_err(|e| {
+            warn!("Failed to write hard state to segment: {}", e);
+            StorageError::Io(Arc::new(e))
+        })?;
+        segment.sync_data().map_err(|e| {
+            warn!("Failed to sync hard state: {}", e);
+            StorageError::Io(Arc::new(e))
+        })?;
         Ok(())
     }
 
@@ -538,8 +548,9 @@ impl LogEntryStore {
 
 #[async_trait::async_trait]
 impl HardStateStorage for LogEntryStore {
-    async fn save_hard_state(&self, from: &RaftId, hard_state: HardState) -> StorageResult<()> {
-        self.inner.save_hard_state(from, hard_state)
+    async fn save_hard_state(&self, _from: &RaftId, hard_state: HardState) -> StorageResult<()> {
+        // Note: `from` is ignored since HardState contains raft_id
+        self.inner.save_hard_state(&hard_state)
     }
 
     async fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<HardState>> {
@@ -925,9 +936,11 @@ impl ManagedLogEntryStore {
 
 #[async_trait::async_trait]
 impl HardStateStorage for ManagedLogEntryStore {
-    async fn save_hard_state(&self, from: &RaftId, hard_state: HardState) -> StorageResult<()> {
-        self.manager.save_hard_state(from, hard_state);
-        Ok(())
+    async fn save_hard_state(&self, _from: &RaftId, hard_state: HardState) -> StorageResult<()> {
+        // Note: `from` is ignored since HardState contains raft_id
+        self.manager
+            .save_hard_state(&hard_state)
+            .map_err(|e| StorageError::Io(Arc::new(e)))
     }
 
     async fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<HardState>> {

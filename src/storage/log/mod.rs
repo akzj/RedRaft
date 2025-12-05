@@ -21,7 +21,7 @@ mod tests;
 
 // Re-export public types
 pub use entry::{
-    EntryHeader, EntryMeta, EntryType, Index, LogEntryRecord, 
+    EntryHeader, EntryMeta, EntryType, HardStateRecord, Index, LogEntryRecord, 
     RaftEntryIndex, TruncateRecord, ENTRY_HEADER_SIZE, ENTRY_MAGIC_NUM,
 };
 

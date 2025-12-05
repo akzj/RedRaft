@@ -4,7 +4,7 @@ use anyhow::Result;
 use bincode::{Decode, Encode};
 use tracing::warn;
 
-use crate::{RaftId, message::LogEntry};
+use crate::{RaftId, message::{HardState, LogEntry}};
 
 #[derive(Debug, Default, Decode, Encode, Clone, PartialEq, Eq, Hash)]
 pub struct EntryMeta {
@@ -31,6 +31,28 @@ impl TruncateRecord {
         let config = bincode::config::standard();
         Ok(bincode::decode_from_slice(data, config).map_err(|e| {
             warn!("Failed to deserialize truncate record: {}", e);
+            e
+        })?)
+    }
+}
+
+/// Represents a hard state record stored in the log segment.
+/// During replay, newer hard states overwrite older ones for the same raft_id.
+#[derive(Debug, Clone, Decode, Encode)]
+pub struct HardStateRecord {
+    pub hard_state: HardState,
+}
+
+impl HardStateRecord {
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        let config = bincode::config::standard();
+        Ok(bincode::encode_to_vec(self, config)?)
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize)> {
+        let config = bincode::config::standard();
+        Ok(bincode::decode_from_slice(data, config).map_err(|e| {
+            warn!("Failed to deserialize hard state record: {}", e);
             e
         })?)
     }
@@ -136,6 +158,7 @@ pub enum EntryType {
     ClusterConfig,
     TruncatePrefix,
     TruncateSuffix,
+    HardState,
 }
 
 pub const ENTRY_MAGIC_NUM: u32 = 0x_1234_5678;
@@ -171,6 +194,7 @@ impl EntryHeader {
                     EntryType::ClusterConfig => 3u32,
                     EntryType::TruncatePrefix => 4u32,
                     EntryType::TruncateSuffix => 5u32,
+                    EntryType::HardState => 6u32,
                 }
             }
             .to_le_bytes(),
@@ -203,6 +227,7 @@ impl EntryHeader {
             3 => EntryType::ClusterConfig,
             4 => EntryType::TruncatePrefix,
             5 => EntryType::TruncateSuffix,
+            6 => EntryType::HardState,
             _ => return Err(anyhow!("Invalid entry type")),
         };
 
