@@ -55,3 +55,6 @@ pub use traits::{
     Network, RaftCallbacks, RpcResult, SnapshotResult, SnapshotStorage, StateMachine, Storage,
     StorageResult, TimerService,
 };
+
+// Re-export storage implementations
+pub use storage::{FileStorage, FileStorageOptions};
