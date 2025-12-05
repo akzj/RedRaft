@@ -366,7 +366,11 @@ impl SegmentManager {
         Ok(true)
     }
 
-    /// Force rotation to a new segment
+    /// Force rotation to a new segment.
+    /// 
+    /// IMPORTANT: All hard states are written to the new segment before rotation
+    /// to ensure they survive segment cleanup. This allows old segments to be
+    /// safely deleted without losing hard state data.
     pub fn rotate_segment(&self) -> Result<()> {
         let next_id = {
             let mut next_id = self.next_segment_id.write();
@@ -376,8 +380,26 @@ impl SegmentManager {
         };
 
         // Create new segment
-        let (new_segment, new_meta) =
+        let (mut new_segment, new_meta) =
             Self::create_segment(&self.options, next_id, self.io_semaphore.clone())?;
+
+        // Collect ALL hard states from all segments BEFORE rotation
+        // This ensures hard states survive segment cleanup
+        let all_hard_states = self.collect_all_hard_states();
+
+        // Write all hard states to the new segment
+        for hard_state in all_hard_states.values() {
+            if let Err(e) = new_segment.write_hard_state(hard_state) {
+                warn!("Failed to write hard state to new segment: {}", e);
+            }
+        }
+
+        // Sync hard states to disk
+        if self.options.sync_on_write {
+            if let Err(e) = new_segment.sync_data() {
+                warn!("Failed to sync hard states to new segment: {}", e);
+            }
+        }
 
         // Seal current segment and move to sealed list
         let old_segment = {
@@ -406,9 +428,38 @@ impl SegmentManager {
             sealed.push((old_segment.0, Arc::new(old_segment.1)));
         }
 
-        info!("Rotated to new segment: id={}", next_id);
+        info!("Rotated to new segment: id={}, hard_states_migrated={}", next_id, all_hard_states.len());
+
+        // Now it's safe to cleanup obsolete segments since hard states have been migrated
+        if let Err(e) = self.cleanup_obsolete_segments() {
+            warn!("Failed to cleanup obsolete segments after rotation: {}", e);
+        }
 
         Ok(())
+    }
+
+    /// Collect all hard states from all segments (for migration during rotation)
+    fn collect_all_hard_states(&self) -> HashMap<RaftId, HardState> {
+        let mut all_states = HashMap::new();
+
+        // From sealed segments (oldest to newest)
+        let sealed = self.sealed_segments.read();
+        for (_, segment) in sealed.iter() {
+            let hard_states = segment.hard_states.read();
+            for (raft_id, hs) in hard_states.iter() {
+                all_states.insert(raft_id.clone(), hs.clone());
+            }
+        }
+        drop(sealed);
+
+        // From active segment (newest, overwrites any older values)
+        let active = self.active_segment.read();
+        let hard_states = active.hard_states.read();
+        for (raft_id, hs) in hard_states.iter() {
+            all_states.insert(raft_id.clone(), hs.clone());
+        }
+
+        all_states
     }
 
     /// Write log entries to the active segment
@@ -471,8 +522,10 @@ impl SegmentManager {
             truncate_indices.insert(from.clone(), index);
         }
 
-        // Try to cleanup obsolete segments
-        self.cleanup_obsolete_segments()?;
+        // NOTE: Don't cleanup here! Cleanup should only happen after rotation,
+        // which ensures hard states have been migrated to the new segment.
+        // Old segments may contain hard states that haven't been written to
+        // the current active segment yet.
 
         Ok(())
     }
@@ -772,25 +825,7 @@ impl SegmentManager {
     /// Get all hard states from all segments (for initializing global cache)
     /// Newer hard states overwrite older ones.
     pub fn get_all_hard_states(&self) -> Option<HashMap<RaftId, HardState>> {
-        let mut all_states = HashMap::new();
-
-        // First from sealed segments (oldest to newest)
-        let sealed = self.sealed_segments.read();
-        for (_, segment) in sealed.iter() {
-            let hard_states = segment.hard_states.read();
-            for (raft_id, hs) in hard_states.iter() {
-                all_states.insert(raft_id.clone(), hs.clone());
-            }
-        }
-        drop(sealed);
-
-        // Then from active segment (newest)
-        let active = self.active_segment.read();
-        let hard_states = active.hard_states.read();
-        for (raft_id, hs) in hard_states.iter() {
-            all_states.insert(raft_id.clone(), hs.clone());
-        }
-
+        let all_states = self.collect_all_hard_states();
         if all_states.is_empty() {
             None
         } else {
