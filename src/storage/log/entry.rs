@@ -4,7 +4,7 @@ use anyhow::Result;
 use bincode::{Decode, Encode};
 use tracing::warn;
 
-use crate::{RaftId, message::{HardState, LogEntry}};
+use crate::{RaftId, cluster_config::ClusterConfig, message::{HardState, LogEntry}};
 
 #[derive(Debug, Default, Decode, Encode, Clone, PartialEq, Eq, Hash)]
 pub struct EntryMeta {
@@ -53,6 +53,29 @@ impl HardStateRecord {
         let config = bincode::config::standard();
         Ok(bincode::decode_from_slice(data, config).map_err(|e| {
             warn!("Failed to deserialize hard state record: {}", e);
+            e
+        })?)
+    }
+}
+
+/// Represents a cluster config record stored in the log segment.
+/// During replay, newer configs overwrite older ones for the same raft_id.
+#[derive(Debug, Clone, Decode, Encode)]
+pub struct ClusterConfigRecord {
+    pub raft_id: RaftId,
+    pub config: ClusterConfig,
+}
+
+impl ClusterConfigRecord {
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        let config = bincode::config::standard();
+        Ok(bincode::encode_to_vec(self, config)?)
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<(Self, usize)> {
+        let config = bincode::config::standard();
+        Ok(bincode::decode_from_slice(data, config).map_err(|e| {
+            warn!("Failed to deserialize cluster config record: {}", e);
             e
         })?)
     }

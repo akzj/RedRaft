@@ -14,12 +14,15 @@ use bincode::{Decode, Encode};
 use tracing::warn;
 use tokio::sync::Semaphore;
 
-use crate::{RaftId, message::{HardState, HardStateMap, LogEntry}};
+use crate::{RaftId, cluster_config::ClusterConfig, message::{HardState, HardStateMap, LogEntry}};
 
 use super::entry::{
-    EntryHeader, EntryMeta, EntryType, HardStateRecord, Index, LogEntryRecord, 
-    TruncateRecord, ENTRY_HEADER_SIZE,
+    ClusterConfigRecord, EntryHeader, EntryMeta, EntryType, HardStateRecord, Index,
+    LogEntryRecord, TruncateRecord, ENTRY_HEADER_SIZE,
 };
+
+/// Type alias for cluster config map (raft_id -> cluster_config)
+pub type ClusterConfigMap = HashMap<RaftId, ClusterConfig>;
 
 // 快照存储目录结构（以本地磁盘为例）：
 // /raft/snapshots/{raft_id}
@@ -65,6 +68,7 @@ pub struct LogSegment {
     pub(crate) file: Arc<File>,
     pub(crate) io_semaphore: Arc<Semaphore>,
     pub(crate) hard_states: RwLock<HardStateMap>,
+    pub(crate) cluster_configs: RwLock<ClusterConfigMap>,
 }
 
 impl LogSegment {
@@ -333,6 +337,33 @@ impl LogSegment {
         Ok(())
     }
 
+    /// Write a cluster config record to the log segment.
+    /// Cluster config is persisted to disk and also cached in memory.
+    /// During replay, newer configs overwrite older ones.
+    pub fn write_cluster_config(&mut self, from: &RaftId, config: &ClusterConfig) -> Result<()> {
+        let record = ClusterConfigRecord {
+            raft_id: from.clone(),
+            config: config.clone(),
+        };
+
+        let data = record.serialize()?;
+        let header = EntryHeader::new(
+            data.len() as u32 + ENTRY_HEADER_SIZE,
+            EntryType::ClusterConfig,
+            crc32fast::hash(&data),
+        );
+
+        let header_bytes = header.serialize()?;
+        self.file.write_all(&header_bytes)?;
+        self.file.write_all(&data)?;
+
+        // Also update in-memory cache for quick access
+        let mut cluster_configs = self.cluster_configs.write();
+        cluster_configs.insert(from.clone(), config.clone());
+
+        Ok(())
+    }
+
     /// Replay the log segment to rebuild the index from scratch.
     /// This is called on startup to recover the state from the append-only log.
     /// 
@@ -342,14 +373,16 @@ impl LogSegment {
     /// 3. For TruncatePrefix: update index to remove entries before the truncate index
     /// 4. For TruncateSuffix: update index to remove entries after the truncate index
     /// 5. For HardState: update the in-memory hard state cache (newer overwrites older)
+    /// 6. For ClusterConfig: update the in-memory cluster config cache (newer overwrites older)
     /// 
     /// This ensures that even though the segment is append-only, the index correctly
     /// reflects which entries are still valid after truncate operations.
     #[allow(dead_code)]
     pub fn replay_segment(&mut self) -> Result<()> {
-        // Reset the index and hard states
+        // Reset the index, hard states, and cluster configs
         self.entry_index = Index::default();
         self.hard_states.write().clear();
+        self.cluster_configs.write().clear();
         
         let file_size = self.file.metadata()?.len();
         if file_size == 0 {
@@ -457,8 +490,20 @@ impl LogSegment {
                         }
                     }
                 }
-                EntryType::Snapshot | EntryType::ClusterConfig => {
-                    // Handle other entry types if needed
+                EntryType::ClusterConfig => {
+                    // Replay cluster config - newer values overwrite older ones
+                    match ClusterConfigRecord::deserialize(&data_buf) {
+                        Ok((record, _)) => {
+                            let mut cluster_configs = self.cluster_configs.write();
+                            cluster_configs.insert(record.raft_id, record.config);
+                        }
+                        Err(e) => {
+                            warn!("Failed to deserialize cluster config at offset {}: {}", offset, e);
+                        }
+                    }
+                }
+                EntryType::Snapshot => {
+                    // Handle snapshot entry if needed
                 }
             }
             

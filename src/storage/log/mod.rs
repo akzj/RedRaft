@@ -21,8 +21,8 @@ mod tests;
 
 // Re-export public types
 pub use entry::{
-    EntryHeader, EntryMeta, EntryType, HardStateRecord, Index, LogEntryRecord, 
-    RaftEntryIndex, TruncateRecord, ENTRY_HEADER_SIZE, ENTRY_MAGIC_NUM,
+    ClusterConfigRecord, EntryHeader, EntryMeta, EntryType, HardStateRecord, Index,
+    LogEntryRecord, RaftEntryIndex, TruncateRecord, ENTRY_HEADER_SIZE, ENTRY_MAGIC_NUM,
 };
 
 pub use manager::{
@@ -31,7 +31,7 @@ pub use manager::{
 };
 
 pub use segment::{
-    LogSegment, LogSegmentTail, LogStoreSnapshot, 
+    ClusterConfigMap, LogSegment, LogSegmentTail, LogStoreSnapshot, 
     SegmentTruncateLog, SnapshotStore,
 };
 

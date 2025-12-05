@@ -21,10 +21,11 @@ use tracing::{info, warn};
 
 use crate::{
     RaftId,
+    cluster_config::ClusterConfig,
     message::{HardState, HardStateMap, LogEntry},
 };
 
-use super::{entry::Index, segment::LogSegment};
+use super::{entry::Index, segment::{ClusterConfigMap, LogSegment}};
 
 /// Default maximum segment size (64MB)
 pub const DEFAULT_MAX_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
@@ -278,6 +279,7 @@ impl SegmentManager {
             file: Arc::new(file),
             io_semaphore,
             hard_states: RwLock::new(HardStateMap::new()),
+            cluster_configs: RwLock::new(ClusterConfigMap::new()),
         };
 
         let meta = SegmentMeta {
@@ -315,6 +317,7 @@ impl SegmentManager {
             file: file.clone(),
             io_semaphore,
             hard_states: RwLock::new(HardStateMap::new()),
+            cluster_configs: RwLock::new(ClusterConfigMap::new()),
         };
 
         // Replay to rebuild index
@@ -389,9 +392,10 @@ impl SegmentManager {
         let (mut new_segment, new_meta) =
             Self::create_segment(&self.options, next_id, self.io_semaphore.clone())?;
 
-        // Collect ALL hard states from all segments BEFORE rotation
-        // This ensures hard states survive segment cleanup
+        // Collect ALL hard states and cluster configs from all segments BEFORE rotation
+        // This ensures they survive segment cleanup
         let all_hard_states = self.collect_all_hard_states();
+        let all_cluster_configs = self.collect_all_cluster_configs();
 
         // Write all hard states to the new segment
         for hard_state in all_hard_states.values() {
@@ -400,10 +404,17 @@ impl SegmentManager {
             }
         }
 
-        // Sync hard states to disk
+        // Write all cluster configs to the new segment
+        for (raft_id, config) in all_cluster_configs.iter() {
+            if let Err(e) = new_segment.write_cluster_config(raft_id, config) {
+                warn!("Failed to write cluster config to new segment: {}", e);
+            }
+        }
+
+        // Sync to disk
         if self.options.sync_on_write {
             if let Err(e) = new_segment.sync_data() {
-                warn!("Failed to sync hard states to new segment: {}", e);
+                warn!("Failed to sync data to new segment: {}", e);
             }
         }
 
@@ -435,9 +446,10 @@ impl SegmentManager {
         }
 
         info!(
-            "Rotated to new segment: id={}, hard_states_migrated={}",
+            "Rotated to new segment: id={}, hard_states_migrated={}, cluster_configs_migrated={}",
             next_id,
-            all_hard_states.len()
+            all_hard_states.len(),
+            all_cluster_configs.len()
         );
 
         // Now it's safe to cleanup obsolete segments since hard states have been migrated
@@ -577,6 +589,7 @@ impl SegmentManager {
                         file: segment.file.clone(),
                         io_semaphore: segment.io_semaphore.clone(),
                         hard_states: RwLock::new(segment.hard_states.read().clone()),
+                        cluster_configs: RwLock::new(segment.cluster_configs.read().clone()),
                     }))
                 } else {
                     None
@@ -667,6 +680,7 @@ impl SegmentManager {
                     file: segment.file.clone(),
                     io_semaphore: segment.io_semaphore.clone(),
                     hard_states: RwLock::new(segment.hard_states.read().clone()),
+                    cluster_configs: RwLock::new(segment.cluster_configs.read().clone()),
                 })
             };
 
@@ -851,6 +865,77 @@ impl SegmentManager {
         } else {
             Some(all_states)
         }
+    }
+
+    /// Save cluster config to the log segment.
+    /// Cluster config is persisted to disk and cached in memory for quick access.
+    pub fn save_cluster_config(&self, from: &RaftId, config: &ClusterConfig) -> Result<()> {
+        let mut segment = self.active_segment.write();
+        segment.write_cluster_config(from, config)?;
+
+        if self.options.sync_on_write {
+            segment.sync_data()?;
+        }
+
+        Ok(())
+    }
+
+    /// Load cluster config
+    pub fn load_cluster_config(&self, from: &RaftId) -> Option<ClusterConfig> {
+        // Check active segment
+        {
+            let segment = self.active_segment.read();
+            let cluster_configs = segment.cluster_configs.read();
+            if let Some(cc) = cluster_configs.get(from) {
+                return Some(cc.clone());
+            }
+        }
+
+        // Check sealed segments (newest to oldest)
+        let sealed = self.sealed_segments.read();
+        for (_, segment) in sealed.iter().rev() {
+            let cluster_configs = segment.cluster_configs.read();
+            if let Some(cc) = cluster_configs.get(from) {
+                return Some(cc.clone());
+            }
+        }
+
+        None
+    }
+
+    /// Get all cluster configs from all segments (for initializing global cache)
+    /// Newer configs overwrite older ones.
+    pub fn get_all_cluster_configs(&self) -> Option<HashMap<RaftId, ClusterConfig>> {
+        let all_configs = self.collect_all_cluster_configs();
+        if all_configs.is_empty() {
+            None
+        } else {
+            Some(all_configs)
+        }
+    }
+
+    /// Collect all cluster configs from all segments (for migration during rotation)
+    fn collect_all_cluster_configs(&self) -> ClusterConfigMap {
+        let mut all_configs = HashMap::new();
+
+        // From sealed segments (oldest to newest)
+        let sealed = self.sealed_segments.read();
+        for (_, segment) in sealed.iter() {
+            let cluster_configs = segment.cluster_configs.read();
+            for (raft_id, cc) in cluster_configs.iter() {
+                all_configs.insert(raft_id.clone(), cc.clone());
+            }
+        }
+        drop(sealed);
+
+        // From active segment (newest, overwrites any older values)
+        let active = self.active_segment.read();
+        let cluster_configs = active.cluster_configs.read();
+        for (raft_id, cc) in cluster_configs.iter() {
+            all_configs.insert(raft_id.clone(), cc.clone());
+        }
+
+        all_configs
     }
 
     /// Sync all segments to disk

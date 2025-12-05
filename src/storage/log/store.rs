@@ -14,9 +14,10 @@ use tracing::warn;
 
 use crate::{
     RaftId,
+    cluster_config::ClusterConfig,
     error::StorageError,
     message::{HardState, LogEntry},
-    traits::{HardStateStorage, LogEntryStorage, StorageResult},
+    traits::{ClusterConfigStorage, HardStateStorage, LogEntryStorage, StorageResult},
 };
 
 use super::{
@@ -39,6 +40,8 @@ pub struct LogEntryStoreInner {
     pub(crate) cache_table: RwLock<HashMap<RaftId, VecDeque<LogEntry>>>,
     // Global hard state cache - survives segment rotation
     pub(crate) hard_states: RwLock<HashMap<RaftId, HardState>>,
+    // Global cluster config cache - survives segment rotation
+    pub(crate) cluster_configs: RwLock<HashMap<RaftId, ClusterConfig>>,
 }
 
 #[derive(Clone)]
@@ -487,6 +490,65 @@ impl LogEntryStoreInner {
             global_states.insert(raft_id.clone(), hard_state.clone());
         }
     }
+
+    /// Save cluster config for a raft node to the log segment.
+    /// Cluster config is persisted to disk and cached in global memory.
+    pub(crate) fn save_cluster_config(
+        &self,
+        from: &RaftId,
+        config: &ClusterConfig,
+    ) -> StorageResult<()> {
+        // Write to segment for persistence
+        let mut segment = self.current_segment.write();
+        segment.write_cluster_config(from, config).map_err(|e| {
+            warn!("Failed to write cluster config to segment: {}", e);
+            StorageError::Io(Arc::new(e))
+        })?;
+        segment.sync_data().map_err(|e| {
+            warn!("Failed to sync cluster config: {}", e);
+            StorageError::Io(Arc::new(e))
+        })?;
+        drop(segment);
+
+        // Update global cache (survives segment rotation)
+        let mut cluster_configs = self.cluster_configs.write();
+        cluster_configs.insert(from.clone(), config.clone());
+
+        Ok(())
+    }
+
+    /// Load cluster config for a raft node from global cache
+    pub(crate) fn load_cluster_config(&self, from: &RaftId) -> StorageResult<ClusterConfig> {
+        // Read from global cache (not from segment)
+        let cluster_configs = self.cluster_configs.read();
+        Ok(cluster_configs
+            .get(from)
+            .cloned()
+            .unwrap_or_else(ClusterConfig::empty))
+    }
+
+    /// Initialize global cluster config cache from segments (called during startup/replay)
+    #[allow(dead_code)]
+    pub(crate) fn init_cluster_configs_from_segments(&self) {
+        // First from read-only segments (older to newer)
+        let segments = self.segments.read();
+        for segment in segments.iter() {
+            let segment_configs = segment.cluster_configs.read();
+            let mut global_configs = self.cluster_configs.write();
+            for (raft_id, config) in segment_configs.iter() {
+                global_configs.insert(raft_id.clone(), config.clone());
+            }
+        }
+        drop(segments);
+
+        // Then from current segment (newest)
+        let current = self.current_segment.read();
+        let segment_configs = current.cluster_configs.read();
+        let mut global_configs = self.cluster_configs.write();
+        for (raft_id, config) in segment_configs.iter() {
+            global_configs.insert(raft_id.clone(), config.clone());
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
@@ -495,6 +557,7 @@ pub enum LogEntryOp {
     TruncateLogPrefix(u64),
     TruncateLogSuffix(u64),
     SaveHardState(HardState),
+    SaveClusterConfig(ClusterConfig),
 }
 
 pub struct LogEntryOpRequest {
@@ -591,6 +654,13 @@ impl LogEntryStore {
                             results.push(result);
                             i += 1;
                         }
+                        LogEntryOp::SaveClusterConfig(config) => {
+                            // Write cluster config to segment and update global cache
+                            let result =
+                                self_clone.inner.save_cluster_config(&buf[i].from, config);
+                            results.push(result);
+                            i += 1;
+                        }
                     }
                 }
 
@@ -628,6 +698,38 @@ impl HardStateStorage for LogEntryStore {
     async fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<HardState>> {
         // Read from global cache (doesn't need to go through channel)
         self.inner.load_hard_state(from)
+    }
+}
+
+#[async_trait::async_trait]
+impl ClusterConfigStorage for LogEntryStore {
+    async fn save_cluster_config(
+        &self,
+        from: &RaftId,
+        conf: ClusterConfig,
+    ) -> StorageResult<()> {
+        // Send through the operation channel for proper ordering
+        let (tx, rx) = sync::oneshot::channel();
+        let request = LogEntryOpRequest {
+            from: from.clone(),
+            log_entry_op: LogEntryOp::SaveClusterConfig(conf),
+            response_tx: tx,
+        };
+
+        self.op_sender.send(request).map_err(|e| {
+            warn!("Failed to send save cluster config request: {}", e);
+            StorageError::ChannelClosed
+        })?;
+
+        rx.await.map_err(|e| {
+            warn!("Failed to receive save cluster config response: {}", e);
+            StorageError::ChannelClosed
+        })?
+    }
+
+    async fn load_cluster_config(&self, from: &RaftId) -> StorageResult<ClusterConfig> {
+        // Read from global cache (doesn't need to go through channel)
+        self.inner.load_cluster_config(from)
     }
 }
 
@@ -741,6 +843,8 @@ pub struct ManagedLogEntryStore {
     cache_table: Arc<RwLock<HashMap<RaftId, VecDeque<LogEntry>>>>,
     // Global hard state cache - survives segment rotation
     hard_states: Arc<RwLock<HashMap<RaftId, HardState>>>,
+    // Global cluster config cache - survives segment rotation
+    cluster_configs: Arc<RwLock<HashMap<RaftId, ClusterConfig>>>,
     op_sender: mpsc::UnboundedSender<LogEntryOpRequest>,
 }
 
@@ -799,6 +903,12 @@ impl ManagedLogEntryStore {
             initial_hard_states = hs;
         }
 
+        // Initialize global cluster config cache from manager's segments
+        let mut initial_cluster_configs = HashMap::new();
+        if let Some(cc) = manager.get_all_cluster_configs() {
+            initial_cluster_configs = cc;
+        }
+
         let (tx, rx) = mpsc::unbounded_channel();
 
         let store_options = LogEntryStoreOptions {
@@ -817,6 +927,7 @@ impl ManagedLogEntryStore {
                 manager: Arc::new(manager),
                 cache_table: Arc::new(RwLock::new(HashMap::new())),
                 hard_states: Arc::new(RwLock::new(initial_hard_states)),
+                cluster_configs: Arc::new(RwLock::new(initial_cluster_configs)),
                 op_sender: tx,
             },
             rx,
@@ -828,6 +939,7 @@ impl ManagedLogEntryStore {
         let manager = self.manager.clone();
         let cache_table = self.cache_table.clone();
         let hard_states = self.hard_states.clone();
+        let cluster_configs = self.cluster_configs.clone();
         let cache_size = self.options.cache_entries_size;
         let batch_size = self.options.batch_size;
 
@@ -938,6 +1050,21 @@ impl ManagedLogEntryStore {
                             if result.is_ok() {
                                 let mut hs = hard_states.write();
                                 hs.insert(hard_state.raft_id.clone(), hard_state.clone());
+                            }
+
+                            results.push(result);
+                            i += 1;
+                        }
+                        LogEntryOp::SaveClusterConfig(config) => {
+                            // Write to segment for persistence
+                            let result = manager
+                                .save_cluster_config(&buf[i].from, config)
+                                .map_err(|e| StorageError::Io(Arc::new(e)));
+
+                            // Update global cache on success
+                            if result.is_ok() {
+                                let mut cc = cluster_configs.write();
+                                cc.insert(buf[i].from.clone(), config.clone());
                             }
 
                             results.push(result);
@@ -1064,6 +1191,42 @@ impl HardStateStorage for ManagedLogEntryStore {
         // Read from global cache (doesn't need to go through channel)
         let hard_states = self.hard_states.read();
         Ok(hard_states.get(from).cloned())
+    }
+}
+
+#[async_trait::async_trait]
+impl ClusterConfigStorage for ManagedLogEntryStore {
+    async fn save_cluster_config(
+        &self,
+        from: &RaftId,
+        conf: ClusterConfig,
+    ) -> StorageResult<()> {
+        // Send through the operation channel for proper ordering
+        let (tx, rx) = sync::oneshot::channel();
+        let request = LogEntryOpRequest {
+            from: from.clone(),
+            log_entry_op: LogEntryOp::SaveClusterConfig(conf),
+            response_tx: tx,
+        };
+
+        self.op_sender.send(request).map_err(|e| {
+            warn!("Failed to send save cluster config request: {}", e);
+            StorageError::ChannelClosed
+        })?;
+
+        rx.await.map_err(|e| {
+            warn!("Failed to receive save cluster config response: {}", e);
+            StorageError::ChannelClosed
+        })?
+    }
+
+    async fn load_cluster_config(&self, from: &RaftId) -> StorageResult<ClusterConfig> {
+        // Read from global cache (doesn't need to go through channel)
+        let cluster_configs = self.cluster_configs.read();
+        Ok(cluster_configs
+            .get(from)
+            .cloned()
+            .unwrap_or_else(ClusterConfig::empty))
     }
 }
 

@@ -379,9 +379,10 @@ mod entry_tests {
 
 #[cfg(test)]
 mod segment_tests {
+    use parking_lot::RwLock;
+    use std::collections::HashMap;
     use std::fs::OpenOptions;
     use std::sync::Arc;
-    use parking_lot::RwLock;
     use tempfile::TempDir;
     use tokio::sync::Semaphore;
 
@@ -419,6 +420,7 @@ mod segment_tests {
             file: Arc::new(file),
             io_semaphore: Arc::new(Semaphore::new(4)),
             hard_states: RwLock::new(HardStateMap::default()),
+            cluster_configs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -683,10 +685,10 @@ mod segment_tests {
 
 #[cfg(test)]
 mod store_tests {
+    use parking_lot::RwLock;
     use std::collections::HashMap;
     use std::fs::OpenOptions;
     use std::sync::Arc;
-    use parking_lot::RwLock;
     use tempfile::TempDir;
     use tokio::sync::Semaphore;
 
@@ -731,6 +733,7 @@ mod store_tests {
             file: Arc::new(file),
             io_semaphore: Arc::new(Semaphore::new(4)),
             hard_states: RwLock::new(HardStateMap::default()),
+            cluster_configs: RwLock::new(HashMap::new()),
         };
 
         let inner = LogEntryStoreInner {
@@ -741,6 +744,7 @@ mod store_tests {
             current_segment: RwLock::new(segment),
             cache_table: RwLock::new(HashMap::new()),
             hard_states: RwLock::new(HashMap::new()),
+            cluster_configs: RwLock::new(HashMap::new()),
         };
 
         let options = LogEntryStoreOptions {
