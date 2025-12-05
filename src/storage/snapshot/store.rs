@@ -1,13 +1,11 @@
 //! File-based snapshot storage implementation.
 
-use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, error, info};
@@ -72,11 +70,12 @@ struct SnapshotMeta {
 /// - Atomic writes using temporary files
 /// - Checksum verification for data integrity
 /// - Support for multiple Raft groups
+///
+/// Note: No in-memory caching is used since snapshots can be very large
+/// (tens or hundreds of MB). Each load reads directly from disk.
 #[derive(Clone)]
 pub struct FileSnapshotStorage {
     options: SnapshotStorageOptions,
-    /// In-memory cache of loaded snapshots for quick access.
-    cache: Arc<RwLock<HashMap<RaftId, Snapshot>>>,
 }
 
 impl FileSnapshotStorage {
@@ -96,10 +95,7 @@ impl FileSnapshotStorage {
             options.base_dir
         );
 
-        Ok(Self {
-            options,
-            cache: Arc::new(RwLock::new(HashMap::new())),
-        })
+        Ok(Self { options })
     }
 
     /// Create with default options.
@@ -358,9 +354,6 @@ impl FileSnapshotStorage {
                 )))
             })?;
 
-            // Remove from cache
-            self.cache.write().remove(raft_id);
-
             info!("Snapshot deleted for {:?}", raft_id);
         }
 
@@ -424,11 +417,6 @@ impl FileSnapshotStorage {
 
         Ok(result)
     }
-
-    /// Clear the in-memory cache.
-    pub fn clear_cache(&self) {
-        self.cache.write().clear();
-    }
 }
 
 #[async_trait]
@@ -437,14 +425,10 @@ impl SnapshotStorage for FileSnapshotStorage {
         // Clone data for async operation
         let storage = self.clone();
         let raft_id = from.clone();
-        let snapshot = snap.clone();
 
         // Perform I/O in blocking task
         tokio::task::spawn_blocking(move || {
-            storage.write_snapshot_atomic(&raft_id, &snapshot)?;
-            // Update cache
-            storage.cache.write().insert(raft_id, snapshot);
-            Ok(())
+            storage.write_snapshot_atomic(&raft_id, &snap)
         })
         .await
         .map_err(|e| {
@@ -456,23 +440,13 @@ impl SnapshotStorage for FileSnapshotStorage {
     }
 
     async fn load_snapshot(&self, from: &RaftId) -> StorageResult<Option<Snapshot>> {
-        // Check cache first
-        if let Some(snapshot) = self.cache.read().get(from).cloned() {
-            return Ok(Some(snapshot));
-        }
-
         // Clone data for async operation
         let storage = self.clone();
         let raft_id = from.clone();
 
         // Perform I/O in blocking task
-        let result = tokio::task::spawn_blocking(move || {
-            let snapshot = storage.read_snapshot(&raft_id)?;
-            // Update cache if found
-            if let Some(ref snap) = snapshot {
-                storage.cache.write().insert(raft_id, snap.clone());
-            }
-            Ok(snapshot)
+        tokio::task::spawn_blocking(move || {
+            storage.read_snapshot(&raft_id)
         })
         .await
         .map_err(|e| {
@@ -480,9 +454,7 @@ impl SnapshotStorage for FileSnapshotStorage {
                 "Snapshot load task failed: {}",
                 e
             )))
-        })?;
-
-        result
+        })?
     }
 }
 

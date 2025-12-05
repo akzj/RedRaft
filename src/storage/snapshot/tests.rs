@@ -37,10 +37,7 @@ async fn test_save_and_load_snapshot() {
     // Save snapshot
     storage.save_snapshot(&raft_id, snapshot.clone()).await.unwrap();
 
-    // Clear cache to force disk read
-    storage.clear_cache();
-
-    // Load snapshot
+    // Load snapshot (reads from disk each time - no caching)
     let loaded = storage.load_snapshot(&raft_id).await.unwrap();
     assert!(loaded.is_some());
 
@@ -77,9 +74,6 @@ async fn test_overwrite_snapshot() {
     let snapshot2 = create_test_snapshot(200, 10);
     storage.save_snapshot(&raft_id, snapshot2.clone()).await.unwrap();
 
-    // Clear cache
-    storage.clear_cache();
-
     // Load should return second snapshot
     let loaded = storage.load_snapshot(&raft_id).await.unwrap().unwrap();
     assert_eq!(loaded.index, 200);
@@ -101,9 +95,6 @@ async fn test_multiple_raft_groups() {
     // Save snapshots for different groups
     storage.save_snapshot(&raft_id1, snapshot1.clone()).await.unwrap();
     storage.save_snapshot(&raft_id2, snapshot2.clone()).await.unwrap();
-
-    // Clear cache
-    storage.clear_cache();
 
     // Load and verify
     let loaded1 = storage.load_snapshot(&raft_id1).await.unwrap().unwrap();
@@ -182,32 +173,6 @@ async fn test_list_snapshots() {
 }
 
 #[tokio::test]
-async fn test_cache_behavior() {
-    let temp_dir = TempDir::new().unwrap();
-    let options = SnapshotStorageOptions::with_base_dir(temp_dir.path());
-    let storage = FileSnapshotStorage::new(options).unwrap();
-
-    let raft_id = test_raft_id("test_group", "node1");
-    let snapshot = create_test_snapshot(100, 5);
-
-    // Save snapshot (also caches it)
-    storage.save_snapshot(&raft_id, snapshot.clone()).await.unwrap();
-
-    // Load should hit cache (no disk read)
-    let loaded = storage.load_snapshot(&raft_id).await.unwrap();
-    assert!(loaded.is_some());
-    assert_eq!(loaded.unwrap().index, 100);
-
-    // Clear cache
-    storage.clear_cache();
-
-    // Load again should read from disk
-    let loaded = storage.load_snapshot(&raft_id).await.unwrap();
-    assert!(loaded.is_some());
-    assert_eq!(loaded.unwrap().index, 100);
-}
-
-#[tokio::test]
 async fn test_large_snapshot() {
     let temp_dir = TempDir::new().unwrap();
     let options = SnapshotStorageOptions::with_base_dir(temp_dir.path());
@@ -230,10 +195,7 @@ async fn test_large_snapshot() {
     // Save large snapshot
     storage.save_snapshot(&raft_id, snapshot).await.unwrap();
 
-    // Clear cache
-    storage.clear_cache();
-
-    // Load and verify
+    // Load and verify (reads directly from disk - no caching)
     let loaded = storage.load_snapshot(&raft_id).await.unwrap().unwrap();
     assert_eq!(loaded.index, 1000);
     assert_eq!(loaded.term, 50);
