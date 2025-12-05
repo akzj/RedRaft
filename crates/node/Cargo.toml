@@ -1,0 +1,44 @@
+[package]
+name = "redraft"
+version = "0.1.0"
+edition = "2021"
+description = "RedRaft - Redis-compatible distributed key-value store built on Raft consensus"
+license = "MIT"
+
+[lib]
+name = "redraft"
+path = "src/lib.rs"
+
+[[bin]]
+name = "redraft"
+path = "src/main.rs"
+
+[dependencies]
+# Raft consensus library
+raft = { path = "../raft" }
+# Redis protocol support
+redis-protocol = { path = "../redis" }
+
+# Workspace dependencies
+tokio = { workspace = true }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rand = { workspace = true }
+bincode = { workspace = true }
+sha2 = { workspace = true }
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14.2"
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
