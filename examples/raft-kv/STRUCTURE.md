@@ -15,6 +15,8 @@ examples/raft-kv/
 │   ├── server.rs          # 服务器主逻辑
 │   ├── state_machine.rs   # KV 状态机实现
 │   ├── client.rs          # 客户端实现
+│   ├── router.rs          # 键值路由（Multi-Raft 核心）
+│   ├── shard_manager.rs   # Raft 组管理（创建/迁移/合并/分裂）
 │   ├── api/               # API 实现
 │   │   ├── mod.rs
 │   │   ├── grpc.rs        # gRPC 服务实现
@@ -43,11 +45,12 @@ examples/raft-kv/
 
 #### `server.rs`
 - RaftKV 服务器主逻辑
-- 集成 RaftState 和 FileStorage
+- 集成 MultiRaftDriver 和 FileStorage
+- **键值路由**：根据键的哈希值路由到对应的 Raft 组
 - 请求路由和处理
 
 #### `state_machine.rs`
-- KV 状态机实现
+- KV 状态机实现（每个 Raft 组独立实例）
 - 将 Raft 日志应用到内存中的键值对
 - 快照创建和恢复
 
@@ -68,10 +71,25 @@ examples/raft-kv/
 - 使用 axum 或 warp 框架
 - 提供 RESTful 接口
 
+### Multi-Raft 模块
+
+#### `router.rs`
+- 键值路由实现
+- 哈希算法（一致性哈希或简单取模）
+- 路由表管理（创建/删除/合并/分裂时更新）
+
+#### `shard_manager.rs`
+- Raft 组生命周期管理
+- 创建新 Raft 组
+- 迁移 Raft 组（数据迁移 + 配置变更）
+- 合并多个 Raft 组
+- 分裂 Raft 组
+- 负载均衡（监控负载，自动迁移）
+
 ### 工具模块
 
 #### `metrics.rs`
-- 性能指标收集
+- 性能指标收集（每个 Raft 组独立指标）
 - Prometheus 格式导出
 - 指标统计和聚合
 
