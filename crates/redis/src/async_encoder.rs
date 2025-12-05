@@ -19,26 +19,33 @@ impl<W: AsyncWrite + Unpin> AsyncRespEncoder<W> {
     pub async fn encode(&mut self, value: &RespValue) -> std::io::Result<()> {
         match value {
             RespValue::SimpleString(s) => {
-                write!(self.writer, "+{}\r\n", s).await?;
+                let data = format!("+{}\r\n", s);
+                self.writer.write_all(data.as_bytes()).await?;
             }
             RespValue::Error(e) => {
-                write!(self.writer, "-{}\r\n", e).await?;
+                let data = format!("-{}\r\n", e);
+                self.writer.write_all(data.as_bytes()).await?;
             }
             RespValue::Integer(i) => {
-                write!(self.writer, ":{}\r\n", i).await?;
+                let data = format!(":{}\r\n", i);
+                self.writer.write_all(data.as_bytes()).await?;
             }
             RespValue::BulkString(Some(bytes)) => {
-                write!(self.writer, "${}\r\n", bytes.len()).await?;
+                let header = format!("${}\r\n", bytes.len());
+                self.writer.write_all(header.as_bytes()).await?;
                 self.writer.write_all(bytes).await?;
-                write!(self.writer, "\r\n").await?;
+                self.writer.write_all(b"\r\n").await?;
             }
             RespValue::BulkString(None) | RespValue::Null => {
-                write!(self.writer, "$-1\r\n").await?;
+                self.writer.write_all(b"$-1\r\n").await?;
             }
             RespValue::Array(items) => {
-                write!(self.writer, "*{}\r\n", items.len()).await?;
+                let header = format!("*{}\r\n", items.len());
+                self.writer.write_all(header.as_bytes()).await?;
                 for item in items {
-                    self.encode(item).await?;
+                    // Box the recursive call to avoid infinite future size
+                    let fut = Box::pin(async { self.encode(&item).await });
+                    fut.await?;
                 }
             }
         }
@@ -50,8 +57,6 @@ impl<W: AsyncWrite + Unpin> AsyncRespEncoder<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncReadExt;
-    use tokio_test::io::Builder;
 
     #[tokio::test]
     async fn test_encode_simple_string() {

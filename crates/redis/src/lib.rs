@@ -77,4 +77,6 @@ pub enum RespError {
     IntegerOverflow,
     #[error("Frame too large: {0} bytes (max: {1} bytes)")]
     FrameTooLarge(usize, usize),
+    #[error("Invalid RESP type: {0}")]
+    InvalidType(u8),
 }

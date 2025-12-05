@@ -20,7 +20,7 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
     }
 
     /// 创建新的异步解析器（指定最大帧大小）
-    /// 
+    ///
     /// # Arguments
     /// * `reader` - 异步读取器
     /// * `max_bytes` - 最大帧大小限制（字节），防止内存溢出攻击
@@ -48,11 +48,11 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
     }
 
     /// 从 EOF 缓冲区解析多个 RESP 值（Pipeline 支持）
-    /// 
+    ///
     /// 用于处理 `redis-benchmark -P 32` 等场景，一次读取可能包含多条命令
     pub async fn decode_eof(&mut self) -> Result<Vec<RespValue>, RespError> {
         let mut results = Vec::new();
-        
+
         loop {
             match self.parse().await {
                 Ok(value) => results.push(value),
@@ -63,7 +63,7 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
                 Err(e) => return Err(e),
             }
         }
-        
+
         Ok(results)
     }
 
@@ -84,110 +84,123 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
             return Err(RespError::InvalidFormat("Empty line".to_string()));
         }
 
-        let prefix = line.chars().next().ok_or_else(|| {
-            RespError::InvalidFormat("Empty line".to_string())
+        // 获取第一个字节作为类型标识
+        let buf = line.as_bytes();
+        if buf.is_empty() {
+            return Err(RespError::InvalidFormat("Empty line".to_string()));
+        }
+
+        match buf[0] {
+            b'*' => self.parse_array(&line).await,
+            b'$' => self.parse_bulk(&line).await,
+            b':' => self.parse_int(&line).await,
+            b'+' => self.parse_simple(&line).await,
+            b'-' => self.parse_error(&line).await,
+            _ => Err(RespError::InvalidType(buf[0])),
+        }
+    }
+
+    /// 解析简单字符串: +OK\r\n
+    async fn parse_simple(&mut self, line: &str) -> Result<RespValue, RespError> {
+        let value = &line[1..];
+        // 验证不包含未转义的 CRLF
+        if value.contains('\r') || value.contains('\n') {
+            return Err(RespError::InvalidFormat(
+                "Simple string cannot contain CR or LF".to_string(),
+            ));
+        }
+        Ok(RespValue::SimpleString(value.to_string()))
+    }
+
+    /// 解析错误: -ERR message\r\n
+    async fn parse_error(&mut self, line: &str) -> Result<RespValue, RespError> {
+        let error = line[1..].to_string();
+        Ok(RespValue::Error(error))
+    }
+
+    /// 解析整数: :123\r\n
+    async fn parse_int(&mut self, line: &str) -> Result<RespValue, RespError> {
+        let num_str = &line[1..];
+        // 检查整数溢出：先尝试解析为 i128 以检测溢出，再转换为 i64
+        let num = num_str
+            .parse::<i128>()
+            .map_err(|_| RespError::InvalidFormat(format!("Invalid integer: {}", num_str)))?;
+
+        // 检查是否在 i64 范围内
+        if num > i64::MAX as i128 || num < i64::MIN as i128 {
+            return Err(RespError::IntegerOverflow);
+        }
+
+        Ok(RespValue::Integer(num as i64))
+    }
+
+    /// 解析批量字符串: $5\r\nhello\r\n
+    async fn parse_bulk(&mut self, line: &str) -> Result<RespValue, RespError> {
+        let len_str = &line[1..];
+        let len = len_str.parse::<i64>().map_err(|_| {
+            RespError::InvalidFormat(format!("Invalid bulk string length: {}", len_str))
         })?;
 
-        match prefix {
-            '+' => {
-                // Simple String: +OK\r\n
-                // 验证不包含未转义的 CRLF
-                let value = &line[1..];
-                if value.contains('\r') || value.contains('\n') {
-                    return Err(RespError::InvalidFormat(
-                        "Simple string cannot contain CR or LF".to_string(),
-                    ));
-                }
-                Ok(RespValue::SimpleString(value.to_string()))
-            }
-            '-' => {
-                // Error: -ERR message\r\n
-                let error = line[1..].to_string();
-                Ok(RespValue::Error(error))
-            }
-            ':' => {
-                // Integer: :123\r\n
-                let num_str = &line[1..];
-                // 检查整数溢出：先尝试解析为 i128 以检测溢出，再转换为 i64
-                let num = num_str.parse::<i128>().map_err(|_| {
-                    RespError::InvalidFormat(format!("Invalid integer: {}", num_str))
-                })?;
-                
-                // 检查是否在 i64 范围内
-                if num > i64::MAX as i128 || num < i64::MIN as i128 {
-                    return Err(RespError::IntegerOverflow);
-                }
-                
-                Ok(RespValue::Integer(num as i64))
-            }
-            '$' => {
-                // Bulk String: $5\r\nhello\r\n
-                let len_str = &line[1..];
-                let len = len_str.parse::<i64>().map_err(|_| {
-                    RespError::InvalidFormat(format!("Invalid bulk string length: {}", len_str))
-                })?;
+        if len == -1 {
+            // Null bulk string
+            Ok(RespValue::Null)
+        } else if len < 0 {
+            Err(RespError::InvalidFormat(format!(
+                "Invalid bulk string length: {}",
+                len
+            )))
+        } else {
+            let len = len as usize;
+            // 检查帧大小（包括数据 + CRLF）
+            self.check_frame_size(len + 2)?;
 
-                if len == -1 {
-                    // Null bulk string
-                    Ok(RespValue::Null)
-                } else if len < 0 {
-                    Err(RespError::InvalidFormat(format!(
-                        "Invalid bulk string length: {}",
-                        len
-                    )))
-                } else {
-                    let len = len as usize;
-                    // 检查帧大小（包括数据 + CRLF）
-                    self.check_frame_size(len + 2)?;
-                    
-                    let mut buffer = vec![0u8; len];
-                    AsyncReadExt::read_exact(&mut self.reader, &mut buffer).await?;
+            let mut buffer = vec![0u8; len];
+            AsyncReadExt::read_exact(&mut self.reader, &mut buffer).await?;
 
-                    // Read \r\n
-                    let mut crlf = [0u8; 2];
-                    AsyncReadExt::read_exact(&mut self.reader, &mut crlf).await?;
-                    if crlf != [b'\r', b'\n'] {
-                        return Err(RespError::InvalidFormat(
-                            "Expected \\r\\n after bulk string".to_string(),
-                        ));
-                    }
-
-                    Ok(RespValue::BulkString(Some(buffer)))
-                }
+            // Read \r\n
+            let mut crlf = [0u8; 2];
+            AsyncReadExt::read_exact(&mut self.reader, &mut crlf).await?;
+            if crlf != [b'\r', b'\n'] {
+                return Err(RespError::InvalidFormat(
+                    "Expected \\r\\n after bulk string".to_string(),
+                ));
             }
-            '*' => {
-                // Array: *2\r\n$3\r\nGET\r\n$3\r\nkey\r\n
-                let count_str = &line[1..];
-                let count = count_str.parse::<i64>().map_err(|_| {
-                    RespError::InvalidFormat(format!("Invalid array length: {}", count_str))
-                })?;
 
-                if count == -1 {
-                    // Null array
-                    Ok(RespValue::Null)
-                } else if count < 0 {
-                    Err(RespError::InvalidFormat(format!("Invalid array length: {}", count)))
-                } else {
-                    let count = count as usize;
-                    // 检查数组大小是否合理（防止恶意客户端发送超大数组）
-                    if count > 1024 * 1024 {
-                        return Err(RespError::InvalidFormat(
-                            format!("Array too large: {} elements", count)
-                        ));
-                    }
-                    
-                    let mut array = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        let parse_fut = async { self.parse().await };
-                        array.push(Box::pin(parse_fut).await?);
-                    }
-                    Ok(RespValue::Array(array))
-                }
+            Ok(RespValue::BulkString(Some(buffer)))
+        }
+    }
+
+    /// 解析数组: *2\r\n$3\r\nGET\r\n$3\r\nkey\r\n
+    async fn parse_array(&mut self, line: &str) -> Result<RespValue, RespError> {
+        let count_str = &line[1..];
+        let count = count_str.parse::<i64>().map_err(|_| {
+            RespError::InvalidFormat(format!("Invalid array length: {}", count_str))
+        })?;
+
+        if count == -1 {
+            // Null array
+            Ok(RespValue::Null)
+        } else if count < 0 {
+            Err(RespError::InvalidFormat(format!(
+                "Invalid array length: {}",
+                count
+            )))
+        } else {
+            let count = count as usize;
+            // 检查数组大小是否合理（防止恶意客户端发送超大数组）
+            if count > 1024 * 1024 {
+                return Err(RespError::InvalidFormat(format!(
+                    "Array too large: {} elements",
+                    count
+                )));
             }
-            _ => Err(RespError::InvalidFormat(format!(
-                "Unknown RESP type: {}",
-                prefix
-            ))),
+
+            let mut array = Vec::with_capacity(count);
+            for _ in 0..count {
+                let parse_fut = Box::pin(async { self.parse().await });
+                array.push(parse_fut.await?);
+            }
+            Ok(RespValue::Array(array))
         }
     }
 }
@@ -212,10 +225,7 @@ mod tests {
         let reader = Builder::new().read(data).build();
         let mut parser = AsyncRespParser::with_max_bytes(reader, 1024);
         let result = parser.parse().await.unwrap();
-        assert_eq!(
-            result,
-            RespValue::BulkString(Some(b"hello".to_vec()))
-        );
+        assert_eq!(result, RespValue::BulkString(Some(b"hello".to_vec())));
     }
 
     #[tokio::test]
