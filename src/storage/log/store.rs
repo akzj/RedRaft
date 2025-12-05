@@ -21,7 +21,7 @@ use crate::{
 
 use super::{
     entry::{EntryMeta, LogEntryRecord},
-    manager::{SegmentManager, SegmentManagerOptions, DiskStats},
+    manager::{DiskStats, SegmentManager, SegmentManagerOptions},
     segment::LogSegment,
 };
 
@@ -37,6 +37,8 @@ pub struct LogEntryStoreInner {
     // current writeable segment
     pub(crate) current_segment: RwLock<LogSegment>,
     pub(crate) cache_table: RwLock<HashMap<RaftId, VecDeque<LogEntry>>>,
+    // Global hard state cache - survives segment rotation
+    pub(crate) hard_states: RwLock<HashMap<RaftId, HardState>>,
 }
 
 #[derive(Clone)]
@@ -228,7 +230,7 @@ impl LogEntryStoreInner {
     fn get_from_cache(&self, from: &RaftId, low: u64, high: u64) -> Option<Vec<LogEntry>> {
         let cache_table = self.cache_table.read();
         let cache = cache_table.get(from)?;
-        
+
         if cache.is_empty() {
             return None;
         }
@@ -240,14 +242,14 @@ impl LogEntryStoreInner {
         if low >= first_cached && high <= last_cached + 1 {
             let start_offset = (low - first_cached) as usize;
             let count = (high - low) as usize;
-            
+
             let entries: Vec<LogEntry> = cache
                 .iter()
                 .skip(start_offset)
                 .take(count)
                 .cloned()
                 .collect();
-            
+
             if entries.len() == count {
                 return Some(entries);
             }
@@ -259,7 +261,7 @@ impl LogEntryStoreInner {
     fn get_term_from_cache(&self, from: &RaftId, idx: u64) -> Option<u64> {
         let cache_table = self.cache_table.read();
         let cache = cache_table.get(from)?;
-        
+
         if cache.is_empty() {
             return None;
         }
@@ -275,7 +277,12 @@ impl LogEntryStoreInner {
     }
 
     /// Get log entries from segment
-    pub(crate) async fn get_log_entries(&self, from: &RaftId, low: u64, high: u64) -> StorageResult<Vec<LogEntry>> {
+    pub(crate) async fn get_log_entries(
+        &self,
+        from: &RaftId,
+        low: u64,
+        high: u64,
+    ) -> StorageResult<Vec<LogEntry>> {
         // Try cache first
         if let Some(entries) = self.get_from_cache(from, low, high) {
             return Ok(entries);
@@ -286,47 +293,50 @@ impl LogEntryStoreInner {
             let segment = self.current_segment.read();
             let file = segment.file.clone();
             let io_semaphore = segment.io_semaphore.clone();
-            
+
             // Get entry metadata for the requested range
             let raft_index = match segment.entry_index.entries.get(from) {
                 Some(idx) if !idx.entries.is_empty() => idx,
                 _ => return Ok(Vec::new()),
             };
-            
+
             // Clamp low and high to valid range
             let low = low.max(raft_index.first_log_index);
             let high = high.min(raft_index.last_log_index + 1);
-            
+
             if low >= high {
                 return Ok(Vec::new());
             }
-            
+
             let count = (high - low) as usize;
             let begin = (low - raft_index.first_log_index) as usize;
             let metas: Vec<EntryMeta> = raft_index.entries[begin..(begin + count)].to_vec();
-            
+
             (file, io_semaphore, metas)
         };
-        
+
         if entry_metas.is_empty() {
             return Ok(Vec::new());
         }
-        
+
         // Now perform async I/O without holding the lock
         let permit = io_semaphore.acquire_owned().await.unwrap();
-        
+
         let entries = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let mut log_entries = Vec::with_capacity(entry_metas.len());
-            
+
             for meta in entry_metas {
                 let mut buf = vec![0u8; meta.size as usize];
                 file.read_exact_at(&mut buf, meta.offset)?;
-                
+
                 match LogEntryRecord::deserialize(&buf) {
                     Ok((record, _)) => log_entries.push(record.entry),
                     Err(e) => {
-                        warn!("Failed to deserialize log entry at index {}: {}", meta.log_index, e);
+                        warn!(
+                            "Failed to deserialize log entry at index {}: {}",
+                            meta.log_index, e
+                        );
                         return Err(e);
                     }
                 }
@@ -336,12 +346,17 @@ impl LogEntryStoreInner {
         .await
         .map_err(|e| StorageError::Io(Arc::new(anyhow::anyhow!("Task join error: {}", e))))?
         .map_err(|e| StorageError::Io(Arc::new(e)))?;
-        
+
         Ok(entries)
     }
 
     /// Get log entry terms from segment
-    pub(crate) async fn get_log_entries_term(&self, from: &RaftId, low: u64, high: u64) -> StorageResult<Vec<(u64, u64)>> {
+    pub(crate) async fn get_log_entries_term(
+        &self,
+        from: &RaftId,
+        low: u64,
+        high: u64,
+    ) -> StorageResult<Vec<(u64, u64)>> {
         let entries = self.get_log_entries(from, low, high).await?;
         Ok(entries.into_iter().map(|e| (e.index, e.term)).collect())
     }
@@ -380,33 +395,36 @@ impl LogEntryStoreInner {
             let segment = self.current_segment.read();
             let file = segment.file.clone();
             let io_semaphore = segment.io_semaphore.clone();
-            
+
             // Get entry metadata for the requested index
             let raft_index = match segment.entry_index.entries.get(from) {
                 Some(idx) if !idx.entries.is_empty() => idx,
                 _ => return Err(StorageError::LogNotFound(idx)),
             };
-            
+
             let meta = match raft_index.get_entry(idx) {
                 Some(m) => m.clone(),
                 None => return Err(StorageError::LogNotFound(idx)),
             };
-            
+
             (file, io_semaphore, meta)
         };
-        
+
         // Now perform async I/O without holding the lock
         let permit = io_semaphore.acquire_owned().await.unwrap();
-        
+
         let term = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let mut buf = vec![0u8; meta.size as usize];
             file.read_exact_at(&mut buf, meta.offset)?;
-            
+
             match LogEntryRecord::deserialize(&buf) {
                 Ok((record, _)) => Ok(record.entry.term),
                 Err(e) => {
-                    warn!("Failed to deserialize log entry at index {}: {}", meta.log_index, e);
+                    warn!(
+                        "Failed to deserialize log entry at index {}: {}",
+                        meta.log_index, e
+                    );
                     Err(e)
                 }
             }
@@ -414,13 +432,14 @@ impl LogEntryStoreInner {
         .await
         .map_err(|e| StorageError::Io(Arc::new(anyhow::anyhow!("Task join error: {}", e))))?
         .map_err(|e| StorageError::Io(Arc::new(e)))?;
-        
+
         Ok(term)
     }
 
     /// Save hard state for a raft node to the log segment.
-    /// Hard state is persisted to disk and cached in memory.
+    /// Hard state is persisted to disk and cached in global memory.
     pub(crate) fn save_hard_state(&self, hard_state: &HardState) -> StorageResult<()> {
+        // Write to segment for persistence
         let mut segment = self.current_segment.write();
         segment.write_hard_state(hard_state).map_err(|e| {
             warn!("Failed to write hard state to segment: {}", e);
@@ -430,14 +449,43 @@ impl LogEntryStoreInner {
             warn!("Failed to sync hard state: {}", e);
             StorageError::Io(Arc::new(e))
         })?;
+        drop(segment);
+
+        // Update global cache (survives segment rotation)
+        let mut hard_states = self.hard_states.write();
+        hard_states.insert(hard_state.raft_id.clone(), hard_state.clone());
+
         Ok(())
     }
 
-    /// Load hard state for a raft node
+    /// Load hard state for a raft node from global cache
     pub(crate) fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<HardState>> {
-        let segment = self.current_segment.read();
-        let hard_states = segment.hard_states.read();
+        // Read from global cache (not from segment)
+        let hard_states = self.hard_states.read();
         Ok(hard_states.get(from).cloned())
+    }
+
+    /// Initialize global hard state cache from segments (called during startup/replay)
+    #[allow(dead_code)]
+    pub(crate) fn init_hard_states_from_segments(&self) {
+        // First from read-only segments (older to newer)
+        let segments = self.segments.read();
+        for segment in segments.iter() {
+            let segment_states = segment.hard_states.read();
+            let mut global_states = self.hard_states.write();
+            for (raft_id, hard_state) in segment_states.iter() {
+                global_states.insert(raft_id.clone(), hard_state.clone());
+            }
+        }
+        drop(segments);
+
+        // Then from current segment (newest)
+        let current = self.current_segment.read();
+        let segment_states = current.hard_states.read();
+        let mut global_states = self.hard_states.write();
+        for (raft_id, hard_state) in segment_states.iter() {
+            global_states.insert(raft_id.clone(), hard_state.clone());
+        }
     }
 }
 
@@ -446,6 +494,7 @@ pub enum LogEntryOp {
     Append(Vec<LogEntry>),
     TruncateLogPrefix(u64),
     TruncateLogSuffix(u64),
+    SaveHardState(HardState),
 }
 
 pub struct LogEntryOpRequest {
@@ -456,16 +505,16 @@ pub struct LogEntryOpRequest {
 
 impl LogEntryStore {
     /// Start the log entry store with proper handling of all LogEntryOp types.
-    /// 
+    ///
     /// Operations are processed in order to maintain consistency:
     /// - Consecutive Append operations are batched together for efficiency
     /// - TruncateLogPrefix and TruncateLogSuffix are processed individually
-    /// 
+    ///
     /// All operations are append-only to the log segment:
     /// - Append: writes log entries to segment and updates index
     /// - TruncateLogPrefix: writes a truncate record and updates index to mark entries as deleted
     /// - TruncateLogSuffix: writes a truncate record and updates index to mark entries as deleted
-    /// 
+    ///
     /// On restart, the index is replayed from the segment to reconstruct valid entries.
     pub fn start(&self, mut receiver: mpsc::UnboundedReceiver<LogEntryOpRequest>) {
         let self_clone = self.clone();
@@ -482,7 +531,7 @@ impl LogEntryStore {
 
                 // Store results for each request
                 let mut results: Vec<StorageResult<()>> = Vec::with_capacity(buf.len());
-                
+
                 // Process operations maintaining order
                 // Group consecutive appends for batching to improve I/O efficiency
                 let mut i = 0;
@@ -491,7 +540,9 @@ impl LogEntryStore {
                         LogEntryOp::Append(_) => {
                             // Find all consecutive append operations
                             let start = i;
-                            while i < buf.len() && matches!(&buf[i].log_entry_op, LogEntryOp::Append(_)) {
+                            while i < buf.len()
+                                && matches!(&buf[i].log_entry_op, LogEntryOp::Append(_))
+                            {
                                 i += 1;
                             }
 
@@ -534,6 +585,12 @@ impl LogEntryStore {
                             results.push(result);
                             i += 1;
                         }
+                        LogEntryOp::SaveHardState(hard_state) => {
+                            // Write hard state to segment and update global cache
+                            let result = self_clone.inner.save_hard_state(hard_state);
+                            results.push(result);
+                            i += 1;
+                        }
                     }
                 }
 
@@ -549,11 +606,27 @@ impl LogEntryStore {
 #[async_trait::async_trait]
 impl HardStateStorage for LogEntryStore {
     async fn save_hard_state(&self, _from: &RaftId, hard_state: HardState) -> StorageResult<()> {
-        // Note: `from` is ignored since HardState contains raft_id
-        self.inner.save_hard_state(&hard_state)
+        // Send through the operation channel for proper ordering
+        let (tx, rx) = sync::oneshot::channel();
+        let request = LogEntryOpRequest {
+            from: hard_state.raft_id.clone(),
+            log_entry_op: LogEntryOp::SaveHardState(hard_state),
+            response_tx: tx,
+        };
+
+        self.op_sender.send(request).map_err(|e| {
+            warn!("Failed to send save hard state request: {}", e);
+            StorageError::ChannelClosed
+        })?;
+
+        rx.await.map_err(|e| {
+            warn!("Failed to receive save hard state response: {}", e);
+            StorageError::ChannelClosed
+        })?
     }
 
     async fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<HardState>> {
+        // Read from global cache (doesn't need to go through channel)
         self.inner.load_hard_state(from)
     }
 }
@@ -653,19 +726,21 @@ impl LogEntryStorage for LogEntryStore {
 // =============================================================================
 
 /// Log entry store with automatic segment management.
-/// 
+///
 /// This store provides:
 /// - Automatic segment rotation when max size is reached
 /// - Cross-segment read operations
 /// - Obsolete segment cleanup after truncatePrefix
 /// - Disk space monitoring
-/// 
+///
 /// Use this for production deployments where disk management is important.
 #[derive(Clone)]
 pub struct ManagedLogEntryStore {
     options: LogEntryStoreOptions,
     manager: Arc<SegmentManager>,
     cache_table: Arc<RwLock<HashMap<RaftId, VecDeque<LogEntry>>>>,
+    // Global hard state cache - survives segment rotation
+    hard_states: Arc<RwLock<HashMap<RaftId, HardState>>>,
     op_sender: mpsc::UnboundedSender<LogEntryOpRequest>,
 }
 
@@ -704,7 +779,9 @@ impl Default for ManagedLogEntryStoreOptions {
 
 impl ManagedLogEntryStore {
     /// Create a new managed log entry store
-    pub fn new(options: ManagedLogEntryStoreOptions) -> Result<(Self, mpsc::UnboundedReceiver<LogEntryOpRequest>), StorageError> {
+    pub fn new(
+        options: ManagedLogEntryStoreOptions,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<LogEntryOpRequest>), StorageError> {
         let manager_options = SegmentManagerOptions {
             dir: options.dir.clone(),
             max_segment_size: options.max_segment_size,
@@ -713,11 +790,17 @@ impl ManagedLogEntryStore {
             min_free_disk_space: options.min_free_disk_space,
         };
 
-        let manager = SegmentManager::new(manager_options)
-            .map_err(|e| StorageError::Io(Arc::new(e)))?;
+        let manager =
+            SegmentManager::new(manager_options).map_err(|e| StorageError::Io(Arc::new(e)))?;
+
+        // Initialize global hard state cache from manager's segments
+        let mut initial_hard_states = HashMap::new();
+        if let Some(hs) = manager.get_all_hard_states() {
+            initial_hard_states = hs;
+        }
 
         let (tx, rx) = mpsc::unbounded_channel();
-        
+
         let store_options = LogEntryStoreOptions {
             memtable_memory_size: 64 * 1024 * 1024,
             batch_size: options.batch_size,
@@ -733,6 +816,7 @@ impl ManagedLogEntryStore {
                 options: store_options,
                 manager: Arc::new(manager),
                 cache_table: Arc::new(RwLock::new(HashMap::new())),
+                hard_states: Arc::new(RwLock::new(initial_hard_states)),
                 op_sender: tx,
             },
             rx,
@@ -743,6 +827,7 @@ impl ManagedLogEntryStore {
     pub fn start(&self, mut receiver: mpsc::UnboundedReceiver<LogEntryOpRequest>) {
         let manager = self.manager.clone();
         let cache_table = self.cache_table.clone();
+        let hard_states = self.hard_states.clone();
         let cache_size = self.options.cache_entries_size;
         let batch_size = self.options.batch_size;
 
@@ -763,7 +848,9 @@ impl ManagedLogEntryStore {
                         LogEntryOp::Append(_) => {
                             // Batch consecutive appends
                             let start = i;
-                            while i < buf.len() && matches!(&buf[i].log_entry_op, LogEntryOp::Append(_)) {
+                            while i < buf.len()
+                                && matches!(&buf[i].log_entry_op, LogEntryOp::Append(_))
+                            {
                                 i += 1;
                             }
 
@@ -772,7 +859,9 @@ impl ManagedLogEntryStore {
                             for req in &buf[start..i] {
                                 if let LogEntryOp::Append(entries) = &req.log_entry_op {
                                     // Write to manager (with rotation check)
-                                    if let Err(e) = manager.write_log_entries(&req.from, entries.clone()) {
+                                    if let Err(e) =
+                                        manager.write_log_entries(&req.from, entries.clone())
+                                    {
                                         warn!("Failed to append log entries: {}", e);
                                         batch_result = Err(StorageError::Io(Arc::new(e)));
                                         break;
@@ -834,6 +923,21 @@ impl ManagedLogEntryStore {
                                         }
                                     }
                                 }
+                            }
+
+                            results.push(result);
+                            i += 1;
+                        }
+                        LogEntryOp::SaveHardState(hard_state) => {
+                            // Write to segment for persistence
+                            let result = manager
+                                .save_hard_state(hard_state)
+                                .map_err(|e| StorageError::Io(Arc::new(e)));
+
+                            // Update global cache on success
+                            if result.is_ok() {
+                                let mut hs = hard_states.write();
+                                hs.insert(hard_state.raft_id.clone(), hard_state.clone());
                             }
 
                             results.push(result);
@@ -937,14 +1041,29 @@ impl ManagedLogEntryStore {
 #[async_trait::async_trait]
 impl HardStateStorage for ManagedLogEntryStore {
     async fn save_hard_state(&self, _from: &RaftId, hard_state: HardState) -> StorageResult<()> {
-        // Note: `from` is ignored since HardState contains raft_id
-        self.manager
-            .save_hard_state(&hard_state)
-            .map_err(|e| StorageError::Io(Arc::new(e)))
+        // Send through the operation channel for proper ordering
+        let (tx, rx) = sync::oneshot::channel();
+        let request = LogEntryOpRequest {
+            from: hard_state.raft_id.clone(),
+            log_entry_op: LogEntryOp::SaveHardState(hard_state),
+            response_tx: tx,
+        };
+
+        self.op_sender.send(request).map_err(|e| {
+            warn!("Failed to send save hard state request: {}", e);
+            StorageError::ChannelClosed
+        })?;
+
+        rx.await.map_err(|e| {
+            warn!("Failed to receive save hard state response: {}", e);
+            StorageError::ChannelClosed
+        })?
     }
 
     async fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<HardState>> {
-        Ok(self.manager.load_hard_state(from))
+        // Read from global cache (doesn't need to go through channel)
+        let hard_states = self.hard_states.read();
+        Ok(hard_states.get(from).cloned())
     }
 }
 
@@ -1061,7 +1180,8 @@ impl LogEntryStorage for ManagedLogEntryStore {
         }
 
         // Read from manager
-        let entry = self.manager
+        let entry = self
+            .manager
             .read_entry(from, idx)
             .await
             .map_err(|e| StorageError::Io(Arc::new(e)))?;
@@ -1069,4 +1189,3 @@ impl LogEntryStorage for ManagedLogEntryStore {
         Ok(entry.term)
     }
 }
-

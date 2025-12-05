@@ -175,6 +175,10 @@ impl HardStateMap {
     pub fn clear(&mut self) {
         self.0.clear()
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&RaftId, &HardState)> {
+        self.0.iter()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]

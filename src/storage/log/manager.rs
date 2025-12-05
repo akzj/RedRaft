@@ -769,6 +769,35 @@ impl SegmentManager {
         None
     }
 
+    /// Get all hard states from all segments (for initializing global cache)
+    /// Newer hard states overwrite older ones.
+    pub fn get_all_hard_states(&self) -> Option<HashMap<RaftId, HardState>> {
+        let mut all_states = HashMap::new();
+
+        // First from sealed segments (oldest to newest)
+        let sealed = self.sealed_segments.read();
+        for (_, segment) in sealed.iter() {
+            let hard_states = segment.hard_states.read();
+            for (raft_id, hs) in hard_states.iter() {
+                all_states.insert(raft_id.clone(), hs.clone());
+            }
+        }
+        drop(sealed);
+
+        // Then from active segment (newest)
+        let active = self.active_segment.read();
+        let hard_states = active.hard_states.read();
+        for (raft_id, hs) in hard_states.iter() {
+            all_states.insert(raft_id.clone(), hs.clone());
+        }
+
+        if all_states.is_empty() {
+            None
+        } else {
+            Some(all_states)
+        }
+    }
+
     /// Sync all segments to disk
     pub fn sync_all(&self) -> Result<()> {
         self.active_segment.read().sync_data()?;

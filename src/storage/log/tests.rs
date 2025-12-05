@@ -740,6 +740,7 @@ mod store_tests {
             segments: RwLock::new(Vec::new()),
             current_segment: RwLock::new(segment),
             cache_table: RwLock::new(HashMap::new()),
+            hard_states: RwLock::new(HashMap::new()),
         };
 
         let options = LogEntryStoreOptions {
