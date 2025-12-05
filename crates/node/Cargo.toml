@@ -18,6 +18,8 @@ path = "src/main.rs"
 raft = { path = "../raft" }
 # Redis protocol support
 redis-protocol = { path = "../redis" }
+# Redis store state machine
+redisstore = { path = "../redisstore" }
 
 # Workspace dependencies
 tokio = { workspace = true }

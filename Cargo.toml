@@ -3,6 +3,7 @@ members = [
     "crates/raft",
     "crates/node",
     "crates/redis",
+    "crates/redisstore",
 ]
 resolver = "2"
 

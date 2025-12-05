@@ -1,0 +1,13 @@
+[package]
+name = "redisstore"
+version = "0.1.0"
+edition = "2021"
+description = "Redis-compatible key-value store state machine for Raft"
+license = "MIT"
+
+[dependencies]
+# Workspace dependencies
+parking_lot = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+bincode = { workspace = true }
+tracing = { workspace = true }

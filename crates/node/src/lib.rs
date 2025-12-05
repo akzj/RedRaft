@@ -9,3 +9,4 @@ pub mod state_machine;
 
 pub use node::RedRaftNode;
 pub use server::RedisServer;
+pub use state_machine::KVStateMachine;

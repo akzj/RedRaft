@@ -1,12 +1,12 @@
-# RaftKV - 分布式键值存储系统设计文档
+# RedRaft - 分布式键值存储系统设计文档
 
 ## 项目概述
 
-**RaftKV** 是一个兼容 Redis 协议的分布式键值存储系统，基于 Raft 共识算法实现，提供高可用性、高性能和横向扩展能力。
+**RedRaft** 是一个兼容 Redis 协议的分布式键值存储系统，基于 Raft 共识算法实现，提供高可用性、高性能和横向扩展能力。
 
 ### 核心特性：Multi-Raft 架构
 
-**RaftKV 的核心创新是 Multi-Raft 架构**，解决了单一 Raft 节点串行提交、并发能力低的缺点：
+**RedRaft 的核心创新是 Multi-Raft 架构**，解决了单一 Raft 节点串行提交、并发能力低的缺点：
 
 - ✅ **多 Raft 实例并发**：单个节点支持多个 Raft 组（shard），不同组可以并发提交
 - ✅ **数据分片**：通过键值路由到不同的 Raft 组，实现数据分片和负载均衡
@@ -27,7 +27,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                          RaftKV Client                                   │
+│                          RedRaft Client                                   │
 │              (PUT/GET/DELETE/SCAN operations)                            │
 └──────────────────────┬──────────────────────────────────────────────────┘
                        │ gRPC/HTTP
@@ -78,7 +78,7 @@
 
 ### 元数据管理集群架构
 
-元数据管理集群是一个独立的 Raft 集群，用于管理整个 RaftKV 集群的元数据信息。它确保元数据的一致性和高可用性。
+元数据管理集群是一个独立的 Raft 集群，用于管理整个 RedRaft 集群的元数据信息。它确保元数据的一致性和高可用性。
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -127,16 +127,19 @@
 #### 元数据管理集群的核心职责
 
 1. **Shard 配置管理**
+
    - 存储每个 Shard 的配置信息（Shard ID、节点列表、状态等）
    - 管理 Shard 的创建、删除、迁移、合并、分裂操作
    - 维护 Shard 的版本号和变更历史
 
 2. **节点信息管理**
+
    - 存储集群中所有节点的信息（节点 ID、地址、状态、负载等）
    - 管理节点的加入、离开、故障恢复
    - 维护节点与 Shard 的映射关系
 
 3. **路由表管理**
+
    - 存储键值到 Shard 的映射规则
    - 管理路由表的版本和变更
    - 支持路由表的动态更新和通知
@@ -193,16 +196,19 @@ pub struct ClusterState {
 #### 元数据管理集群的特点
 
 1. **独立部署**
+
    - 元数据集群与数据集群物理分离（可选）
    - 元数据集群节点数量较少（通常 3-5 个节点）
    - 元数据集群的负载相对较低
 
 2. **高可用性**
+
    - 使用 Raft 共识算法保证一致性
    - 支持节点故障自动恢复
    - 元数据变更需要多数派确认
 
 3. **实时同步**
+
    - 数据节点通过 Watch 机制监听元数据变更
    - 元数据变更后自动通知所有相关数据节点
    - 支持增量更新和全量同步
@@ -246,11 +252,13 @@ async fn watch_cluster_state() -> Result<Stream<ClusterState>>;
 #### 数据节点与元数据集群的交互
 
 1. **启动时**
+
    - 数据节点启动时从元数据集群获取当前配置
    - 注册节点信息到元数据集群
    - 订阅元数据变更通知
 
 2. **运行时**
+
    - 定期向元数据集群发送心跳
    - 监听元数据变更（Shard 配置、路由表等）
    - 根据元数据变更动态调整本地 Shard 配置
@@ -300,25 +308,29 @@ Concurrent processing (other shards not blocked)
 
 ### 组件说明
 
-1. **RaftKV Server**
-   - 每个节点运行一个 RaftKV 服务器
+1. **RedRaft Server**
+
+   - 每个节点运行一个 RedRaft 服务器
    - 处理客户端请求（PUT/GET/DELETE/SCAN）
    - **键值路由**：根据键的哈希值路由到对应的 Raft 组
    - 提供 gRPC 和 HTTP 接口
 
 2. **MultiRaftDriver**
+
    - 使用 `raft-lite` 的 `MultiRaftDriver`
    - **管理多个 Raft 组**：每个节点可以运行多个 Raft 实例
    - **并发处理**：不同 Raft 组的事件可以并发处理
    - **事件调度**：高效的事件分发和定时器管理
 
 3. **Raft Group (Shard)**
+
    - 每个 Raft 组是一个独立的共识单元
    - 使用 `raft-lite` 的 `RaftState`
    - 处理选举、日志复制、配置变更
    - 维护该组的数据一致性
 
 4. **FileStorage**
+
    - 使用 `raft-lite` 的 `FileStorage`
    - **多组共享**：所有 Raft 组共享同一个存储实例
    - **数据隔离**：通过 `RaftId` (group_id, node_id) 区分不同组
@@ -326,12 +338,14 @@ Concurrent processing (other shards not blocked)
    - 支持数据恢复
 
 5. **KV State Machine**
+
    - 每个 Raft 组有独立的状态机实例
    - 将 Raft 日志应用到 KV 存储
    - 维护该组的键值对（内存 HashMap）
    - 支持快照和恢复
 
 6. **Shard Manager**
+
    - **Raft 组生命周期管理**：创建、删除、迁移、合并、分裂
    - **路由表管理**：维护键值到 Raft 组的映射
    - **负载均衡**：监控各组的负载，动态调整
@@ -397,10 +411,10 @@ pub struct ShardRouter {
     // 键值到 Raft 组的映射
     // 通过 hash(key) % shard_count 计算
     shard_count: usize,
-    
+
     // 活跃的 Raft 组列表
     active_shards: HashSet<String>,  // {"shard_0", "shard_1", ...}
-    
+
     // Raft 组到节点的映射（用于迁移）
     shard_locations: HashMap<String, Vec<String>>,  // shard_id -> [node1, node2, ...]
 }
@@ -411,46 +425,46 @@ pub struct ShardRouter {
 ### gRPC API
 
 ```protobuf
-service RaftKVService {
+service RedRaftService {
     // ========== KV 操作 ==========
     // 写入键值对（自动路由到对应的 Raft 组）
     rpc Put(PutRequest) returns (PutResponse);
-    
+
     // 读取键值对（自动路由到对应的 Raft 组）
     rpc Get(GetRequest) returns (GetResponse);
-    
+
     // 删除键值对（自动路由到对应的 Raft 组）
     rpc Delete(DeleteRequest) returns (DeleteResponse);
-    
+
     // 范围扫描（可能跨多个 Raft 组）
     rpc Scan(ScanRequest) returns (ScanResponse);
-    
+
     // ========== 集群管理 ==========
     // 获取集群状态
     rpc GetClusterStatus(Empty) returns (ClusterStatus);
-    
+
     // 获取节点信息
     rpc GetNodeInfo(Empty) returns (NodeInfo);
-    
+
     // ========== Multi-Raft 管理 ==========
     // 创建新的 Raft 组（Shard）
     rpc CreateShard(CreateShardRequest) returns (CreateShardResponse);
-    
+
     // 删除 Raft 组
     rpc DeleteShard(DeleteShardRequest) returns (DeleteShardResponse);
-    
+
     // 迁移 Raft 组（从一个节点迁移到另一个节点）
     rpc MigrateShard(MigrateShardRequest) returns (MigrateShardResponse);
-    
+
     // 合并多个 Raft 组
     rpc MergeShards(MergeShardsRequest) returns (MergeShardsResponse);
-    
+
     // 分裂 Raft 组（一个大组分裂成多个小组）
     rpc SplitShard(SplitShardRequest) returns (SplitShardResponse);
-    
+
     // 列出所有 Raft 组
     rpc ListShards(Empty) returns (ListShardsResponse);
-    
+
     // 获取 Raft 组状态
     rpc GetShardStatus(GetShardStatusRequest) returns (GetShardStatusResponse);
 }
@@ -531,10 +545,12 @@ Merge results → Response
 ### Multi-Raft 并发优势
 
 **单 Raft 组**：
+
 - 写吞吐：~10,000 ops/s（串行提交）
 - 读吞吐：~50,000 ops/s
 
 **Multi-Raft（10 个组）**：
+
 - 写吞吐：~100,000 ops/s（10 组并发）
 - 读吞吐：~500,000 ops/s（10 组并发）
 
@@ -558,12 +574,14 @@ Merge results → Response
 ### 核心功能
 
 1. **基本操作**
+
    - ✅ PUT：写入键值对（自动路由到对应 Raft 组）
    - ✅ GET：读取键值对（自动路由到对应 Raft 组）
    - ✅ DELETE：删除键值对（自动路由到对应 Raft 组）
    - ✅ SCAN：范围扫描（跨多个 Raft 组，并发查询）
 
 2. **Multi-Raft 核心功能** ⭐
+
    - ✅ **键值路由**：根据键的哈希值自动路由到对应的 Raft 组
    - ✅ **并发处理**：多个 Raft 组并发处理请求，互不阻塞
    - ✅ **动态创建**：运行时创建新的 Raft 组
@@ -573,6 +591,7 @@ Merge results → Response
    - ✅ **路由表管理**：动态更新键值到 Raft 组的映射
 
 3. **集群管理**
+
    - ✅ 节点启动和加入集群
    - ✅ 节点退出和移除
    - ✅ 集群配置变更（动态添加/删除节点）
@@ -580,6 +599,7 @@ Merge results → Response
    - ✅ **Raft 组状态查询**：查询每个 Raft 组的状态
 
 4. **故障处理**
+
    - ✅ Leader 故障转移（每个 Raft 组独立）
    - ✅ 节点重启数据恢复（恢复所有 Raft 组）
    - ✅ 网络分区处理（每个 Raft 组独立处理）
@@ -593,12 +613,14 @@ Merge results → Response
 ### 测试功能
 
 5. **功能测试**
+
    - ✅ 基本操作正确性测试
    - ✅ 并发操作测试
    - ✅ 故障场景测试
    - ✅ 数据一致性验证
 
 6. **性能测试**
+
    - ✅ 延迟测试（P50/P95/P99）
    - ✅ 吞吐量测试
    - ✅ 压力测试工具
@@ -614,6 +636,7 @@ Merge results → Response
 ### 优化功能
 
 8. **性能优化**
+
    - ✅ 批量写入优化
    - ✅ 读操作缓存（可选）
    - ✅ 连接池管理
@@ -628,6 +651,7 @@ Merge results → Response
 ## 实现计划
 
 ### Phase 1: 基础实现
+
 - [ ] 项目结构和依赖配置
 - [ ] 基本 KV 状态机实现
 - [ ] gRPC/HTTP 服务器
@@ -636,6 +660,7 @@ Merge results → Response
 - [ ] **键值路由实现**（哈希路由到 Raft 组）
 
 ### Phase 2: Multi-Raft 核心功能 ⭐
+
 - [ ] **Shard Router**：键值到 Raft 组的路由表
 - [ ] **动态创建 Raft 组**：运行时创建新的 shard
 - [ ] **Raft 组迁移**：
@@ -652,6 +677,7 @@ Merge results → Response
   - [ ] 路由表更新
 
 ### Phase 3: 集群功能
+
 - [ ] 多节点集群支持
 - [ ] 配置变更功能（每个 Raft 组独立）
 - [ ] 节点加入/退出
@@ -659,6 +685,7 @@ Merge results → Response
 - [ ] **Raft 组状态查询**
 
 ### Phase 4: 测试工具
+
 - [ ] 功能测试套件
 - [ ] **Multi-Raft 并发测试**
 - [ ] **迁移/合并/分裂测试**
@@ -667,6 +694,7 @@ Merge results → Response
 - [ ] 一致性验证工具
 
 ### Phase 5: 监控和优化
+
 - [ ] Metrics 导出（每个 Raft 组独立指标）
 - [ ] 性能分析工具
 - [ ] **负载均衡**：监控各组负载，自动迁移
@@ -711,16 +739,19 @@ examples/raft-kv/
 ## 使用场景
 
 1. **功能验证**
+
    ```bash
    cargo test --example raft-kv
    ```
 
 2. **性能测试**
+
    ```bash
    cargo bench --example raft-kv
    ```
 
 3. **压测**
+
    ```bash
    cargo run --example raft-kv --release -- --benchmark
    ```
@@ -740,4 +771,3 @@ examples/raft-kv/
 - [ ] 数据分片
 - [ ] 多数据中心支持
 - [ ] 备份和恢复工具
-
