@@ -14,20 +14,17 @@ use std::{
     time::SystemTime,
 };
 
+use anyhow::{Result, anyhow};
 use parking_lot::RwLock;
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
-use anyhow::{Result, anyhow};
 
 use crate::{
     RaftId,
     message::{HardState, HardStateMap, LogEntry},
 };
 
-use super::{
-    entry::Index,
-    segment::LogSegment,
-};
+use super::{entry::Index, segment::LogSegment};
 
 /// Default maximum segment size (64MB)
 pub const DEFAULT_MAX_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
@@ -217,7 +214,10 @@ impl SegmentManager {
         }
 
         // Load sealed segments (all but the last one)
-        for (id, path) in segment_files.iter().take(segment_files.len().saturating_sub(1)) {
+        for (id, path) in segment_files
+            .iter()
+            .take(segment_files.len().saturating_sub(1))
+        {
             match Self::load_segment(path.clone(), *id, io_semaphore.clone()) {
                 Ok((segment, mut meta)) => {
                     meta.sealed = true;
@@ -240,7 +240,10 @@ impl SegmentManager {
                     return Ok((segment, meta, sealed_segments, next_id, total_size));
                 }
                 Err(e) => {
-                    warn!("Failed to load active segment {:?}: {}, creating new", path, e);
+                    warn!(
+                        "Failed to load active segment {:?}: {}, creating new",
+                        path, e
+                    );
                 }
             }
         }
@@ -256,7 +259,10 @@ impl SegmentManager {
         segment_id: u64,
         io_semaphore: Arc<Semaphore>,
     ) -> Result<(LogSegment, SegmentMeta)> {
-        let file_name = format!("{}{:010}{}", SEGMENT_FILE_PREFIX, segment_id, SEGMENT_FILE_EXT);
+        let file_name = format!(
+            "{}{:010}{}",
+            SEGMENT_FILE_PREFIX, segment_id, SEGMENT_FILE_EXT
+        );
         let file_path = options.dir.join(&file_name);
 
         let file = OpenOptions::new()
@@ -284,7 +290,10 @@ impl SegmentManager {
             sealed: false,
         };
 
-        info!("Created new segment: id={}, path={:?}", segment_id, meta.file_path);
+        info!(
+            "Created new segment: id={}, path={:?}",
+            segment_id, meta.file_path
+        );
 
         Ok((segment, meta))
     }
@@ -295,10 +304,7 @@ impl SegmentManager {
         segment_id: u64,
         io_semaphore: Arc<Semaphore>,
     ) -> Result<(LogSegment, SegmentMeta)> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&file_path)?;
+        let file = OpenOptions::new().read(true).write(true).open(&file_path)?;
 
         let file_size = file.metadata()?.len();
         let file = Arc::new(file);
@@ -367,7 +373,7 @@ impl SegmentManager {
     }
 
     /// Force rotation to a new segment.
-    /// 
+    ///
     /// IMPORTANT: All hard states are written to the new segment before rotation
     /// to ensure they survive segment cleanup. This allows old segments to be
     /// safely deleted without losing hard state data.
@@ -428,7 +434,11 @@ impl SegmentManager {
             sealed.push((old_segment.0, Arc::new(old_segment.1)));
         }
 
-        info!("Rotated to new segment: id={}, hard_states_migrated={}", next_id, all_hard_states.len());
+        info!(
+            "Rotated to new segment: id={}, hard_states_migrated={}",
+            next_id,
+            all_hard_states.len()
+        );
 
         // Now it's safe to cleanup obsolete segments since hard states have been migrated
         if let Err(e) = self.cleanup_obsolete_segments() {
@@ -601,7 +611,11 @@ impl SegmentManager {
             return segment.read_entry(from, log_index).await;
         }
 
-        Err(anyhow!("Log entry not found: raft={:?}, index={}", from, log_index))
+        Err(anyhow!(
+            "Log entry not found: raft={:?}, index={}",
+            from,
+            log_index
+        ))
     }
 
     /// Read log entries from all segments
@@ -655,8 +669,11 @@ impl SegmentManager {
                     hard_states: RwLock::new(segment.hard_states.read().clone()),
                 })
             };
-            
-            if let Some(entries) = active_segment_arc.get_log_entries(from, remaining_low, high).await? {
+
+            if let Some(entries) = active_segment_arc
+                .get_log_entries(from, remaining_low, high)
+                .await?
+            {
                 all_entries.extend(entries);
             }
         }
@@ -720,7 +737,10 @@ impl SegmentManager {
 
                 // Delete the file
                 if let Err(e) = fs::remove_file(&meta.file_path) {
-                    warn!("Failed to delete obsolete segment {:?}: {}", meta.file_path, e);
+                    warn!(
+                        "Failed to delete obsolete segment {:?}: {}",
+                        meta.file_path, e
+                    );
                 } else {
                     info!(
                         "Deleted obsolete segment: id={}, freed={}B",
@@ -791,11 +811,11 @@ impl SegmentManager {
     pub fn save_hard_state(&self, hard_state: &HardState) -> Result<()> {
         let mut segment = self.active_segment.write();
         segment.write_hard_state(hard_state)?;
-        
+
         if self.options.sync_on_write {
             segment.sync_data()?;
         }
-        
+
         Ok(())
     }
 
@@ -1072,7 +1092,7 @@ mod tests {
                 dir: temp_dir.path().to_path_buf(),
                 max_segment_size: 1024,
                 max_io_threads: 2,
-                sync_on_write: true,  // Ensure data is synced to disk
+                sync_on_write: true, // Ensure data is synced to disk
                 min_free_disk_space: 0,
             };
             let manager = SegmentManager::new(options).unwrap();
@@ -1098,4 +1118,3 @@ mod tests {
         }
     }
 }
-
