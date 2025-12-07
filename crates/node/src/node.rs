@@ -288,13 +288,19 @@ impl RedRaftNode {
         let key = cmd.get_key();
         
         // 确定 shard
-        let shard_id = match key {
-            Some(k) => self.router.route_key(k),
+        let (shard_id, key_bytes) = match key {
+            Some(k) => (self.router.route_key(k), k),
             None => {
                 // 无 key 命令（如 PING, DBSIZE）在本地执行
                 return self.handle_global_read(cmd);
             }
         };
+        
+        // 检查分裂状态 - 如果需要 MOVED 则返回重定向
+        if let Some((_target_shard, target_addr)) = self.router.should_move_for_split(key_bytes, &shard_id) {
+            let slot = crate::router::ShardRouter::slot_for_key(key_bytes);
+            return Err(format!("MOVED {} {}", slot, target_addr));
+        }
         
         // 获取 Raft 组（必须已存在，由 Pilot 创建）
         let raft_id = self.get_raft_group(&shard_id)
@@ -394,6 +400,18 @@ impl RedRaftNode {
         
         // 确定 shard
         let shard_id = self.router.route_key(key);
+        
+        // 检查分裂状态 - 如果需要 MOVED 则返回重定向
+        if let Some((_target_shard, target_addr)) = self.router.should_move_for_split(key, &shard_id) {
+            let slot = crate::router::ShardRouter::slot_for_key(key);
+            // 返回 MOVED 错误，格式：MOVED <slot> <target_addr>
+            return Err(format!("MOVED {} {}", slot, target_addr));
+        }
+        
+        // 检查是否在缓冲阶段 - 如果是则返回 TRYAGAIN
+        if self.router.should_buffer_for_split(key, &shard_id) {
+            return Err("TRYAGAIN Split in progress, please retry".to_string());
+        }
         
         // 获取 Raft 组（必须已存在，由 Pilot 创建）
         let raft_id = self.get_raft_group(&shard_id)

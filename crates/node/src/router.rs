@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, info};
 
 use raft::RaftId;
-use crate::pilot_client::RoutingTable;
+use crate::pilot_client::{RoutingTable, ShardSplitInfo};
 
 /// 槽位总数（与 Pilot 一致）
 pub const TOTAL_SLOTS: u32 = 16384;
@@ -35,6 +35,8 @@ pub struct ShardRouter {
     routing_version: Arc<RwLock<u64>>,
     /// 是否使用 Pilot 路由
     use_pilot_routing: Arc<RwLock<bool>>,
+    /// 正在分裂的分片 (source_shard_id -> SplitInfo)
+    splitting_shards: Arc<RwLock<HashMap<String, ShardSplitInfo>>>,
 }
 
 impl ShardRouter {
@@ -53,6 +55,7 @@ impl ShardRouter {
             slots: Arc::new(RwLock::new(vec![None; TOTAL_SLOTS as usize])),
             routing_version: Arc::new(RwLock::new(0)),
             use_pilot_routing: Arc::new(RwLock::new(false)),
+            splitting_shards: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -151,6 +154,19 @@ impl ShardRouter {
             *node_addrs = routing_table.node_addrs.clone();
         }
 
+        // 更新分裂状态
+        {
+            let mut splitting = self.splitting_shards.write();
+            *splitting = routing_table.splitting_shards.clone();
+            
+            if !splitting.is_empty() {
+                info!(
+                    "Router: {} shards are splitting",
+                    splitting.len()
+                );
+            }
+        }
+
         // 更新版本并启用 Pilot 路由
         *self.routing_version.write() = new_version;
         *self.use_pilot_routing.write() = true;
@@ -226,6 +242,55 @@ impl ShardRouter {
     /// 获取所有节点地址
     pub fn get_all_node_addrs(&self) -> HashMap<String, String> {
         self.node_addrs.read().clone()
+    }
+
+    /// 检查分片是否正在分裂
+    pub fn is_shard_splitting(&self, shard_id: &str) -> bool {
+        self.splitting_shards.read().contains_key(shard_id)
+    }
+
+    /// 获取分片的分裂信息
+    pub fn get_split_info(&self, shard_id: &str) -> Option<ShardSplitInfo> {
+        self.splitting_shards.read().get(shard_id).cloned()
+    }
+
+    /// 检查 key 是否应该 MOVED 到新分片（在分裂完成后）
+    /// 
+    /// 返回 Some((target_shard, target_addr)) 如果应该重定向
+    pub fn should_move_for_split(&self, key: &[u8], shard_id: &str) -> Option<(String, String)> {
+        let splitting = self.splitting_shards.read();
+        let split_info = splitting.get(shard_id)?;
+        
+        let slot = Self::slot_for_key(key);
+        
+        // 如果槽位 >= split_slot，且分裂状态是 switching 或 completed
+        // 则应该转移到目标分片
+        if slot >= split_info.split_slot 
+            && (split_info.status == "switching" || split_info.status == "completed") 
+        {
+            let shard_locations = self.shard_locations.read();
+            let node_addrs = self.node_addrs.read();
+            
+            let target_nodes = shard_locations.get(&split_info.target_shard)?;
+            let target_leader = target_nodes.first()?;
+            let target_addr = node_addrs.get(target_leader)?;
+            
+            Some((split_info.target_shard.clone(), target_addr.clone()))
+        } else {
+            None
+        }
+    }
+
+    /// 检查 key 是否在分裂的缓冲范围内（应该缓存请求）
+    pub fn should_buffer_for_split(&self, key: &[u8], shard_id: &str) -> bool {
+        let splitting = self.splitting_shards.read();
+        if let Some(split_info) = splitting.get(shard_id) {
+            let slot = Self::slot_for_key(key);
+            // 在缓冲阶段，且 key 在分裂范围内
+            slot >= split_info.split_slot && split_info.status == "buffering"
+        } else {
+            false
+        }
     }
 }
 

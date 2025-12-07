@@ -33,6 +33,20 @@ pub struct RoutingTable {
     pub shard_nodes: HashMap<String, Vec<String>>,
     /// 节点地址映射
     pub node_addrs: HashMap<String, String>,
+    /// 正在分裂的分片信息 (source_shard_id -> SplitInfo)
+    #[serde(default)]
+    pub splitting_shards: HashMap<String, ShardSplitInfo>,
+}
+
+/// 分片分裂信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardSplitInfo {
+    /// 分裂点槽位
+    pub split_slot: u32,
+    /// 目标分片 ID
+    pub target_shard: String,
+    /// 分裂状态
+    pub status: String,
 }
 
 impl Default for RoutingTable {
@@ -42,6 +56,7 @@ impl Default for RoutingTable {
             slots: vec![None; 16384],
             shard_nodes: HashMap::new(),
             node_addrs: HashMap::new(),
+            splitting_shards: HashMap::new(),
         }
     }
 }
@@ -65,6 +80,33 @@ impl RoutingTable {
     pub fn get_shard_for_key(&self, key: &[u8]) -> Option<&String> {
         let slot = Self::slot_for_key(key);
         self.slots.get(slot as usize)?.as_ref()
+    }
+
+    /// 检查分片是否正在分裂
+    pub fn is_shard_splitting(&self, shard_id: &str) -> bool {
+        self.splitting_shards.contains_key(shard_id)
+    }
+
+    /// 获取分片的分裂信息
+    pub fn get_split_info(&self, shard_id: &str) -> Option<&ShardSplitInfo> {
+        self.splitting_shards.get(shard_id)
+    }
+
+    /// 检查 key 是否在分裂的目标范围内（应该 MOVED 到新分片）
+    pub fn should_move_key(&self, key: &[u8], shard_id: &str) -> Option<(&str, &str)> {
+        let split_info = self.splitting_shards.get(shard_id)?;
+        let slot = Self::slot_for_key(key);
+        
+        // 如果槽位 >= split_slot，应该转移到目标分片
+        if slot >= split_info.split_slot {
+            // 获取目标分片的 leader 地址
+            let target_nodes = self.shard_nodes.get(&split_info.target_shard)?;
+            let target_leader = target_nodes.first()?;
+            let target_addr = self.node_addrs.get(target_leader)?;
+            Some((split_info.target_shard.as_str(), target_addr.as_str()))
+        } else {
+            None
+        }
     }
 }
 
