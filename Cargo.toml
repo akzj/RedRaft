@@ -4,6 +4,7 @@ members = [
     "crates/node",
     "crates/resp",
     "crates/redisstore",
+    "crates/pilot",
 ]
 resolver = "2"
 
