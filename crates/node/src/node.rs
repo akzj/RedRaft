@@ -19,8 +19,8 @@ use raft::{
 
 use crate::router::ShardRouter;
 use crate::state_machine::KVStateMachine;
-use redisstore::MemoryStore;
-use resp::Command;
+use redisstore::{ApplyResult, MemoryStore};
+use resp::{Command, CommandType, RespValue};
 
 /// RedRaft 节点
 pub struct RedRaftNode {
@@ -143,94 +143,141 @@ impl RedRaftNode {
     }
 
     /// 处理客户端命令
-    pub async fn handle_command(
-        &self,
-        command: Vec<String>,
-    ) -> Result<Vec<u8>, String> {
-        if command.is_empty() {
-            return Err("Empty command".to_string());
-        }
-
-        let cmd = command[0].to_uppercase();
-        match cmd.as_str() {
-            "GET" => {
-                if command.len() != 2 {
-                    return Err("GET requires 1 argument".to_string());
-                }
-                self.handle_get(&command[1]).await
-            }
-            "SET" => {
-                if command.len() != 3 {
-                    return Err("SET requires 2 arguments".to_string());
-                }
-                self.handle_set(&command[1], &command[2]).await
-            }
-            "DEL" => {
-                if command.len() < 2 {
-                    return Err("DEL requires at least 1 argument".to_string());
-                }
-                self.handle_del(&command[1..]).await
-            }
-            "EXISTS" => {
-                if command.len() != 2 {
-                    return Err("EXISTS requires 1 argument".to_string());
-                }
-                self.handle_exists(&command[1]).await
-            }
-            "KEYS" => {
-                self.handle_keys().await
-            }
-            "PING" => {
-                Ok(b"PONG".to_vec())
-            }
-            _ => Err(format!("Unknown command: {}", cmd)),
+    pub async fn handle_command(&self, cmd: Command) -> Result<RespValue, String> {
+        debug!("Handling command: {:?}", cmd.name());
+        
+        match cmd.command_type() {
+            CommandType::Read => self.handle_read(cmd).await,
+            CommandType::Write => self.handle_write(cmd).await,
         }
     }
 
-    async fn handle_get(&self, key: &str) -> Result<Vec<u8>, String> {
-        let key_bytes = key.as_bytes();
-        let shard_id = self.router.route_key(key_bytes);
+    /// 处理读命令 - 直接从状态机读取
+    async fn handle_read(&self, cmd: Command) -> Result<RespValue, String> {
+        // 获取路由 key
+        let key = cmd.get_key();
+        
+        // 确定 shard
+        let shard_id = match key {
+            Some(k) => self.router.route_key(k),
+            None => {
+                // 无 key 命令（如 PING, DBSIZE）在本地执行
+                return self.handle_global_read(cmd);
+            }
+        };
         
         // 获取或创建 Raft 组
         let nodes = self.router.get_shard_nodes(&shard_id)
             .unwrap_or_else(|| vec![self.node_id.clone()]);
+        let raft_id = self.get_or_create_raft_group(shard_id.clone(), nodes).await?;
         
-        let raft_id = self.get_or_create_raft_group(shard_id, nodes).await?;
-        
-        // 从状态机读取（简化实现，实际应该通过 Raft 的 ReadIndex）
+        // 从状态机读取
         let state_machines = self.state_machines.lock();
         if let Some(sm) = state_machines.get(&raft_id.group) {
-            Ok(sm.store().get(key_bytes).unwrap_or_default())
+            let result = sm.store().apply(&cmd);
+            Ok(apply_result_to_resp(result))
         } else {
             Err("State machine not found".to_string())
         }
     }
 
-    async fn handle_set(&self, key: &str, value: &str) -> Result<Vec<u8>, String> {
-        let key_bytes = key.as_bytes();
-        let shard_id = self.router.route_key(key_bytes);
+    /// 处理全局读命令（无特定 key）
+    fn handle_global_read(&self, cmd: Command) -> Result<RespValue, String> {
+        match cmd {
+            Command::Ping { message } => {
+                Ok(match message {
+                    Some(msg) => RespValue::BulkString(Some(msg)),
+                    None => RespValue::SimpleString("PONG".to_string()),
+                })
+            }
+            Command::Echo { message } => {
+                Ok(RespValue::BulkString(Some(message)))
+            }
+            Command::DbSize => {
+                let state_machines = self.state_machines.lock();
+                let total: i64 = state_machines.values()
+                    .map(|sm| sm.store().dbsize() as i64)
+                    .sum();
+                Ok(RespValue::Integer(total))
+            }
+            Command::CommandInfo => {
+                // 简化实现
+                Ok(RespValue::Array(vec![]))
+            }
+            Command::Info { .. } => {
+                Ok(RespValue::BulkString(Some(b"# Server\nredraft_version:0.1.0\n".to_vec())))
+            }
+            Command::Keys { pattern } => {
+                // 收集所有 shard 的 keys
+                let state_machines = self.state_machines.lock();
+                let mut all_keys = Vec::new();
+                for sm in state_machines.values() {
+                    let keys = sm.store().keys(&pattern);
+                    for key in keys {
+                        all_keys.push(RespValue::BulkString(Some(key)));
+                    }
+                }
+                Ok(RespValue::Array(all_keys))
+            }
+            Command::Scan { cursor, pattern, count } => {
+                // 简化实现：只在 cursor=0 时返回所有 keys
+                if cursor != 0 {
+                    return Ok(RespValue::Array(vec![
+                        RespValue::BulkString(Some(b"0".to_vec())),
+                        RespValue::Array(vec![]),
+                    ]));
+                }
+                let state_machines = self.state_machines.lock();
+                let mut all_keys = Vec::new();
+                let limit = count.unwrap_or(10) as usize;
+                let pattern_bytes = pattern.as_ref().map(|p| p.as_slice()).unwrap_or(b"*");
+                for sm in state_machines.values() {
+                    let keys = sm.store().keys(pattern_bytes);
+                    for key in keys {
+                        all_keys.push(RespValue::BulkString(Some(key)));
+                        if all_keys.len() >= limit {
+                            break;
+                        }
+                    }
+                    if all_keys.len() >= limit {
+                        break;
+                    }
+                }
+                Ok(RespValue::Array(vec![
+                    RespValue::BulkString(Some(b"0".to_vec())),
+                    RespValue::Array(all_keys),
+                ]))
+            }
+            _ => Err(format!("Unsupported global read command: {}", cmd.name())),
+        }
+    }
+
+    /// 处理写命令 - 通过 Raft 共识
+    async fn handle_write(&self, cmd: Command) -> Result<RespValue, String> {
+        // 获取路由 key
+        let key = match cmd.get_key() {
+            Some(k) => k,
+            None => {
+                // FlushDb 等全局写命令需要特殊处理
+                return self.handle_global_write(cmd).await;
+            }
+        };
+        
+        // 确定 shard
+        let shard_id = self.router.route_key(key);
         
         // 获取或创建 Raft 组
         let nodes = self.router.get_shard_nodes(&shard_id)
             .unwrap_or_else(|| vec![self.node_id.clone()]);
-        
         let raft_id = self.get_or_create_raft_group(shard_id, nodes).await?;
         
-        // 创建命令
-        let cmd = Command::Set {
-            key: key_bytes.to_vec(),
-            value: value.as_bytes().to_vec(),
-            ex: None,
-            px: None,
-            nx: false,
-            xx: false,
-        };
-        let command = bincode::serde::encode_to_vec(&cmd, bincode::config::standard())
+        // 序列化命令
+        let serialized = bincode::serde::encode_to_vec(&cmd, bincode::config::standard())
             .map_err(|e| format!("Failed to serialize command: {}", e))?;
 
         // 发送事件到 Raft 组
         let event = Event::ClientPropose {
-            cmd: command,
+            cmd: serialized,
             request_id: raft::RequestId::new(),
         };
 
@@ -239,60 +286,24 @@ impl RedRaftNode {
             _ => return Err("Failed to dispatch event".to_string()),
         }
 
-        // 等待结果（简化实现，实际应该等待 ApplyResult）
-        Ok(b"OK".to_vec())
+        // 简化实现：直接返回 OK
+        // TODO: 实际应该等待 Raft 提交并返回真实结果
+        Ok(RespValue::SimpleString("OK".to_string()))
     }
 
-    async fn handle_del(&self, keys: &[String]) -> Result<Vec<u8>, String> {
-        let mut count = 0;
-        for key in keys {
-            let key_bytes = key.as_bytes();
-            let shard_id = self.router.route_key(key_bytes);
-            
-            let nodes = self.router.get_shard_nodes(&shard_id)
-                .unwrap_or_else(|| vec![self.node_id.clone()]);
-            
-            let raft_id = self.get_or_create_raft_group(shard_id, nodes).await?;
-            
-            let cmd = Command::Del {
-                keys: vec![key_bytes.to_vec()],
-            };
-            let command = bincode::serde::encode_to_vec(&cmd, bincode::config::standard())
-                .map_err(|e| format!("Failed to serialize command: {}", e))?;
-
-            let event = Event::ClientPropose {
-                cmd: command,
-                request_id: raft::RequestId::new(),
-            };
-
-            if matches!(self.driver.dispatch_event(raft_id, event), raft::multi_raft_driver::SendEventResult::Success) {
-                count += 1;
+    /// 处理全局写命令
+    async fn handle_global_write(&self, cmd: Command) -> Result<RespValue, String> {
+        match cmd {
+            Command::FlushDb => {
+                // 清空所有 shard
+                let state_machines = self.state_machines.lock();
+                for sm in state_machines.values() {
+                    sm.store().flushdb();
+                }
+                Ok(RespValue::SimpleString("OK".to_string()))
             }
+            _ => Err(format!("Unsupported global write command: {}", cmd.name())),
         }
-        Ok(count.to_string().into_bytes())
-    }
-
-    async fn handle_exists(&self, key: &str) -> Result<Vec<u8>, String> {
-        let key_bytes = key.as_bytes();
-        let shard_id = self.router.route_key(key_bytes);
-        
-        let state_machines = self.state_machines.lock();
-        if let Some(sm) = state_machines.get(&shard_id) {
-            let keys: &[&[u8]] = &[key_bytes];
-            Ok(if sm.store().exists(keys) > 0 { b"1".to_vec() } else { b"0".to_vec() })
-        } else {
-            Ok(b"0".to_vec())
-        }
-    }
-
-    async fn handle_keys(&self) -> Result<Vec<u8>, String> {
-        // 收集所有 Shard 的键数量
-        let state_machines = self.state_machines.lock();
-        let mut total_keys = 0;
-        for sm in state_machines.values() {
-            total_keys += sm.store().dbsize();
-        }
-        Ok(format!("{}", total_keys).into_bytes())
     }
 
     /// 启动节点
@@ -576,4 +587,51 @@ impl TimerService for NodeCallbacks {
 }
 
 impl RaftCallbacks for NodeCallbacks {}
+
+/// 将 ApplyResult 转换为 RespValue
+fn apply_result_to_resp(result: ApplyResult) -> RespValue {
+    match result {
+        ApplyResult::Ok => RespValue::SimpleString("OK".to_string()),
+        ApplyResult::Pong(msg) => {
+            match msg {
+                Some(m) => RespValue::BulkString(Some(m)),
+                None => RespValue::SimpleString("PONG".to_string()),
+            }
+        }
+        ApplyResult::Integer(n) => RespValue::Integer(n),
+        ApplyResult::Value(v) => {
+            match v {
+                Some(data) => RespValue::BulkString(Some(data)),
+                None => RespValue::Null,
+            }
+        }
+        ApplyResult::Array(items) => {
+            RespValue::Array(
+                items.into_iter()
+                    .map(|item| match item {
+                        Some(data) => RespValue::BulkString(Some(data)),
+                        None => RespValue::Null,
+                    })
+                    .collect()
+            )
+        }
+        ApplyResult::KeyValues(kvs) => {
+            let mut result = Vec::with_capacity(kvs.len() * 2);
+            for (k, v) in kvs {
+                result.push(RespValue::BulkString(Some(k)));
+                result.push(RespValue::BulkString(Some(v)));
+            }
+            RespValue::Array(result)
+        }
+        ApplyResult::Type(t) => {
+            match t {
+                Some(type_name) => RespValue::SimpleString(type_name.to_string()),
+                None => RespValue::SimpleString("none".to_string()),
+            }
+        }
+        ApplyResult::Error(e) => {
+            RespValue::Error(format!("ERR {}", e))
+        }
+    }
+}
 

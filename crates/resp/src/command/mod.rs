@@ -241,6 +241,51 @@ impl Command {
         self.command_type() == CommandType::Read
     }
 
+    /// 获取命令的主 key（用于路由）
+    /// 返回 None 表示命令不涉及特定 key（如 PING, DBSIZE 等）
+    pub fn get_key(&self) -> Option<&[u8]> {
+        match self {
+            // 无 key 命令
+            Command::Ping { .. } | Command::Echo { .. } | Command::CommandInfo |
+            Command::Info { .. } | Command::DbSize | Command::FlushDb => None,
+
+            // 单 key 命令
+            Command::Get { key } | Command::StrLen { key } | Command::GetRange { key, .. } |
+            Command::Set { key, .. } | Command::SetNx { key, .. } | Command::SetEx { key, .. } |
+            Command::PSetEx { key, .. } | Command::Incr { key } | Command::IncrBy { key, .. } |
+            Command::IncrByFloat { key, .. } | Command::Decr { key } | Command::DecrBy { key, .. } |
+            Command::Append { key, .. } | Command::GetSet { key, .. } | Command::SetRange { key, .. } |
+            Command::LLen { key } | Command::LIndex { key, .. } | Command::LRange { key, .. } |
+            Command::LPush { key, .. } | Command::RPush { key, .. } | Command::LPop { key } |
+            Command::RPop { key } | Command::LSet { key, .. } | Command::LTrim { key, .. } |
+            Command::LRem { key, .. } |
+            Command::HGet { key, .. } | Command::HMGet { key, .. } | Command::HGetAll { key } |
+            Command::HKeys { key } | Command::HVals { key } | Command::HLen { key } |
+            Command::HExists { key, .. } | Command::HSet { key, .. } | Command::HSetNx { key, .. } |
+            Command::HMSet { key, .. } | Command::HDel { key, .. } | Command::HIncrBy { key, .. } |
+            Command::HIncrByFloat { key, .. } |
+            Command::SMembers { key } | Command::SIsMember { key, .. } | Command::SCard { key } |
+            Command::SAdd { key, .. } | Command::SRem { key, .. } | Command::SPop { key, .. } |
+            Command::Expire { key, .. } | Command::PExpire { key, .. } | Command::Ttl { key } |
+            Command::PTtl { key } | Command::Persist { key } | Command::Type { key } |
+            Command::Rename { key, .. } | Command::RenameNx { key, .. } => Some(key),
+
+            // 多 key 命令，取第一个 key
+            Command::MGet { keys } | Command::Del { keys } | Command::Exists { keys } |
+            Command::SInter { keys } | Command::SUnion { keys } | Command::SDiff { keys } => {
+                keys.first().map(|k| k.as_slice())
+            }
+
+            // 多 key-value 对，取第一个 key
+            Command::MSet { kvs } | Command::MSetNx { kvs } => {
+                kvs.first().map(|(k, _)| k.as_slice())
+            }
+
+            // 全局扫描命令
+            Command::Keys { .. } | Command::Scan { .. } => None,
+        }
+    }
+
     /// 获取命令名称
     pub fn name(&self) -> &'static str {
         match self {

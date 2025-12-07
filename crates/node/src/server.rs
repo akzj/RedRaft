@@ -9,7 +9,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
 use crate::node::RedRaftNode;
-use resp::{AsyncRespEncoder, AsyncRespParser, RespValue};
+use resp::{AsyncRespEncoder, AsyncRespParser, Command, RespValue};
 
 /// Redis 协议服务器
 pub struct RedisServer {
@@ -67,32 +67,19 @@ async fn handle_client(
             }
         };
 
-        // 转换为命令
-        let command = match resp_value.to_command() {
-            Some(cmd) => cmd,
-            None => {
-                let error = RespValue::Error("ERR invalid command format".to_string());
+        // 转换为类型安全的 Command
+        let command = match Command::try_from(&resp_value) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                let error = RespValue::Error(format!("ERR {}", e));
                 encoder.encode(&error).await?;
                 continue;
             }
         };
 
-        if command.is_empty() {
-            continue;
-        }
-
         // 处理命令
-        let result = node.handle_command(command).await;
-
-        // 编码响应
-        let response = match result {
-            Ok(data) => {
-                if data.is_empty() {
-                    RespValue::Null
-                } else {
-                    RespValue::BulkString(Some(data))
-                }
-            }
+        let response = match node.handle_command(command).await {
+            Ok(resp) => resp,
             Err(e) => RespValue::Error(format!("ERR {}", e)),
         };
 
