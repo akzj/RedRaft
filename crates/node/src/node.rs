@@ -9,7 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use raft::{
     ClusterConfig, ClusterConfigStorage, Event, RequestId,
@@ -122,15 +122,35 @@ impl RedRaftNode {
         self.router.clone()
     }
 
-    /// 创建或获取 Raft 组
-    pub async fn get_or_create_raft_group(
+    /// 获取已存在的 Raft 组
+    /// 
+    /// 用于业务请求路由，不会创建新的 Raft 组。
+    /// 如果 shard 不存在，返回 None。
+    pub fn get_raft_group(&self, shard_id: &str) -> Option<RaftId> {
+        if self.state_machines.lock().contains_key(shard_id) {
+            Some(RaftId::new(shard_id.to_string(), self.node_id.clone()))
+        } else {
+            None
+        }
+    }
+
+    /// 创建 Raft 组（仅供 Pilot 控制面调用）
+    /// 
+    /// # 重要
+    /// 此函数只应由 Pilot 控制面调用，不应在业务请求处理中调用。
+    /// 业务请求应使用 `get_raft_group` 获取已存在的组。
+    /// 
+    /// # 参数
+    /// - `shard_id`: 分片 ID
+    /// - `nodes`: 该分片的所有节点 ID 列表
+    pub async fn create_raft_group(
         &self,
         shard_id: String,
         nodes: Vec<String>,
     ) -> Result<RaftId, String> {
-        // 检查是否已存在
         let raft_id = RaftId::new(shard_id.clone(), self.node_id.clone());
         
+        // 检查是否已存在
         if self.state_machines.lock().contains_key(&shard_id) {
             debug!("Raft group already exists: {}", raft_id);
             return Ok(raft_id);
@@ -228,10 +248,9 @@ impl RedRaftNode {
             }
         };
         
-        // 获取或创建 Raft 组
-        let nodes = self.router.get_shard_nodes(&shard_id)
-            .unwrap_or_else(|| vec![self.node_id.clone()]);
-        let raft_id = self.get_or_create_raft_group(shard_id.clone(), nodes).await?;
+        // 获取 Raft 组（必须已存在，由 Pilot 创建）
+        let raft_id = self.get_raft_group(&shard_id)
+            .ok_or_else(|| format!("CLUSTERDOWN Shard {} not ready", shard_id))?;
         
         // 从状态机读取
         let state_machines = self.state_machines.lock();
@@ -328,10 +347,9 @@ impl RedRaftNode {
         // 确定 shard
         let shard_id = self.router.route_key(key);
         
-        // 获取或创建 Raft 组
-        let nodes = self.router.get_shard_nodes(&shard_id)
-            .unwrap_or_else(|| vec![self.node_id.clone()]);
-        let raft_id = self.get_or_create_raft_group(shard_id, nodes).await?;
+        // 获取 Raft 组（必须已存在，由 Pilot 创建）
+        let raft_id = self.get_raft_group(&shard_id)
+            .ok_or_else(|| format!("CLUSTERDOWN Shard {} not ready", shard_id))?;
         
         // 序列化命令
         let serialized = bincode::serde::encode_to_vec(&cmd.clone(), bincode::config::standard())
