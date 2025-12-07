@@ -156,11 +156,13 @@ impl RedRaftNode {
         // 创建 Raft 状态
         let mut options = RaftStateOptions::default();
         options.id = raft_id.clone();
+        let timers = self.driver.get_timer_service();
         let callbacks: Arc<dyn RaftCallbacks> = Arc::new(NodeCallbacks {
             node_id: self.node_id.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
             state_machine: state_machine.clone(),
+            timers,
         });
 
         let mut raft_state = RaftState::new(options, callbacks.clone()).await
@@ -419,10 +421,13 @@ impl raft::multi_raft_driver::HandleEventTrait for RaftGroupHandler {
 
 /// 节点回调实现
 struct NodeCallbacks {
+    #[allow(dead_code)]
     node_id: String,
     storage: Arc<dyn Storage>,
+    #[allow(dead_code)]
     network: Arc<dyn Network>,
     state_machine: Arc<KVStateMachine>,
+    timers: raft::multi_raft_driver::Timers,
 }
 
 #[async_trait]
@@ -638,28 +643,28 @@ impl StateMachine for NodeCallbacks {
 }
 
 impl TimerService for NodeCallbacks {
-    fn del_timer(&self, from: &RaftId, timer_id: raft::TimerId) {
-        // 通过 MultiRaftDriver 的定时器服务删除
+    fn del_timer(&self, _from: &RaftId, timer_id: raft::TimerId) {
+        self.timers.del_timer(timer_id);
     }
 
     fn set_leader_transfer_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
-        0 // 简化实现
+        self.timers.add_timer(from, raft::Event::LeaderTransferTimeout, dur)
     }
 
     fn set_election_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
-        0 // 简化实现
+        self.timers.add_timer(from, raft::Event::ElectionTimeout, dur)
     }
 
     fn set_heartbeat_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
-        0 // 简化实现
+        self.timers.add_timer(from, raft::Event::HeartbeatTimeout, dur)
     }
 
     fn set_apply_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
-        0 // 简化实现
+        self.timers.add_timer(from, raft::Event::ApplyLogTimeout, dur)
     }
 
     fn set_config_change_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
-        0 // 简化实现
+        self.timers.add_timer(from, raft::Event::ConfigChangeTimeout, dur)
     }
 }
 
