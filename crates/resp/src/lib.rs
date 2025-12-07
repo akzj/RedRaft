@@ -1,16 +1,18 @@
-//! Redis 协议 (RESP) 支持库
+//! RESP (REdis Serialization Protocol) 支持库
 //!
-//! 实现 Redis 序列化协议 (RESP) 的解析和编码，支持同步和异步操作
+//! 实现 RESP 协议的解析和编码，以及类型安全的命令解析
 
 mod parser;
 mod encoder;
 mod async_parser;
 mod async_encoder;
+pub mod command;
 
 pub use parser::RespParser;
 pub use encoder::RespEncoder;
 pub use async_parser::{AsyncRespParser, DEFAULT_MAX_FRAME_SIZE};
 pub use async_encoder::AsyncRespEncoder;
+pub use command::{Command, CommandType, CommandResult, CommandError, CommandErrorKind};
 
 use std::io;
 
