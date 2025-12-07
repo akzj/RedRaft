@@ -6,9 +6,11 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use raft::{ApplyResult, ClusterConfig, RaftId, SnapshotStorage, StateMachine, StorageResult, traits::ClientResult};
-use redisstore::RedisStore;
+use raft::{ApplyResult, ClusterConfig, RaftId, RequestId, SnapshotStorage, StateMachine, StorageResult, traits::ClientResult};
+use redisstore::{ApplyResult as StoreApplyResult, RedisStore};
 use resp::Command;
+
+use crate::node::PendingRequests;
 
 /// KV 状态机
 #[derive(Clone)]
@@ -17,6 +19,10 @@ pub struct KVStateMachine {
     store: Arc<dyn RedisStore>,
     /// 版本号（单调递增）
     version: Arc<std::sync::atomic::AtomicU64>,
+    /// 等待中的请求追踪器
+    pending_requests: Option<PendingRequests>,
+    /// 应用结果缓存 (index -> result)，用于在 client_response 中返回真实结果
+    apply_results: Arc<parking_lot::Mutex<std::collections::HashMap<u64, StoreApplyResult>>>,
 }
 
 impl KVStateMachine {
@@ -25,6 +31,18 @@ impl KVStateMachine {
         Self {
             store,
             version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pending_requests: None,
+            apply_results: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// 创建带有请求追踪的 KV 状态机
+    pub fn with_pending_requests(store: Arc<dyn RedisStore>, pending_requests: PendingRequests) -> Self {
+        Self {
+            store,
+            version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pending_requests: Some(pending_requests),
+            apply_results: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -70,8 +88,11 @@ impl StateMachine for KVStateMachine {
             index, term, command
         );
 
-        // 直接调用 store.apply() 执行命令
-        let _result = self.store.apply(&command);
+        // 执行命令并保存结果
+        let result = self.store.apply(&command);
+        
+        // 缓存结果，供 client_response 使用
+        self.apply_results.lock().insert(index, result);
         self.inc_version();
 
         Ok(())
@@ -136,9 +157,25 @@ impl StateMachine for KVStateMachine {
     async fn client_response(
         &self,
         _from: &RaftId,
-        _request_id: raft::RequestId,
-        _result: ClientResult<u64>,
+        request_id: RequestId,
+        result: ClientResult<u64>,
     ) -> ClientResult<()> {
+        // 当 Raft 提交完成时通知等待的客户端
+        if let Some(ref pending) = self.pending_requests {
+            let store_result = match result {
+                Ok(index) => {
+                    // 从缓存中获取 apply 结果
+                    self.apply_results
+                        .lock()
+                        .remove(&index)
+                        .unwrap_or(StoreApplyResult::Ok)
+                }
+                Err(e) => {
+                    StoreApplyResult::Error(redisstore::StoreError::Internal(format!("{:?}", e)))
+                }
+            };
+            pending.complete(request_id, store_result);
+        }
         Ok(())
     }
 

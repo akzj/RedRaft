@@ -8,10 +8,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use tracing::{debug, info};
+use tokio::sync::oneshot;
+use tracing::{debug, info, warn};
 
 use raft::{
-    ClusterConfig, ClusterConfigStorage, Event,
+    ClusterConfig, ClusterConfigStorage, Event, RequestId,
     HardStateStorage, LogEntryStorage, Network, RaftCallbacks, RaftId, RaftState,
     RaftStateOptions, SnapshotStorage, StateMachine, Storage, StorageResult,
     TimerService, message::{PreVoteRequest, PreVoteResponse}, traits::ClientResult,
@@ -19,8 +20,56 @@ use raft::{
 
 use crate::router::ShardRouter;
 use crate::state_machine::KVStateMachine;
-use redisstore::{ApplyResult, MemoryStore};
+use redisstore::{ApplyResult as StoreApplyResult, MemoryStore};
 use resp::{Command, CommandType, RespValue};
+
+/// 等待中的请求追踪器
+#[derive(Clone)]
+pub struct PendingRequests {
+    /// request_id -> (command, result_sender)
+    requests: Arc<Mutex<HashMap<u64, (Command, oneshot::Sender<StoreApplyResult>)>>>,
+}
+
+impl PendingRequests {
+    pub fn new() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// 注册一个等待中的请求
+    pub fn register(&self, request_id: RequestId, cmd: Command) -> oneshot::Receiver<StoreApplyResult> {
+        let (tx, rx) = oneshot::channel();
+        self.requests.lock().insert(request_id.into(), (cmd, tx));
+        rx
+    }
+
+    /// 完成请求并发送结果
+    pub fn complete(&self, request_id: RequestId, result: StoreApplyResult) -> bool {
+        if let Some((_, tx)) = self.requests.lock().remove(&request_id.into()) {
+            let _ = tx.send(result);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 获取等待中的命令（用于 apply 时执行）
+    pub fn get_command(&self, request_id: RequestId) -> Option<Command> {
+        self.requests.lock().get(&request_id.into()).map(|(cmd, _)| cmd.clone())
+    }
+
+    /// 移除超时的请求
+    pub fn remove(&self, request_id: RequestId) {
+        self.requests.lock().remove(&request_id.into());
+    }
+}
+
+impl Default for PendingRequests {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// RedRaft 节点
 pub struct RedRaftNode {
@@ -36,6 +85,8 @@ pub struct RedRaftNode {
     router: Arc<ShardRouter>,
     /// Raft 组状态机映射 (shard_id -> state_machine)
     state_machines: Arc<Mutex<HashMap<String, Arc<KVStateMachine>>>>,
+    /// 等待中的请求追踪器
+    pending_requests: PendingRequests,
 }
 
 impl RedRaftNode {
@@ -52,7 +103,13 @@ impl RedRaftNode {
             network,
             router: Arc::new(ShardRouter::new(shard_count)),
             state_machines: Arc::new(Mutex::new(HashMap::new())),
+            pending_requests: PendingRequests::new(),
         }
+    }
+    
+    /// 获取等待请求追踪器
+    pub fn pending_requests(&self) -> &PendingRequests {
+        &self.pending_requests
     }
 
     /// 获取节点 ID
@@ -81,7 +138,10 @@ impl RedRaftNode {
 
         // 创建状态机（使用内存存储，后续可替换为 RocksDB）
         let store = Arc::new(MemoryStore::new());
-        let state_machine = Arc::new(KVStateMachine::new(store));
+        let state_machine = Arc::new(KVStateMachine::with_pending_requests(
+            store,
+            self.pending_requests.clone(),
+        ));
         self.state_machines
             .lock()
             .insert(shard_id.clone(), state_machine.clone());
@@ -272,23 +332,40 @@ impl RedRaftNode {
         let raft_id = self.get_or_create_raft_group(shard_id, nodes).await?;
         
         // 序列化命令
-        let serialized = bincode::serde::encode_to_vec(&cmd, bincode::config::standard())
+        let serialized = bincode::serde::encode_to_vec(&cmd.clone(), bincode::config::standard())
             .map_err(|e| format!("Failed to serialize command: {}", e))?;
+
+        // 生成请求 ID 并注册等待
+        let request_id = RequestId::new();
+        let result_rx = self.pending_requests.register(request_id, cmd);
 
         // 发送事件到 Raft 组
         let event = Event::ClientPropose {
             cmd: serialized,
-            request_id: raft::RequestId::new(),
+            request_id,
         };
 
         match self.driver.dispatch_event(raft_id.clone(), event) {
             raft::multi_raft_driver::SendEventResult::Success => {}
-            _ => return Err("Failed to dispatch event".to_string()),
+            _ => {
+                self.pending_requests.remove(request_id);
+                return Err("Failed to dispatch event".to_string());
+            }
         }
 
-        // 简化实现：直接返回 OK
-        // TODO: 实际应该等待 Raft 提交并返回真实结果
-        Ok(RespValue::SimpleString("OK".to_string()))
+        // 等待 Raft 提交并返回结果
+        match tokio::time::timeout(Duration::from_secs(5), result_rx).await {
+            Ok(Ok(result)) => Ok(apply_result_to_resp(result)),
+            Ok(Err(_)) => {
+                // Channel closed - 可能是节点关闭
+                Err("Request cancelled".to_string())
+            }
+            Err(_) => {
+                // 超时
+                self.pending_requests.remove(request_id);
+                Err("Request timeout".to_string())
+            }
+        }
     }
 
     /// 处理全局写命令
@@ -588,24 +665,24 @@ impl TimerService for NodeCallbacks {
 
 impl RaftCallbacks for NodeCallbacks {}
 
-/// 将 ApplyResult 转换为 RespValue
-fn apply_result_to_resp(result: ApplyResult) -> RespValue {
+/// 将 StoreApplyResult 转换为 RespValue
+fn apply_result_to_resp(result: StoreApplyResult) -> RespValue {
     match result {
-        ApplyResult::Ok => RespValue::SimpleString("OK".to_string()),
-        ApplyResult::Pong(msg) => {
+        StoreApplyResult::Ok => RespValue::SimpleString("OK".to_string()),
+        StoreApplyResult::Pong(msg) => {
             match msg {
                 Some(m) => RespValue::BulkString(Some(m)),
                 None => RespValue::SimpleString("PONG".to_string()),
             }
         }
-        ApplyResult::Integer(n) => RespValue::Integer(n),
-        ApplyResult::Value(v) => {
+        StoreApplyResult::Integer(n) => RespValue::Integer(n),
+        StoreApplyResult::Value(v) => {
             match v {
                 Some(data) => RespValue::BulkString(Some(data)),
                 None => RespValue::Null,
             }
         }
-        ApplyResult::Array(items) => {
+        StoreApplyResult::Array(items) => {
             RespValue::Array(
                 items.into_iter()
                     .map(|item| match item {
@@ -615,7 +692,7 @@ fn apply_result_to_resp(result: ApplyResult) -> RespValue {
                     .collect()
             )
         }
-        ApplyResult::KeyValues(kvs) => {
+        StoreApplyResult::KeyValues(kvs) => {
             let mut result = Vec::with_capacity(kvs.len() * 2);
             for (k, v) in kvs {
                 result.push(RespValue::BulkString(Some(k)));
@@ -623,13 +700,13 @@ fn apply_result_to_resp(result: ApplyResult) -> RespValue {
             }
             RespValue::Array(result)
         }
-        ApplyResult::Type(t) => {
+        StoreApplyResult::Type(t) => {
             match t {
                 Some(type_name) => RespValue::SimpleString(type_name.to_string()),
                 None => RespValue::SimpleString("none".to_string()),
             }
         }
-        ApplyResult::Error(e) => {
+        StoreApplyResult::Error(e) => {
             RespValue::Error(format!("ERR {}", e))
         }
     }
