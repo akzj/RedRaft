@@ -1,4 +1,114 @@
 //! Snapshot handling for Raft state machine
+//!
+//! # 快照模块概述
+//!
+//! 本模块负责 Raft 快照的创建、发送和安装。快照用于：
+//! - 压缩日志，防止无限增长
+//! - 让落后的 Follower 快速追赶 Leader
+//! - 节点重启后的快速恢复
+//!
+//! # 快照安装流程
+//!
+//! ## 流程图
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────┐
+//! │                              Follower 节点内部                               │
+//! ├─────────────────────────────────────────────────────────────────────────────┤
+//! │                                                                             │
+//! │  ┌─────────────┐    ①InstallSnapshotRequest     ┌────────────────────────┐ │
+//! │  │   Leader    │ ──────────────────────────────▶│  handle_install_       │ │
+//! │  │   (远程)    │                                │  snapshot()            │ │
+//! │  └─────────────┘                                └───────────┬────────────┘ │
+//! │        ▲                                                    │              │
+//! │        │                                                    │②             │
+//! │        │ ⑥InstallSnapshotResponse                          ▼              │
+//! │        │   (Success/Failed)                    ┌────────────────────────┐  │
+//! │        │                                       │ callbacks.process_     │  │
+//! │        │                                       │ snapshot(..., tx)      │  │
+//! │        │                                       │ (业务层/StateMachine)  │  │
+//! │        │                                       └───────────┬────────────┘  │
+//! │        │                                                   │               │
+//! │        │                                                   │③ oneshot::tx  │
+//! │        │                                                   ▼               │
+//! │        │                                       ┌────────────────────────┐  │
+//! │        │                                       │ tokio::spawn 异步任务  │  │
+//! │        │                                       │ 等待 oneshot::rx       │  │
+//! │        │                                       └───────────┬────────────┘  │
+//! │        │                                                   │               │
+//! │        │                                                   │④ Event::      │
+//! │        │                                                   │ CompleteSnapshot│
+//! │        │                                                   ▼               │
+//! │        │                                       ┌────────────────────────┐  │
+//! │        │                                       │ RaftState::tick()      │  │
+//! │        └───────────────────────────────────────│ handle_complete_       │  │
+//! │                                                │ snapshot_installation()│  │
+//! │                                                └────────────────────────┘  │
+//! │                                                         ⑤                  │
+//! │                                                  - 日志截断                │
+//! │                                                  - 持久化 HardState        │
+//! │                                                  - 清理过期请求            │
+//! │                                                  - 应用配置                │
+//! └─────────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## 详细步骤
+//!
+//! 1. **Leader 发送快照请求**
+//!    - Leader 检测到 Follower 落后太多（日志已被截断）
+//!    - 调用 [`RaftState::send_snapshot_to`] 发送 [`InstallSnapshotRequest`]
+//!
+//! 2. **Follower 处理快照请求**
+//!    - [`RaftState::handle_install_snapshot`] 接收请求
+//!    - 先回复 `InstallSnapshotState::Installing` 告知 Leader 正在处理
+//!    - 调用 `callbacks.process_snapshot()` 让业务层处理快照数据
+//!    - 启动 `tokio::spawn` 异步任务等待处理结果
+//!
+//! 3. **业务层处理快照**
+//!    - [`StateMachine::process_snapshot`](crate::traits::StateMachine::process_snapshot) 被调用
+//!    - 反序列化并恢复状态机状态
+//!    - 完成后通过 `oneshot::Sender` 通知结果
+//!
+//! 4. **自通知完成事件**
+//!    - 异步任务收到处理结果
+//!    - 发送 [`Event::CompleteSnapshotInstallation`] 给自己
+//!    - 这是 **Actor 模式自消息**，让耗时操作不阻塞 Raft 主循环
+//!
+//! 5. **完成快照安装**
+//!    - [`RaftState::handle_complete_snapshot_installation`] 处理完成事件
+//!    - 执行以下操作：
+//!      - 更新 `last_snapshot_index`, `last_snapshot_term`
+//!      - 更新 `commit_index`, `last_applied`
+//!      - **截断日志** - 删除快照之前的日志条目
+//!      - **持久化 HardState** - 保存 term 和 voted_for
+//!      - **清理过期客户端请求** - 移除已被快照覆盖的请求
+//!      - **应用集群配置** - 如果快照包含配置变更
+//!
+//! 6. **响应 Leader**
+//!    - Leader 通过探测消息 (`is_probe=true`) 查询安装状态
+//!    - Follower 返回最终的 `Success` 或 `Failed` 状态
+//!
+//! ## 关键数据结构
+//!
+//! - [`CompleteSnapshotInstallation`] - 快照安装完成的事件数据
+//! - [`InstallSnapshotRequest`] - Leader 发送的快照安装请求
+//! - [`InstallSnapshotResponse`] - Follower 的响应
+//! - [`InstallSnapshotState`] - 安装状态枚举 (Installing/Success/Failed)
+//!
+//! ## 设计要点
+//!
+//! | 要素 | 说明 |
+//! |------|------|
+//! | **发送方** | Follower 自己（通过 `tokio::spawn` 异步任务） |
+//! | **处理方** | Follower 自己（`RaftState::tick`） |
+//! | **目的** | 异步解耦，让快照处理（可能耗时很长）不阻塞 Raft 主循环 |
+//! | **触发时机** | 业务层完成 `process_snapshot` 后，通过 oneshot channel 通知 |
+//!
+//! [`InstallSnapshotRequest`]: crate::message::InstallSnapshotRequest
+//! [`InstallSnapshotResponse`]: crate::message::InstallSnapshotResponse
+//! [`InstallSnapshotState`]: crate::message::InstallSnapshotState
+//! [`CompleteSnapshotInstallation`]: crate::message::CompleteSnapshotInstallation
+//! [`Event::CompleteSnapshotInstallation`]: crate::Event::CompleteSnapshotInstallation
 
 use std::time::{Duration, Instant};
 
