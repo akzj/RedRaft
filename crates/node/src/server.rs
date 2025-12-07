@@ -9,7 +9,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
 use crate::node::RedRaftNode;
-use redis_protocol::{AsyncRespEncoder, AsyncRespParser, RespValue};
+use resp::{AsyncRespEncoder, AsyncRespParser, RespValue};
 
 /// Redis 协议服务器
 pub struct RedisServer {

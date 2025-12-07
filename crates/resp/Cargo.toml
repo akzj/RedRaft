@@ -1,8 +1,8 @@
 [package]
-name = "redis-protocol"
+name = "resp"
 version = "0.1.0"
 edition = "2021"
-description = "Redis protocol (RESP) parser and encoder with async support"
+description = "RESP (REdis Serialization Protocol) parser and encoder with async support"
 license = "MIT"
 
 [dependencies]

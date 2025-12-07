@@ -16,8 +16,8 @@ path = "src/main.rs"
 [dependencies]
 # Raft consensus library
 raft = { path = "../raft" }
-# Redis protocol support
-redis-protocol = { path = "../redis" }
+# RESP protocol support
+resp = { path = "../resp" }
 # Redis store state machine
 redisstore = { path = "../redisstore" }
 
