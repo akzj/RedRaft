@@ -97,8 +97,8 @@ impl MemoryStore {
     }
 
     /// 获取值，自动跳过过期的
-    fn get_entry(&self, data: &HashMap<Vec<u8>, Entry>, key: &[u8]) -> Option<&Entry> {
-        data.get(key).filter(|e| !e.is_expired())
+    fn get_entry(&self, data: &HashMap<Vec<u8>, Entry>, key: &[u8]) -> Option<Entry> {
+        data.get(key).filter(|e| !e.is_expired()).cloned()
     }
 
     /// 获取可变值
@@ -137,11 +137,11 @@ impl RedisStore for MemoryStore {
 
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         let data = self.data.read();
-        match self.get_entry(&data, key)? {
-            Entry {
+        match self.get_entry(&data, key) {
+            Some(Entry {
                 value: RedisValue::String(v),
                 ..
-            } => Some(v.clone()),
+            }) => Some(v),
             _ => None, // 类型不匹配返回 None
         }
     }
@@ -152,10 +152,12 @@ impl RedisStore for MemoryStore {
     }
 
     fn setnx(&self, key: Vec<u8>, value: Vec<u8>) -> bool {
-        let mut data = self.data.write();
+        let data = self.data.read();
         if self.get_entry(&data, &key).is_some() {
             return false;
         }
+        drop(data); // Release read lock before acquiring write lock
+        let mut data = self.data.write();
         data.insert(key, Entry::new(RedisValue::String(value)));
         true
     }
@@ -172,11 +174,11 @@ impl RedisStore for MemoryStore {
         let data = self.data.read();
         keys.iter()
             .map(|key| {
-                match self.get_entry(&data, key)? {
-                    Entry {
+                match self.get_entry(&data, key) {
+                    Some(Entry {
                         value: RedisValue::String(v),
                         ..
-                    } => Some(v.clone()),
+                    }) => Some(v),
                     _ => None,
                 }
             })
@@ -255,14 +257,16 @@ impl RedisStore for MemoryStore {
     }
 
     fn getset(&self, key: Vec<u8>, value: Vec<u8>) -> Option<Vec<u8>> {
-        let mut data = self.data.write();
+        let data = self.data.read();
         let old = match self.get_entry(&data, &key) {
             Some(Entry {
                 value: RedisValue::String(v),
                 ..
-            }) => Some(v.clone()),
+            }) => Some(v),
             _ => None,
         };
+        drop(data); // Release read lock before acquiring write lock
+        let mut data = self.data.write();
         data.insert(key, Entry::new(RedisValue::String(value)));
         old
     }
@@ -479,7 +483,7 @@ impl RedisStore for MemoryStore {
             ..
         }) = self.get_entry_mut(&mut data, key)
         {
-            fields.iter().filter(|f| hash.remove(*f).is_some()).count()
+            fields.iter().filter(|f| hash.remove(&f.to_vec()).is_some()).count()
         } else {
             0
         }
@@ -646,7 +650,7 @@ impl RedisStore for MemoryStore {
 
     fn del(&self, keys: &[&[u8]]) -> usize {
         let mut data = self.data.write();
-        keys.iter().filter(|k| data.remove(*k).is_some()).count()
+        keys.iter().filter(|k| data.remove(&k.to_vec()).is_some()).count()
     }
 
     fn exists(&self, keys: &[&[u8]]) -> usize {
@@ -764,7 +768,7 @@ impl RedisStore for MemoryStore {
             entries: HashMap<Vec<u8>, (RedisValue, Option<u64>)>,
         }
 
-        let snap: SnapshotData = bincode::deserialize(snapshot)
+        let (snap, _): (SnapshotData, _) = bincode::serde::decode_from_slice(snapshot, bincode::config::standard())
             .map_err(|e| format!("Failed to deserialize snapshot: {}", e))?;
 
         let mut data = self.data.write();
@@ -797,7 +801,7 @@ impl RedisStore for MemoryStore {
             .collect();
 
         let snap = SnapshotData { entries };
-        bincode::serialize(&snap).map_err(|e| format!("Failed to serialize snapshot: {}", e))
+        bincode::serde::encode_to_vec(&snap, bincode::config::standard()).map_err(|e| format!("Failed to serialize snapshot: {}", e))
     }
 }
 
