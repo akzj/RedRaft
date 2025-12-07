@@ -89,6 +89,30 @@ pub struct MultiRaftNetworkOptions {
     batch_size: usize,
 }
 
+impl Default for MultiRaftNetworkOptions {
+    fn default() -> Self {
+        Self {
+            node_id: String::new(),
+            grpc_server_addr: "0.0.0.0:50051".to_string(),
+            node_map: HashMap::new(),
+            connect_timeout: Duration::from_secs(5),
+            batch_size: 100,
+        }
+    }
+}
+
+impl MultiRaftNetworkOptions {
+    pub fn with_node_id(mut self, node_id: String) -> Self {
+        self.node_id = node_id;
+        self
+    }
+
+    pub fn with_grpc_addr(mut self, addr: String) -> Self {
+        self.grpc_server_addr = addr;
+        self
+    }
+}
+
 impl ResolveNodeAddress for MultiRaftNetworkOptions {
     async fn resolve_node_address(&self, node_id: &str) -> Result<String> {
         self.node_map

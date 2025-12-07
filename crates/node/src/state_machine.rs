@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use raft::{ApplyResult, ClusterConfig, RaftId, SnapshotStorage, StateMachine, StorageResult};
+use raft::{ApplyResult, ClusterConfig, RaftId, SnapshotStorage, StateMachine, StorageResult, traits::ClientResult};
 use redisstore::{KVOperation, RedisStore};
 
 /// KV 状态机
@@ -52,8 +52,8 @@ impl StateMachine for KVStateMachine {
         term: u64,
         cmd: raft::Command,
     ) -> ApplyResult<()> {
-        let op: KVOperation = match bincode::deserialize(&cmd) {
-            Ok(op) => op,
+        let op: KVOperation = match bincode::serde::decode_from_slice(&cmd, bincode::config::standard()) {
+            Ok((op, _)) => op,
             Err(e) => {
                 warn!("Failed to deserialize command at index {}: {}", index, e);
                 return Err(raft::ApplyError::Internal(format!(
@@ -258,8 +258,8 @@ impl StateMachine for KVStateMachine {
         &self,
         _from: &RaftId,
         _request_id: raft::RequestId,
-        _result: raft::ClientResult<u64>,
-    ) -> raft::ClientResult<()> {
+        _result: ClientResult<u64>,
+    ) -> ClientResult<()> {
         Ok(())
     }
 
@@ -267,8 +267,8 @@ impl StateMachine for KVStateMachine {
         &self,
         _from: &RaftId,
         _request_id: raft::RequestId,
-        _result: raft::ClientResult<u64>,
-    ) -> raft::ClientResult<()> {
+        _result: ClientResult<u64>,
+    ) -> ClientResult<()> {
         Ok(())
     }
 }
@@ -288,7 +288,7 @@ mod tests {
             key: b"key1".to_vec(),
             value: b"value1".to_vec(),
         };
-        let command = bincode::serialize(&op).unwrap();
+        let command = bincode::serde::encode_to_vec(&op, bincode::config::standard()).unwrap();
 
         let result = sm.apply_command(&raft_id, 1, 1, command).await;
         assert!(result.is_ok());
@@ -307,14 +307,14 @@ mod tests {
             key: b"key1".to_vec(),
             value: b"value1".to_vec(),
         };
-        let command = bincode::serialize(&op).unwrap();
+        let command = bincode::serde::encode_to_vec(&op, bincode::config::standard()).unwrap();
         sm.apply_command(&raft_id, 1, 1, command).await.unwrap();
 
         // 删除
         let op = KVOperation::Del {
             keys: vec![b"key1".to_vec()],
         };
-        let command = bincode::serialize(&op).unwrap();
+        let command = bincode::serde::encode_to_vec(&op, bincode::config::standard()).unwrap();
         sm.apply_command(&raft_id, 2, 1, command).await.unwrap();
 
         assert_eq!(sm.store().get(b"key1"), None);
@@ -330,7 +330,7 @@ mod tests {
             key: b"list".to_vec(),
             values: vec![b"a".to_vec(), b"b".to_vec()],
         };
-        let command = bincode::serialize(&op).unwrap();
+        let command = bincode::serde::encode_to_vec(&op, bincode::config::standard()).unwrap();
         sm.apply_command(&raft_id, 1, 1, command).await.unwrap();
 
         assert_eq!(
@@ -350,7 +350,7 @@ mod tests {
             field: b"field1".to_vec(),
             value: b"value1".to_vec(),
         };
-        let command = bincode::serialize(&op).unwrap();
+        let command = bincode::serde::encode_to_vec(&op, bincode::config::standard()).unwrap();
         sm.apply_command(&raft_id, 1, 1, command).await.unwrap();
 
         assert_eq!(

@@ -3,11 +3,10 @@
 //! 负责将键值对路由到对应的 Raft 组（Shard）
 
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use raft::RaftId;
 
@@ -62,9 +61,10 @@ impl ShardRouter {
 
     /// 添加 Shard 配置
     pub fn add_shard(&self, shard_id: String, nodes: Vec<String>) {
+        let node_count = nodes.len();
         self.active_shards.write().insert(shard_id.clone());
         self.shard_locations.write().insert(shard_id, nodes);
-        debug!("Added shard with {} nodes", nodes.len());
+        debug!("Added shard with {} nodes", node_count);
     }
 
     /// 删除 Shard

@@ -2,20 +2,19 @@
 //!
 //! 集成 Multi-Raft、KV 状态机、路由和存储
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 use raft::{
-    ApplyResult, ClusterConfig, ClusterConfigStorage, Event, EventNotify, EventSender,
+    ClusterConfig, ClusterConfigStorage, Event,
     HardStateStorage, LogEntryStorage, Network, RaftCallbacks, RaftId, RaftState,
-    RaftStateOptions, RpcResult, SnapshotStorage, StateMachine, Storage, StorageResult,
-    TimerService,
+    RaftStateOptions, SnapshotStorage, StateMachine, Storage, StorageResult,
+    TimerService, message::{PreVoteRequest, PreVoteResponse}, traits::ClientResult,
 };
 
 use crate::router::ShardRouter;
@@ -27,7 +26,7 @@ pub struct RedRaftNode {
     /// 节点 ID
     node_id: String,
     /// Multi-Raft 驱动器
-    driver: raft::MultiRaftDriver,
+    driver: raft::multi_raft_driver::MultiRaftDriver,
     /// 存储后端
     storage: Arc<dyn Storage>,
     /// 网络层
@@ -36,8 +35,6 @@ pub struct RedRaftNode {
     router: ShardRouter,
     /// Raft 组状态机映射 (shard_id -> state_machine)
     state_machines: Arc<Mutex<HashMap<String, Arc<KVStateMachine>>>>,
-    /// Raft 组状态映射 (RaftId -> RaftState)
-    raft_states: Arc<Mutex<HashMap<RaftId, Arc<Mutex<RaftState>>>>>,
 }
 
 impl RedRaftNode {
@@ -49,12 +46,11 @@ impl RedRaftNode {
     ) -> Self {
         Self {
             node_id: node_id.clone(),
-            driver: raft::MultiRaftDriver::new(),
+            driver: raft::multi_raft_driver::MultiRaftDriver::new(),
             storage,
             network,
             router: ShardRouter::new(shard_count),
             state_machines: Arc::new(Mutex::new(HashMap::new())),
-            raft_states: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -67,7 +63,7 @@ impl RedRaftNode {
         // 检查是否已存在
         let raft_id = RaftId::new(shard_id.clone(), self.node_id.clone());
         
-        if self.raft_states.lock().contains_key(&raft_id) {
+        if self.state_machines.lock().contains_key(&shard_id) {
             debug!("Raft group already exists: {}", raft_id);
             return Ok(raft_id);
         }
@@ -80,21 +76,24 @@ impl RedRaftNode {
             .insert(shard_id.clone(), state_machine.clone());
 
         // 创建集群配置
-        let mut config = ClusterConfig::new();
-        for node in &nodes {
-            config.add_node(node.clone());
-        }
+        let voters: HashSet<RaftId> = nodes
+            .iter()
+            .map(|node| RaftId::new(shard_id.clone(), node.clone()))
+            .collect();
+        let config = ClusterConfig::simple(voters, 0);
 
         // 创建 Raft 状态
-        let options = RaftStateOptions::default();
-        let callbacks = Arc::new(NodeCallbacks {
+        let mut options = RaftStateOptions::default();
+        options.id = raft_id.clone();
+        let callbacks: Arc<dyn RaftCallbacks> = Arc::new(NodeCallbacks {
             node_id: self.node_id.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
             state_machine: state_machine.clone(),
         });
 
-        let mut raft_state = RaftState::new(raft_id.clone(), options, callbacks.clone()).await;
+        let mut raft_state = RaftState::new(options, callbacks.clone()).await
+            .map_err(|e| e.to_string())?;
 
         // 加载持久化状态
         if let Ok(Some(hard_state)) = self
@@ -102,13 +101,13 @@ impl RedRaftNode {
             .load_hard_state(&raft_id)
             .await
         {
-            raft_state.current_term = hard_state.current_term;
+            raft_state.current_term = hard_state.term;
             raft_state.voted_for = hard_state.voted_for;
         }
 
         // 加载集群配置
-        if let Ok(config) = self.storage.load_cluster_config(&raft_id).await {
-            raft_state.config = config;
+        if let Ok(loaded_config) = self.storage.load_cluster_config(&raft_id).await {
+            raft_state.config = loaded_config;
         } else {
             raft_state.config = config;
             self.storage
@@ -118,15 +117,12 @@ impl RedRaftNode {
         }
 
         // 注册到 MultiRaftDriver
+        let raft_state_arc = Arc::new(tokio::sync::Mutex::new(raft_state));
         let handle_event = Box::new(RaftGroupHandler {
-            raft_state: Arc::new(Mutex::new(raft_state.clone())),
-            callbacks: callbacks.clone(),
+            raft_state: raft_state_arc.clone(),
         });
 
         self.driver.add_raft_group(raft_id.clone(), handle_event);
-        self.raft_states
-            .lock()
-            .insert(raft_id.clone(), Arc::new(Mutex::new(raft_state)));
 
         // 更新路由表
         self.router.add_shard(shard_id, nodes);
@@ -193,7 +189,7 @@ impl RedRaftNode {
         // 从状态机读取（简化实现，实际应该通过 Raft 的 ReadIndex）
         let state_machines = self.state_machines.lock();
         if let Some(sm) = state_machines.get(&raft_id.group) {
-            Ok(sm.get(key_bytes).unwrap_or_default())
+            Ok(sm.store().get(key_bytes).unwrap_or_default())
         } else {
             Err("State machine not found".to_string())
         }
@@ -210,21 +206,21 @@ impl RedRaftNode {
         let raft_id = self.get_or_create_raft_group(shard_id, nodes).await?;
         
         // 创建操作
-        let op = KVOperation::Put {
+        let op = KVOperation::Set {
             key: key_bytes.to_vec(),
             value: value.as_bytes().to_vec(),
         };
-        let command = bincode::serialize(&op)
+        let command = bincode::serde::encode_to_vec(&op, bincode::config::standard())
             .map_err(|e| format!("Failed to serialize command: {}", e))?;
 
         // 发送事件到 Raft 组
         let event = Event::ClientPropose {
-            command,
+            cmd: command,
             request_id: raft::RequestId::new(),
         };
 
         match self.driver.dispatch_event(raft_id.clone(), event) {
-            raft::SendEventResult::Success => {}
+            raft::multi_raft_driver::SendEventResult::Success => {}
             _ => return Err("Failed to dispatch event".to_string()),
         }
 
@@ -243,18 +239,18 @@ impl RedRaftNode {
             
             let raft_id = self.get_or_create_raft_group(shard_id, nodes).await?;
             
-            let op = KVOperation::Delete {
-                key: key_bytes.to_vec(),
+            let op = KVOperation::Del {
+                keys: vec![key_bytes.to_vec()],
             };
-            let command = bincode::serialize(&op)
+            let command = bincode::serde::encode_to_vec(&op, bincode::config::standard())
                 .map_err(|e| format!("Failed to serialize command: {}", e))?;
 
             let event = Event::ClientPropose {
-                command,
+                cmd: command,
                 request_id: raft::RequestId::new(),
             };
 
-            if self.driver.dispatch_event(raft_id, event).is_ok() {
+            if matches!(self.driver.dispatch_event(raft_id, event), raft::multi_raft_driver::SendEventResult::Success) {
                 count += 1;
             }
         }
@@ -267,20 +263,21 @@ impl RedRaftNode {
         
         let state_machines = self.state_machines.lock();
         if let Some(sm) = state_machines.get(&shard_id) {
-            Ok(if sm.exists(key_bytes) { b"1".to_vec() } else { b"0".to_vec() })
+            let keys: &[&[u8]] = &[key_bytes];
+            Ok(if sm.store().exists(keys) > 0 { b"1".to_vec() } else { b"0".to_vec() })
         } else {
             Ok(b"0".to_vec())
         }
     }
 
     async fn handle_keys(&self) -> Result<Vec<u8>, String> {
-        // 收集所有 Shard 的键
+        // 收集所有 Shard 的键数量
         let state_machines = self.state_machines.lock();
-        let mut all_keys = Vec::new();
+        let mut total_keys = 0;
         for sm in state_machines.values() {
-            all_keys.extend(sm.keys());
+            total_keys += sm.store().dbsize();
         }
-        Ok(format!("{}", all_keys.len()).into_bytes())
+        Ok(format!("{}", total_keys).into_bytes())
     }
 
     /// 启动节点
@@ -306,17 +303,15 @@ impl RedRaftNode {
 
 /// Raft 组事件处理器
 struct RaftGroupHandler {
-    raft_state: Arc<Mutex<RaftState>>,
-    callbacks: Arc<NodeCallbacks>,
+    raft_state: Arc<tokio::sync::Mutex<RaftState>>,
 }
 
 #[async_trait::async_trait]
-impl raft::EventHandler for RaftGroupHandler {
+impl raft::multi_raft_driver::HandleEventTrait for RaftGroupHandler {
     async fn handle_event(&self, event: raft::Event) {
-        let mut state = self.raft_state.lock();
+        let mut state = self.raft_state.lock().await;
         state.handle_event(event).await;
     }
-}
 }
 
 /// 节点回调实现
@@ -328,8 +323,96 @@ struct NodeCallbacks {
 }
 
 #[async_trait]
-impl RaftCallbacks for NodeCallbacks {
+impl raft::traits::EventNotify for NodeCallbacks {
+    async fn on_state_changed(&self, _from: &RaftId, _role: raft::Role) -> Result<(), raft::error::StateChangeError> {
+        Ok(())
+    }
 
+    async fn on_node_removed(&self, _node_id: &RaftId) -> Result<(), raft::error::StateChangeError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl raft::traits::Network for NodeCallbacks {
+    async fn send_request_vote_request(
+        &self,
+        _from: &RaftId,
+        _target: &RaftId,
+        _args: raft::RequestVoteRequest,
+    ) -> raft::RpcResult<()> {
+        Ok(())
+    }
+
+    async fn send_request_vote_response(
+        &self,
+        _from: &RaftId,
+        _target: &RaftId,
+        _args: raft::RequestVoteResponse,
+    ) -> raft::RpcResult<()> {
+        Ok(())
+    }
+
+    async fn send_append_entries_request(
+        &self,
+        _from: &RaftId,
+        _target: &RaftId,
+        _args: raft::AppendEntriesRequest,
+    ) -> raft::RpcResult<()> {
+        Ok(())
+    }
+
+    async fn send_append_entries_response(
+        &self,
+        _from: &RaftId,
+        _target: &RaftId,
+        _args: raft::AppendEntriesResponse,
+    ) -> raft::RpcResult<()> {
+        Ok(())
+    }
+
+    async fn send_install_snapshot_request(
+        &self,
+        _from: &RaftId,
+        _target: &RaftId,
+        _args: raft::InstallSnapshotRequest,
+    ) -> raft::RpcResult<()> {
+        Ok(())
+    }
+
+    async fn send_install_snapshot_response(
+        &self,
+        _from: &RaftId,
+        _target: &RaftId,
+        _args: raft::InstallSnapshotResponse,
+    ) -> raft::RpcResult<()> {
+        Ok(())
+    }
+
+    async fn send_pre_vote_request(
+        &self,
+        _from: &RaftId,
+        _target: &RaftId,
+        _args: PreVoteRequest,
+    ) -> raft::RpcResult<()> {
+        Ok(())
+    }
+
+    async fn send_pre_vote_response(
+        &self,
+        _from: &RaftId,
+        _target: &RaftId,
+        _args: PreVoteResponse,
+    ) -> raft::RpcResult<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl raft::traits::EventSender for NodeCallbacks {
+    async fn send(&self, _target: RaftId, _event: raft::Event) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -398,6 +481,59 @@ impl LogEntryStorage for NodeCallbacks {
     }
 }
 
+#[async_trait]
+impl StateMachine for NodeCallbacks {
+    async fn apply_command(
+        &self,
+        from: &RaftId,
+        index: u64,
+        term: u64,
+        cmd: raft::Command,
+    ) -> raft::ApplyResult<()> {
+        self.state_machine.apply_command(from, index, term, cmd).await
+    }
+
+    fn process_snapshot(
+        &self,
+        from: &RaftId,
+        index: u64,
+        term: u64,
+        data: Vec<u8>,
+        config: ClusterConfig,
+        request_id: raft::RequestId,
+        oneshot: tokio::sync::oneshot::Sender<raft::SnapshotResult<()>>,
+    ) {
+        self.state_machine.process_snapshot(from, index, term, data, config, request_id, oneshot)
+    }
+
+    async fn create_snapshot(
+        &self,
+        from: &RaftId,
+        cluster_config: ClusterConfig,
+        saver: std::sync::Arc<dyn SnapshotStorage>,
+    ) -> StorageResult<(u64, u64)> {
+        self.state_machine.create_snapshot(from, cluster_config, saver).await
+    }
+
+    async fn client_response(
+        &self,
+        from: &RaftId,
+        request_id: raft::RequestId,
+        result: ClientResult<u64>,
+    ) -> ClientResult<()> {
+        self.state_machine.client_response(from, request_id, result).await
+    }
+
+    async fn read_index_response(
+        &self,
+        from: &RaftId,
+        request_id: raft::RequestId,
+        result: ClientResult<u64>,
+    ) -> ClientResult<()> {
+        self.state_machine.read_index_response(from, request_id, result).await
+    }
+}
+
 impl TimerService for NodeCallbacks {
     fn del_timer(&self, from: &RaftId, timer_id: raft::TimerId) {
         // 通过 MultiRaftDriver 的定时器服务删除
@@ -424,71 +560,5 @@ impl TimerService for NodeCallbacks {
     }
 }
 
-#[async_trait]
-impl EventSender for NodeCallbacks {
-    async fn send(&self, target: RaftId, event: Event) -> anyhow::Result<()> {
-        // 通过网络层发送
-        Ok(())
-    }
-}
+impl RaftCallbacks for NodeCallbacks {}
 
-#[async_trait]
-impl StateMachine for NodeCallbacks {
-    async fn apply_command(
-        &self,
-        from: &RaftId,
-        index: u64,
-        term: u64,
-        command: raft::Command,
-    ) -> ApplyResult<Vec<u8>> {
-        self.state_machine.apply(from, index, term, command).await
-    }
-
-    async fn create_snapshot(
-        &self,
-        from: &RaftId,
-        config: ClusterConfig,
-        saver: Arc<dyn SnapshotStorage>,
-    ) -> StorageResult<(u64, u64)> {
-        self.state_machine.create_snapshot().await
-    }
-
-    async fn process_snapshot(
-        &self,
-        from: &RaftId,
-        snapshot: raft::Snapshot,
-    ) -> StorageResult<()> {
-        self.state_machine.process_snapshot().await
-    }
-
-    async fn client_response(
-        &self,
-        from: &RaftId,
-        index: u64,
-        response: Vec<u8>,
-    ) -> StorageResult<()> {
-        self.state_machine.client_response(from, index, response).await
-    }
-
-    async fn read_index_response(
-        &self,
-        from: &RaftId,
-        index: u64,
-        response: Vec<u8>,
-    ) -> StorageResult<()> {
-        self.state_machine.read_index_response(from, index, response).await
-  
-
-    async fn create_snapshot(
-        &self,
-        from: &RaftId,
-        config: ClusterConfig,
-        saver: Arc<dyn SnapshotStorage>,
-    ) -> StorageResult<(u64, u64)> {
-        self.state_machine.create_snapshot(from, config, saver).await
-    }
-
-    async fn apply_snapshot(&self, from: &RaftId, snapshot: raft::Snapshot) -> StorageResult<()> {
-        self.state_machine.apply_snapshot(from, snapshot).await
-    }
-}

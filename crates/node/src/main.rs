@@ -74,13 +74,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&args.data_dir)?;
 
     // 创建存储后端
-    let storage = Arc::new(FileStorage::new(
-        args.data_dir.clone(),
-        raft::storage::FileStorageOptions::default(),
-    )?);
+    let options = raft::storage::FileStorageOptions::with_base_dir(args.data_dir.clone());
+    let (file_storage, _log_receiver) = FileStorage::new(options)?;
+    let storage = Arc::new(file_storage);
 
     // 创建网络层
-    let network = Arc::new(MultiRaftNetwork::new());
+    let network_options = raft::network::MultiRaftNetworkOptions::default()
+        .with_node_id(args.node_id.clone());
+    let network = Arc::new(MultiRaftNetwork::new(network_options));
 
     // 创建 RedRaft 节点
     let node = Arc::new(RedRaftNode::new(
