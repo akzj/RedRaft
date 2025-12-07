@@ -2,6 +2,29 @@
 //!
 //! 支持 Redis 的多种数据类型和操作
 
+use resp::Command;
+
+/// 命令执行结果
+#[derive(Debug, Clone, PartialEq)]
+pub enum ApplyResult {
+    /// 简单字符串响应 (OK, PONG 等)
+    Ok,
+    /// PONG 响应
+    Pong(Option<Vec<u8>>),
+    /// 整数响应
+    Integer(i64),
+    /// 字符串响应（可能为 nil）
+    Value(Option<Vec<u8>>),
+    /// 数组响应
+    Array(Vec<Option<Vec<u8>>>),
+    /// 键值对数组 (用于 HGETALL 等)
+    KeyValues(Vec<(Vec<u8>, Vec<u8>)>),
+    /// 类型字符串
+    Type(Option<&'static str>),
+    /// 错误响应
+    Error(StoreError),
+}
+
 /// Redis 存储错误
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
@@ -204,4 +227,285 @@ pub trait RedisStore: Send + Sync {
 
     /// 创建快照数据
     fn create_snapshot(&self) -> Result<Vec<u8>, String>;
+
+    // ==================== 命令执行 ====================
+
+    /// 执行 Redis 命令
+    ///
+    /// 统一的命令执行入口，根据 Command 类型调用对应的操作方法
+    fn apply(&self, cmd: &Command) -> ApplyResult {
+        match cmd {
+            // ==================== 连接/管理命令 ====================
+            Command::Ping { message } => ApplyResult::Pong(message.clone()),
+            Command::Echo { message } => ApplyResult::Value(Some(message.clone())),
+            Command::DbSize => ApplyResult::Integer(self.dbsize() as i64),
+            Command::FlushDb => {
+                self.flushdb();
+                ApplyResult::Ok
+            }
+            Command::CommandInfo | Command::Info { .. } => {
+                // 这些命令由上层处理
+                ApplyResult::Ok
+            }
+
+            // ==================== String 读命令 ====================
+            Command::Get { key } => ApplyResult::Value(self.get(key)),
+            Command::MGet { keys } => {
+                let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+                ApplyResult::Array(self.mget(&keys_refs))
+            }
+            Command::StrLen { key } => ApplyResult::Integer(self.strlen(key) as i64),
+            Command::GetRange { key, start, end } => {
+                // TODO: 实现 GETRANGE
+                let _ = (key, start, end);
+                ApplyResult::Value(None)
+            }
+
+            // ==================== String 写命令 ====================
+            Command::Set { key, value, ex, px, nx, xx } => {
+                // 处理 XX 条件：键必须存在
+                if *xx && self.get(key).is_none() {
+                    return ApplyResult::Value(None);
+                }
+                // 处理 NX 条件：键必须不存在
+                if *nx {
+                    if !self.setnx(key.clone(), value.clone()) {
+                        return ApplyResult::Value(None);
+                    }
+                } else {
+                    self.set(key.clone(), value.clone());
+                }
+                // 处理过期时间
+                if let Some(secs) = ex {
+                    self.expire(key, *secs);
+                } else if let Some(ms) = px {
+                    self.expire(key, *ms / 1000);
+                }
+                ApplyResult::Ok
+            }
+            Command::SetNx { key, value } => {
+                let result = self.setnx(key.clone(), value.clone());
+                ApplyResult::Integer(if result { 1 } else { 0 })
+            }
+            Command::SetEx { key, seconds, value } => {
+                self.setex(key.clone(), value.clone(), *seconds);
+                ApplyResult::Ok
+            }
+            Command::PSetEx { key, milliseconds, value } => {
+                self.setex(key.clone(), value.clone(), *milliseconds / 1000);
+                ApplyResult::Ok
+            }
+            Command::MSet { kvs } => {
+                self.mset(kvs.clone());
+                ApplyResult::Ok
+            }
+            Command::MSetNx { kvs } => {
+                // 检查所有键是否都不存在
+                let all_new = kvs.iter().all(|(k, _)| self.get(k).is_none());
+                if all_new {
+                    self.mset(kvs.clone());
+                    ApplyResult::Integer(1)
+                } else {
+                    ApplyResult::Integer(0)
+                }
+            }
+            Command::Incr { key } => match self.incr(key) {
+                Ok(v) => ApplyResult::Integer(v),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::IncrBy { key, delta } => match self.incrby(key, *delta) {
+                Ok(v) => ApplyResult::Integer(v),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::IncrByFloat { .. } => {
+                // TODO: 实现 INCRBYFLOAT
+                ApplyResult::Error(StoreError::Internal("INCRBYFLOAT not implemented".into()))
+            }
+            Command::Decr { key } => match self.decr(key) {
+                Ok(v) => ApplyResult::Integer(v),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::DecrBy { key, delta } => match self.decrby(key, *delta) {
+                Ok(v) => ApplyResult::Integer(v),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::Append { key, value } => {
+                let len = self.append(key, value);
+                ApplyResult::Integer(len as i64)
+            }
+            Command::GetSet { key, value } => {
+                let old = self.getset(key.clone(), value.clone());
+                ApplyResult::Value(old)
+            }
+            Command::SetRange { key, offset, value } => {
+                // TODO: 实现 SETRANGE
+                let _ = (key, offset, value);
+                ApplyResult::Integer(0)
+            }
+
+            // ==================== List 读命令 ====================
+            Command::LLen { key } => ApplyResult::Integer(self.llen(key) as i64),
+            Command::LIndex { key, index } => ApplyResult::Value(self.lindex(key, *index)),
+            Command::LRange { key, start, stop } => {
+                let list = self.lrange(key, *start, *stop);
+                ApplyResult::Array(list.into_iter().map(Some).collect())
+            }
+
+            // ==================== List 写命令 ====================
+            Command::LPush { key, values } => {
+                let len = self.lpush(key, values.clone());
+                ApplyResult::Integer(len as i64)
+            }
+            Command::RPush { key, values } => {
+                let len = self.rpush(key, values.clone());
+                ApplyResult::Integer(len as i64)
+            }
+            Command::LPop { key } => ApplyResult::Value(self.lpop(key)),
+            Command::RPop { key } => ApplyResult::Value(self.rpop(key)),
+            Command::LSet { key, index, value } => match self.lset(key, *index, value.clone()) {
+                Ok(()) => ApplyResult::Ok,
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::LTrim { key, start, stop } => {
+                // TODO: 实现 LTRIM
+                let _ = (key, start, stop);
+                ApplyResult::Ok
+            }
+            Command::LRem { key, count, value } => {
+                // TODO: 实现 LREM
+                let _ = (key, count, value);
+                ApplyResult::Integer(0)
+            }
+
+            // ==================== Hash 读命令 ====================
+            Command::HGet { key, field } => ApplyResult::Value(self.hget(key, field)),
+            Command::HMGet { key, fields } => {
+                let fields_refs: Vec<&[u8]> = fields.iter().map(|f| f.as_slice()).collect();
+                ApplyResult::Array(self.hmget(key, &fields_refs))
+            }
+            Command::HGetAll { key } => ApplyResult::KeyValues(self.hgetall(key)),
+            Command::HKeys { key } => {
+                let keys = self.hkeys(key);
+                ApplyResult::Array(keys.into_iter().map(Some).collect())
+            }
+            Command::HVals { key } => {
+                let vals = self.hvals(key);
+                ApplyResult::Array(vals.into_iter().map(Some).collect())
+            }
+            Command::HLen { key } => ApplyResult::Integer(self.hlen(key) as i64),
+            Command::HExists { key, field } => {
+                ApplyResult::Integer(if self.hexists(key, field) { 1 } else { 0 })
+            }
+
+            // ==================== Hash 写命令 ====================
+            Command::HSet { key, fvs } => {
+                self.hmset(key, fvs.clone());
+                ApplyResult::Integer(fvs.len() as i64)
+            }
+            Command::HSetNx { key, field, value } => {
+                if !self.hexists(key, field) {
+                    self.hset(key, field.clone(), value.clone());
+                    ApplyResult::Integer(1)
+                } else {
+                    ApplyResult::Integer(0)
+                }
+            }
+            Command::HMSet { key, fvs } => {
+                self.hmset(key, fvs.clone());
+                ApplyResult::Ok
+            }
+            Command::HDel { key, fields } => {
+                let fields_refs: Vec<&[u8]> = fields.iter().map(|f| f.as_slice()).collect();
+                let count = self.hdel(key, &fields_refs);
+                ApplyResult::Integer(count as i64)
+            }
+            Command::HIncrBy { key, field, delta } => match self.hincrby(key, field, *delta) {
+                Ok(v) => ApplyResult::Integer(v),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::HIncrByFloat { .. } => {
+                // TODO: 实现 HINCRBYFLOAT
+                ApplyResult::Error(StoreError::Internal("HINCRBYFLOAT not implemented".into()))
+            }
+
+            // ==================== Set 读命令 ====================
+            Command::SMembers { key } => {
+                let members = self.smembers(key);
+                ApplyResult::Array(members.into_iter().map(Some).collect())
+            }
+            Command::SIsMember { key, member } => {
+                ApplyResult::Integer(if self.sismember(key, member) { 1 } else { 0 })
+            }
+            Command::SCard { key } => ApplyResult::Integer(self.scard(key) as i64),
+            Command::SInter { .. } | Command::SUnion { .. } | Command::SDiff { .. } => {
+                // TODO: 实现集合运算
+                ApplyResult::Array(vec![])
+            }
+
+            // ==================== Set 写命令 ====================
+            Command::SAdd { key, members } => {
+                let count = self.sadd(key, members.clone());
+                ApplyResult::Integer(count as i64)
+            }
+            Command::SRem { key, members } => {
+                let members_refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
+                let count = self.srem(key, &members_refs);
+                ApplyResult::Integer(count as i64)
+            }
+            Command::SPop { .. } => {
+                // TODO: 实现 SPOP
+                ApplyResult::Value(None)
+            }
+
+            // ==================== Key 读命令 ====================
+            Command::Exists { keys } => {
+                let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+                ApplyResult::Integer(self.exists(&keys_refs) as i64)
+            }
+            Command::Type { key } => ApplyResult::Type(self.key_type(key)),
+            Command::Ttl { key } => ApplyResult::Integer(self.ttl(key)),
+            Command::PTtl { key } => ApplyResult::Integer(self.ttl(key) * 1000),
+            Command::Keys { pattern } => {
+                let keys = self.keys(pattern);
+                ApplyResult::Array(keys.into_iter().map(Some).collect())
+            }
+            Command::Scan { .. } => {
+                // TODO: 实现 SCAN 命令
+                ApplyResult::Array(vec![])
+            }
+
+            // ==================== Key 写命令 ====================
+            Command::Del { keys } => {
+                let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+                let count = self.del(&keys_refs);
+                ApplyResult::Integer(count as i64)
+            }
+            Command::Expire { key, seconds } => {
+                let result = self.expire(key, *seconds);
+                ApplyResult::Integer(if result { 1 } else { 0 })
+            }
+            Command::PExpire { key, milliseconds } => {
+                let result = self.expire(key, *milliseconds / 1000);
+                ApplyResult::Integer(if result { 1 } else { 0 })
+            }
+            Command::Persist { key } => {
+                let result = self.persist(key);
+                ApplyResult::Integer(if result { 1 } else { 0 })
+            }
+            Command::Rename { key, new_key } => match self.rename(key, new_key.clone()) {
+                Ok(()) => ApplyResult::Ok,
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::RenameNx { key, new_key } => {
+                if self.get(new_key).is_some() {
+                    ApplyResult::Integer(0)
+                } else {
+                    match self.rename(key, new_key.clone()) {
+                        Ok(()) => ApplyResult::Integer(1),
+                        Err(e) => ApplyResult::Error(e),
+                    }
+                }
+            }
+        }
+    }
 }

@@ -7,7 +7,8 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use raft::{ApplyResult, ClusterConfig, RaftId, SnapshotStorage, StateMachine, StorageResult, traits::ClientResult};
-use redisstore::{KVOperation, RedisStore};
+use redisstore::RedisStore;
+use resp::Command;
 
 /// KV 状态机
 #[derive(Clone)]
@@ -52,8 +53,9 @@ impl StateMachine for KVStateMachine {
         term: u64,
         cmd: raft::Command,
     ) -> ApplyResult<()> {
-        let op: KVOperation = match bincode::serde::decode_from_slice(&cmd, bincode::config::standard()) {
-            Ok((op, _)) => op,
+        // 反序列化为 Command
+        let command: Command = match bincode::serde::decode_from_slice(&cmd, bincode::config::standard()) {
+            Ok((cmd, _)) => cmd,
             Err(e) => {
                 warn!("Failed to deserialize command at index {}: {}", index, e);
                 return Err(raft::ApplyError::Internal(format!(
@@ -65,181 +67,12 @@ impl StateMachine for KVStateMachine {
 
         debug!(
             "Applying command at index {}, term {}: {:?}",
-            index, term, op
+            index, term, command
         );
 
-        match op {
-            // ==================== String 操作 ====================
-            KVOperation::Set { key, value, ex_secs } => {
-                if let Some(ttl) = ex_secs {
-                    self.store.setex(key, value, ttl);
-                } else {
-                    self.store.set(key, value);
-                }
-                self.inc_version();
-            }
-            KVOperation::SetNx { key, value } => {
-                self.store.setnx(key, value);
-                self.inc_version();
-            }
-            KVOperation::SetEx { key, value, ttl_secs } => {
-                self.store.setex(key, value, ttl_secs);
-                self.inc_version();
-            }
-            KVOperation::MSet { kvs } => {
-                self.store.mset(kvs);
-                self.inc_version();
-            }
-            KVOperation::MSetNx { kvs } => {
-                // TODO: 实现原子性 MSETNX
-                for (k, v) in kvs {
-                    self.store.setnx(k, v);
-                }
-                self.inc_version();
-            }
-            KVOperation::Incr { key } => {
-                let _ = self.store.incr(&key);
-                self.inc_version();
-            }
-            KVOperation::IncrBy { key, delta } => {
-                let _ = self.store.incrby(&key, delta);
-                self.inc_version();
-            }
-            KVOperation::Decr { key } => {
-                let _ = self.store.decr(&key);
-                self.inc_version();
-            }
-            KVOperation::DecrBy { key, delta } => {
-                let _ = self.store.decrby(&key, delta);
-                self.inc_version();
-            }
-            KVOperation::Append { key, value } => {
-                self.store.append(&key, &value);
-                self.inc_version();
-            }
-            KVOperation::GetSet { key, value } => {
-                self.store.getset(key, value);
-                self.inc_version();
-            }
-            KVOperation::SetRange { key, offset, value } => {
-                // TODO: 实现 SETRANGE
-                let _ = (key, offset, value);
-                self.inc_version();
-            }
-
-            // ==================== List 操作 ====================
-            KVOperation::LPush { key, values } => {
-                self.store.lpush(&key, values);
-                self.inc_version();
-            }
-            KVOperation::RPush { key, values } => {
-                self.store.rpush(&key, values);
-                self.inc_version();
-            }
-            KVOperation::LPop { key } => {
-                self.store.lpop(&key);
-                self.inc_version();
-            }
-            KVOperation::RPop { key } => {
-                self.store.rpop(&key);
-                self.inc_version();
-            }
-            KVOperation::LSet { key, index, value } => {
-                let _ = self.store.lset(&key, index, value);
-                self.inc_version();
-            }
-            KVOperation::LTrim { key, start, stop } => {
-                // TODO: 实现 LTRIM - 需要在 RedisStore 中添加
-                let _ = (key, start, stop);
-                self.inc_version();
-            }
-            KVOperation::LRem { key, count, value } => {
-                // TODO: 实现 LREM - 需要在 RedisStore 中添加
-                let _ = (key, count, value);
-                self.inc_version();
-            }
-
-            // ==================== Hash 操作 ====================
-            KVOperation::HSet { key, fvs } => {
-                self.store.hmset(&key, fvs);
-                self.inc_version();
-            }
-            KVOperation::HSetNx { key, field, value } => {
-                // 只在字段不存在时设置
-                if !self.store.hexists(&key, &field) {
-                    self.store.hset(&key, field, value);
-                }
-                self.inc_version();
-            }
-            KVOperation::HMSet { key, fvs } => {
-                self.store.hmset(&key, fvs);
-                self.inc_version();
-            }
-            KVOperation::HDel { key, fields } => {
-                let fields_refs: Vec<&[u8]> = fields.iter().map(|f| f.as_slice()).collect();
-                self.store.hdel(&key, &fields_refs);
-                self.inc_version();
-            }
-            KVOperation::HIncrBy { key, field, delta } => {
-                let _ = self.store.hincrby(&key, &field, delta);
-                self.inc_version();
-            }
-
-            // ==================== Set 操作 ====================
-            KVOperation::SAdd { key, members } => {
-                self.store.sadd(&key, members);
-                self.inc_version();
-            }
-            KVOperation::SRem { key, members } => {
-                let members_refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
-                self.store.srem(&key, &members_refs);
-                self.inc_version();
-            }
-            KVOperation::SPop { key, count } => {
-                // TODO: 实现 SPOP - 需要在 RedisStore 中添加
-                let _ = (key, count);
-                self.inc_version();
-            }
-
-            // ==================== 通用操作 ====================
-            KVOperation::Del { keys } => {
-                let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
-                self.store.del(&keys_refs);
-                self.inc_version();
-            }
-            KVOperation::Expire { key, ttl_secs } => {
-                self.store.expire(&key, ttl_secs);
-                self.inc_version();
-            }
-            KVOperation::PExpire { key, ttl_ms } => {
-                // 转换毫秒到秒
-                self.store.expire(&key, ttl_ms / 1000);
-                self.inc_version();
-            }
-            KVOperation::Persist { key } => {
-                self.store.persist(&key);
-                self.inc_version();
-            }
-            KVOperation::Rename { key, new_key } => {
-                let _ = self.store.rename(&key, new_key);
-                self.inc_version();
-            }
-            KVOperation::RenameNx { key, new_key } => {
-                // 只在新键不存在时重命名
-                if self.store.get(&new_key).is_none() {
-                    let _ = self.store.rename(&key, new_key);
-                }
-                self.inc_version();
-            }
-            KVOperation::FlushDb => {
-                self.store.flushdb();
-                self.inc_version();
-            }
-
-            KVOperation::NoOp => {
-                // 配置变更等操作，不需要返回值
-            }
-        }
+        // 直接调用 store.apply() 执行命令
+        let _result = self.store.apply(&command);
+        self.inc_version();
 
         Ok(())
     }
@@ -323,6 +156,7 @@ impl StateMachine for KVStateMachine {
 mod tests {
     use super::*;
     use redisstore::MemoryStore;
+    use resp::Command;
 
     #[tokio::test]
     async fn test_set_and_get() {
@@ -330,12 +164,15 @@ mod tests {
         let sm = KVStateMachine::new(store);
         let raft_id = RaftId::new("test".to_string(), "node1".to_string());
 
-        let op = KVOperation::Set {
+        let cmd = Command::Set {
             key: b"key1".to_vec(),
             value: b"value1".to_vec(),
-            ex_secs: None,
+            ex: None,
+            px: None,
+            nx: false,
+            xx: false,
         };
-        let command = bincode::serde::encode_to_vec(&op, bincode::config::standard()).unwrap();
+        let command = bincode::serde::encode_to_vec(&cmd, bincode::config::standard()).unwrap();
 
         let result = sm.apply_command(&raft_id, 1, 1, command).await;
         assert!(result.is_ok());
@@ -350,19 +187,22 @@ mod tests {
         let raft_id = RaftId::new("test".to_string(), "node1".to_string());
 
         // 先插入
-        let op = KVOperation::Set {
+        let cmd = Command::Set {
             key: b"key1".to_vec(),
             value: b"value1".to_vec(),
-            ex_secs: None,
+            ex: None,
+            px: None,
+            nx: false,
+            xx: false,
         };
-        let command = bincode::serde::encode_to_vec(&op, bincode::config::standard()).unwrap();
+        let command = bincode::serde::encode_to_vec(&cmd, bincode::config::standard()).unwrap();
         sm.apply_command(&raft_id, 1, 1, command).await.unwrap();
 
         // 删除
-        let op = KVOperation::Del {
+        let cmd = Command::Del {
             keys: vec![b"key1".to_vec()],
         };
-        let command = bincode::serde::encode_to_vec(&op, bincode::config::standard()).unwrap();
+        let command = bincode::serde::encode_to_vec(&cmd, bincode::config::standard()).unwrap();
         sm.apply_command(&raft_id, 2, 1, command).await.unwrap();
 
         assert_eq!(sm.store().get(b"key1"), None);
@@ -374,11 +214,11 @@ mod tests {
         let sm = KVStateMachine::new(store);
         let raft_id = RaftId::new("test".to_string(), "node1".to_string());
 
-        let op = KVOperation::RPush {
+        let cmd = Command::RPush {
             key: b"list".to_vec(),
             values: vec![b"a".to_vec(), b"b".to_vec()],
         };
-        let command = bincode::serde::encode_to_vec(&op, bincode::config::standard()).unwrap();
+        let command = bincode::serde::encode_to_vec(&cmd, bincode::config::standard()).unwrap();
         sm.apply_command(&raft_id, 1, 1, command).await.unwrap();
 
         assert_eq!(
@@ -393,11 +233,11 @@ mod tests {
         let sm = KVStateMachine::new(store);
         let raft_id = RaftId::new("test".to_string(), "node1".to_string());
 
-        let op = KVOperation::HSet {
+        let cmd = Command::HSet {
             key: b"hash".to_vec(),
             fvs: vec![(b"field1".to_vec(), b"value1".to_vec())],
         };
-        let command = bincode::serde::encode_to_vec(&op, bincode::config::standard()).unwrap();
+        let command = bincode::serde::encode_to_vec(&cmd, bincode::config::standard()).unwrap();
         sm.apply_command(&raft_id, 1, 1, command).await.unwrap();
 
         assert_eq!(

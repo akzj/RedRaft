@@ -17,10 +17,8 @@
 //! assert_eq!(store.get(b"key"), Some(b"value".to_vec()));
 //! ```
 
-mod operation;
 mod traits;
 mod memory;
 
-pub use operation::{KVOperation, NotWriteCommandError};
-pub use traits::{RedisStore, StoreError, StoreResult};
+pub use traits::{ApplyResult, RedisStore, StoreError, StoreResult};
 pub use memory::{MemoryStore, RedisValue};

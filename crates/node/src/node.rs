@@ -19,7 +19,8 @@ use raft::{
 
 use crate::router::ShardRouter;
 use crate::state_machine::KVStateMachine;
-use redisstore::{KVOperation, MemoryStore};
+use redisstore::MemoryStore;
+use resp::Command;
 
 /// RedRaft 节点
 pub struct RedRaftNode {
@@ -205,13 +206,16 @@ impl RedRaftNode {
         
         let raft_id = self.get_or_create_raft_group(shard_id, nodes).await?;
         
-        // 创建操作
-        let op = KVOperation::Set {
+        // 创建命令
+        let cmd = Command::Set {
             key: key_bytes.to_vec(),
             value: value.as_bytes().to_vec(),
-            ex_secs: None,
+            ex: None,
+            px: None,
+            nx: false,
+            xx: false,
         };
-        let command = bincode::serde::encode_to_vec(&op, bincode::config::standard())
+        let command = bincode::serde::encode_to_vec(&cmd, bincode::config::standard())
             .map_err(|e| format!("Failed to serialize command: {}", e))?;
 
         // 发送事件到 Raft 组
@@ -240,10 +244,10 @@ impl RedRaftNode {
             
             let raft_id = self.get_or_create_raft_group(shard_id, nodes).await?;
             
-            let op = KVOperation::Del {
+            let cmd = Command::Del {
                 keys: vec![key_bytes.to_vec()],
             };
-            let command = bincode::serde::encode_to_vec(&op, bincode::config::standard())
+            let command = bincode::serde::encode_to_vec(&cmd, bincode::config::standard())
                 .map_err(|e| format!("Failed to serialize command: {}", e))?;
 
             let event = Event::ClientPropose {
