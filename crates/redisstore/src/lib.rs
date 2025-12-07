@@ -21,6 +21,6 @@ mod operation;
 mod traits;
 mod memory;
 
-pub use operation::KVOperation;
+pub use operation::{KVOperation, NotWriteCommandError};
 pub use traits::{RedisStore, StoreError, StoreResult};
 pub use memory::{MemoryStore, RedisValue};

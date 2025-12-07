@@ -70,24 +70,31 @@ impl StateMachine for KVStateMachine {
 
         match op {
             // ==================== String 操作 ====================
-            KVOperation::Set { key, value } => {
-                self.store.set(key, value);
+            KVOperation::Set { key, value, ex_secs } => {
+                if let Some(ttl) = ex_secs {
+                    self.store.setex(key, value, ttl);
+                } else {
+                    self.store.set(key, value);
+                }
                 self.inc_version();
             }
             KVOperation::SetNx { key, value } => {
                 self.store.setnx(key, value);
                 self.inc_version();
             }
-            KVOperation::SetEx {
-                key,
-                value,
-                ttl_secs,
-            } => {
+            KVOperation::SetEx { key, value, ttl_secs } => {
                 self.store.setex(key, value, ttl_secs);
                 self.inc_version();
             }
             KVOperation::MSet { kvs } => {
                 self.store.mset(kvs);
+                self.inc_version();
+            }
+            KVOperation::MSetNx { kvs } => {
+                // TODO: 实现原子性 MSETNX
+                for (k, v) in kvs {
+                    self.store.setnx(k, v);
+                }
                 self.inc_version();
             }
             KVOperation::Incr { key } => {
@@ -114,6 +121,11 @@ impl StateMachine for KVStateMachine {
                 self.store.getset(key, value);
                 self.inc_version();
             }
+            KVOperation::SetRange { key, offset, value } => {
+                // TODO: 实现 SETRANGE
+                let _ = (key, offset, value);
+                self.inc_version();
+            }
 
             // ==================== List 操作 ====================
             KVOperation::LPush { key, values } => {
@@ -136,10 +148,27 @@ impl StateMachine for KVStateMachine {
                 let _ = self.store.lset(&key, index, value);
                 self.inc_version();
             }
+            KVOperation::LTrim { key, start, stop } => {
+                // TODO: 实现 LTRIM - 需要在 RedisStore 中添加
+                let _ = (key, start, stop);
+                self.inc_version();
+            }
+            KVOperation::LRem { key, count, value } => {
+                // TODO: 实现 LREM - 需要在 RedisStore 中添加
+                let _ = (key, count, value);
+                self.inc_version();
+            }
 
             // ==================== Hash 操作 ====================
-            KVOperation::HSet { key, field, value } => {
-                self.store.hset(&key, field, value);
+            KVOperation::HSet { key, fvs } => {
+                self.store.hmset(&key, fvs);
+                self.inc_version();
+            }
+            KVOperation::HSetNx { key, field, value } => {
+                // 只在字段不存在时设置
+                if !self.store.hexists(&key, &field) {
+                    self.store.hset(&key, field, value);
+                }
                 self.inc_version();
             }
             KVOperation::HMSet { key, fvs } => {
@@ -166,6 +195,11 @@ impl StateMachine for KVStateMachine {
                 self.store.srem(&key, &members_refs);
                 self.inc_version();
             }
+            KVOperation::SPop { key, count } => {
+                // TODO: 实现 SPOP - 需要在 RedisStore 中添加
+                let _ = (key, count);
+                self.inc_version();
+            }
 
             // ==================== 通用操作 ====================
             KVOperation::Del { keys } => {
@@ -177,12 +211,24 @@ impl StateMachine for KVStateMachine {
                 self.store.expire(&key, ttl_secs);
                 self.inc_version();
             }
+            KVOperation::PExpire { key, ttl_ms } => {
+                // 转换毫秒到秒
+                self.store.expire(&key, ttl_ms / 1000);
+                self.inc_version();
+            }
             KVOperation::Persist { key } => {
                 self.store.persist(&key);
                 self.inc_version();
             }
             KVOperation::Rename { key, new_key } => {
                 let _ = self.store.rename(&key, new_key);
+                self.inc_version();
+            }
+            KVOperation::RenameNx { key, new_key } => {
+                // 只在新键不存在时重命名
+                if self.store.get(&new_key).is_none() {
+                    let _ = self.store.rename(&key, new_key);
+                }
                 self.inc_version();
             }
             KVOperation::FlushDb => {
@@ -287,6 +333,7 @@ mod tests {
         let op = KVOperation::Set {
             key: b"key1".to_vec(),
             value: b"value1".to_vec(),
+            ex_secs: None,
         };
         let command = bincode::serde::encode_to_vec(&op, bincode::config::standard()).unwrap();
 
@@ -306,6 +353,7 @@ mod tests {
         let op = KVOperation::Set {
             key: b"key1".to_vec(),
             value: b"value1".to_vec(),
+            ex_secs: None,
         };
         let command = bincode::serde::encode_to_vec(&op, bincode::config::standard()).unwrap();
         sm.apply_command(&raft_id, 1, 1, command).await.unwrap();
@@ -347,8 +395,7 @@ mod tests {
 
         let op = KVOperation::HSet {
             key: b"hash".to_vec(),
-            field: b"field1".to_vec(),
-            value: b"value1".to_vec(),
+            fvs: vec![(b"field1".to_vec(), b"value1".to_vec())],
         };
         let command = bincode::serde::encode_to_vec(&op, bincode::config::standard()).unwrap();
         sm.apply_command(&raft_id, 1, 1, command).await.unwrap();

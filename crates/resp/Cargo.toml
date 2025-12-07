@@ -10,6 +10,8 @@ license = "MIT"
 tokio = { workspace = true, features = ["io-util", "net"] }
 # Error handling
 thiserror = { workspace = true }
+# Serialization (for Command)
+serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

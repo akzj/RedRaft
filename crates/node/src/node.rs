@@ -209,6 +209,7 @@ impl RedRaftNode {
         let op = KVOperation::Set {
             key: key_bytes.to_vec(),
             value: value.as_bytes().to_vec(),
+            ex_secs: None,
         };
         let command = bincode::serde::encode_to_vec(&op, bincode::config::standard())
             .map_err(|e| format!("Failed to serialize command: {}", e))?;

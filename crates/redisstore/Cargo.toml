@@ -6,6 +6,8 @@ description = "Redis-compatible key-value store state machine for Raft"
 license = "MIT"
 
 [dependencies]
+# RESP protocol (for Command type)
+resp = { path = "../resp" }
 # Workspace dependencies
 parking_lot = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

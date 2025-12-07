@@ -9,9 +9,10 @@ pub use error::{CommandError, CommandErrorKind};
 pub use result::CommandResult;
 
 use crate::RespValue;
+use serde::{Deserialize, Serialize};
 
 /// 命令类型标记
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandType {
     /// 读命令 - 可以本地读取或通过 ReadIndex
     Read,
@@ -20,7 +21,7 @@ pub enum CommandType {
 }
 
 /// Redis 命令
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     // ==================== 连接/管理命令 ====================
     /// PING [message]
