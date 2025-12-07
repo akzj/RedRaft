@@ -100,24 +100,52 @@ impl StateMachine for KVStateMachine {
 
     fn process_snapshot(
         &self,
-        _from: &RaftId,
-        _index: u64,
-        _term: u64,
+        from: &RaftId,
+        index: u64,
+        term: u64,
         data: Vec<u8>,
         _config: ClusterConfig,
-        _request_id: raft::RequestId,
+        request_id: RequestId,
         oneshot: tokio::sync::oneshot::Sender<raft::SnapshotResult<()>>,
     ) {
-        match self.store.restore_from_snapshot(&data) {
-            Ok(()) => {
-                let _ = oneshot.send(Ok(()));
+        let store = self.store.clone();
+        let version = self.version.clone();
+        let apply_results = self.apply_results.clone();
+        let from = from.clone();
+
+        // 使用 spawn_blocking 避免阻塞异步运行时
+        tokio::task::spawn_blocking(move || {
+            info!(
+                "Installing snapshot for {} at index {}, term {}, request_id: {:?}, data_size: {} bytes",
+                from, index, term, request_id, data.len()
+            );
+
+            match store.restore_from_snapshot(&data) {
+                Ok(()) => {
+                    // 更新版本号为快照索引
+                    version.store(index, std::sync::atomic::Ordering::SeqCst);
+                    
+                    // 清理旧的 apply 结果缓存（快照之前的结果已经无意义）
+                    apply_results.lock().clear();
+                    
+                    info!(
+                        "Snapshot installed successfully for {} at index {}, {} keys restored",
+                        from, index, store.dbsize()
+                    );
+                    
+                    let _ = oneshot.send(Ok(()));
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to install snapshot for {} at index {}: {}",
+                        from, index, e
+                    );
+                    let _ = oneshot.send(Err(raft::SnapshotError::DataCorrupted(Arc::new(
+                        anyhow::anyhow!(e),
+                    ))));
+                }
             }
-            Err(e) => {
-                let _ = oneshot.send(Err(raft::SnapshotError::DataCorrupted(Arc::new(
-                    anyhow::anyhow!(e),
-                ))));
-            }
-        }
+        });
     }
 
     async fn create_snapshot(
