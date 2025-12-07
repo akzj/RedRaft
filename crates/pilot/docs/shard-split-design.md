@@ -387,6 +387,77 @@ pub enum SplitRole {
    - [ ] 故障恢复
    - [ ] 清理逻辑
 
+## TODO - 待完善功能
+
+### 已完成 ✅
+
+- [x] SplitTask 数据结构和状态机
+- [x] SplitManager 分裂协调器
+- [x] HTTP API（触发分裂、查询进度、取消分裂）
+- [x] Node 端路由表分裂状态同步
+- [x] MOVED/TRYAGAIN 响应处理
+
+### 待实现 🚧
+
+#### 高优先级
+
+- [ ] **Pilot 推送分裂状态到路由表**
+  - 在 `RoutingTable` 序列化时包含 `splitting_shards`
+  - Node 通过路由表同步获取分裂状态
+
+- [ ] **快照传输（筛选槽位范围）**
+  - 修改 `StateMachine::create_snapshot` 支持槽位范围过滤
+  - 实现 `split_snapshot(slot_start, slot_end)` 方法
+  - 传输快照到目标 Shard
+
+- [ ] **增量日志转发**
+  - 源 Shard 筛选 `slot >= split_slot` 的写操作
+  - 转发到目标 Shard 的 Raft 组
+  - 目标 Shard 按顺序 apply
+
+- [ ] **请求缓冲队列**
+  - 实现 `SplitBuffer` 缓存 buffering 阶段的请求
+  - 设置最大缓冲数量和超时时间
+  - 切换完成后批量返回 MOVED
+
+#### 中优先级
+
+- [ ] **分裂进度上报**
+  - Node 定期上报 `applied_index` 到 Pilot
+  - Pilot 计算延迟并更新 `SplitProgress`
+  - 支持 API 查询分裂进度
+
+- [ ] **自动触发分裂**
+  - 监控 Shard 数据量（字节数、key 数量）
+  - 监控 Shard QPS
+  - 超过阈值自动触发分裂
+
+- [ ] **分裂调度优化**
+  - 选择最优分裂点（数据均衡）
+  - 避免热点 key 集中在单个分片
+  - 考虑节点负载均衡
+
+#### 低优先级
+
+- [ ] **分裂回滚测试**
+  - 模拟各阶段失败场景
+  - 验证回滚后数据完整性
+  - 验证服务可用性
+
+- [ ] **端到端集成测试**
+  - 多节点集群分裂测试
+  - 并发读写场景测试
+  - 客户端重定向测试
+
+- [ ] **监控和告警**
+  - 分裂耗时统计
+  - 分裂失败告警
+  - 分裂进度可视化
+
+- [ ] **分片合并（Merge）**
+  - 与分裂相反的操作
+  - 用于缩容场景
+
 ## 参考
 
 - [Redis Cluster Resharding](https://redis.io/docs/management/scaling/)

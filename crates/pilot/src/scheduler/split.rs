@@ -16,7 +16,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::metadata::{
     ClusterMetadata, KeyRange, ShardId, ShardInfo, ShardSplitState, ShardStatus,
-    SplitProgress, SplitRole, SplitStatus, SplitTask,
+    SplitPhase, SplitProgress, SplitRole, SplitStatus, SplitTask, SplittingShardInfo,
 };
 
 /// 分裂管理器配置
@@ -180,9 +180,18 @@ impl SplitManager {
         // 9. 存储目标分片
         metadata.shards.insert(target_shard_id.clone(), target_shard);
 
-        // 注意：此时不更新路由表，路由表在切换阶段才更新
+        // 10. 添加分裂信息到路由表（用于 Node 感知分裂状态）
+        let splitting_info = SplittingShardInfo {
+            source_shard: source_shard_id.clone(),
+            target_shard: target_shard_id.clone(),
+            split_slot,
+            source_range: key_range,
+            target_nodes: target_nodes.clone(),
+            phase: SplitPhase::Preparing,
+        };
+        metadata.routing_table.add_splitting_shard(splitting_info);
 
-        // 10. 存储任务
+        // 11. 存储任务
         let task_clone = task.clone();
         self.tasks.write().insert(task.id.clone(), task);
 
@@ -302,7 +311,10 @@ impl SplitManager {
             .routing_table
             .set_shard_nodes(task.target_shard.clone(), target_nodes);
 
-        // 4. 更新任务状态
+        // 4. 移除分裂信息
+        metadata.routing_table.remove_splitting_shard(&task.source_shard);
+
+        // 5. 更新任务状态
         self.update_task_status(task_id, SplitStatus::Completed);
 
         info!(
@@ -348,7 +360,10 @@ impl SplitManager {
             }
         }
 
-        // 3. 更新任务状态
+        // 3. 从路由表移除分裂信息
+        metadata.routing_table.remove_splitting_shard(&task.source_shard);
+
+        // 4. 更新任务状态
         self.update_task_status(task_id, SplitStatus::Cancelled);
 
         info!("Split task {} cancelled", task_id);
@@ -383,6 +398,9 @@ impl SplitManager {
             }
         }
 
+        // 从路由表移除分裂信息
+        metadata.routing_table.remove_splitting_shard(&task.source_shard);
+
         self.update_task_status(task_id, SplitStatus::Failed(reason));
 
         Ok(())
@@ -396,6 +414,74 @@ impl SplitManager {
     /// 检查是否应该进入缓存模式
     pub fn should_start_buffering(&self, delay: u64) -> bool {
         delay < self.config.catch_up_threshold
+    }
+
+    /// 进入缓冲阶段
+    pub async fn start_buffering(&self, task_id: &str) -> Result<(), String> {
+        let task = self
+            .get_task(task_id)
+            .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+        if task.status != SplitStatus::CatchingUp {
+            return Err(format!(
+                "Task {} is not in catching_up status: {}",
+                task_id, task.status
+            ));
+        }
+
+        info!("Split task {} entering buffering phase", task_id);
+
+        let mut metadata = self.metadata.write().await;
+
+        // 更新路由表中的分裂阶段
+        metadata
+            .routing_table
+            .update_split_phase(&task.source_shard, SplitPhase::Buffering);
+
+        // 更新任务状态
+        drop(metadata);
+        self.update_task_status(task_id, SplitStatus::Buffering);
+
+        Ok(())
+    }
+
+    /// 进入切换阶段
+    pub async fn start_switching(&self, task_id: &str) -> Result<(), String> {
+        let task = self
+            .get_task(task_id)
+            .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+        if task.status != SplitStatus::Buffering {
+            return Err(format!(
+                "Task {} is not in buffering status: {}",
+                task_id, task.status
+            ));
+        }
+
+        info!("Split task {} entering switching phase", task_id);
+
+        let mut metadata = self.metadata.write().await;
+
+        // 更新路由表中的分裂阶段
+        metadata
+            .routing_table
+            .update_split_phase(&task.source_shard, SplitPhase::Switched);
+
+        // 更新任务状态
+        drop(metadata);
+        self.update_task_status(task_id, SplitStatus::Switching);
+
+        Ok(())
+    }
+
+    /// 进入快照传输阶段
+    pub fn start_snapshot_transfer(&self, task_id: &str) -> bool {
+        self.update_task_status(task_id, SplitStatus::SnapshotTransfer)
+    }
+
+    /// 进入增量追赶阶段
+    pub fn start_catching_up(&self, task_id: &str) -> bool {
+        self.update_task_status(task_id, SplitStatus::CatchingUp)
     }
 }
 

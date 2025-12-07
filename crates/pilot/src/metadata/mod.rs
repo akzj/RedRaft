@@ -12,5 +12,5 @@ pub use shard::{
     KeyRange, ShardId, ShardInfo, ShardSplitState, ShardStatus,
     SplitProgress, SplitRole, SplitStatus, SplitTask, TOTAL_SLOTS,
 };
-pub use routing::RoutingTable;
+pub use routing::{RoutingTable, SplitPhase, SplittingShardInfo};
 pub use cluster::{ClusterMetadata, ClusterStats};

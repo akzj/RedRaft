@@ -173,14 +173,12 @@ impl RedisStore for MemoryStore {
     fn mget(&self, keys: &[&[u8]]) -> Vec<Option<Vec<u8>>> {
         let data = self.data.read();
         keys.iter()
-            .map(|key| {
-                match self.get_entry(&data, key) {
-                    Some(Entry {
-                        value: RedisValue::String(v),
-                        ..
-                    }) => Some(v),
-                    _ => None,
-                }
+            .map(|key| match self.get_entry(&data, key) {
+                Some(Entry {
+                    value: RedisValue::String(v),
+                    ..
+                }) => Some(v),
+                _ => None,
             })
             .collect()
     }
@@ -359,7 +357,11 @@ impl RedisStore for MemoryStore {
                 return vec![];
             }
 
-            list.iter().skip(start).take(stop - start).cloned().collect()
+            list.iter()
+                .skip(start)
+                .take(stop - start)
+                .cloned()
+                .collect()
         } else {
             vec![]
         }
@@ -483,7 +485,10 @@ impl RedisStore for MemoryStore {
             ..
         }) = self.get_entry_mut(&mut data, key)
         {
-            fields.iter().filter(|f| hash.remove(&f.to_vec()).is_some()).count()
+            fields
+                .iter()
+                .filter(|f| hash.remove(&f.to_vec()).is_some())
+                .count()
         } else {
             0
         }
@@ -650,7 +655,9 @@ impl RedisStore for MemoryStore {
 
     fn del(&self, keys: &[&[u8]]) -> usize {
         let mut data = self.data.write();
-        keys.iter().filter(|k| data.remove(&k.to_vec()).is_some()).count()
+        keys.iter()
+            .filter(|k| data.remove(&k.to_vec()).is_some())
+            .count()
     }
 
     fn exists(&self, keys: &[&[u8]]) -> usize {
@@ -768,8 +775,9 @@ impl RedisStore for MemoryStore {
             entries: HashMap<Vec<u8>, (RedisValue, Option<u64>)>,
         }
 
-        let (snap, _): (SnapshotData, _) = bincode::serde::decode_from_slice(snapshot, bincode::config::standard())
-            .map_err(|e| format!("Failed to deserialize snapshot: {}", e))?;
+        let (snap, _): (SnapshotData, _) =
+            bincode::serde::decode_from_slice(snapshot, bincode::config::standard())
+                .map_err(|e| format!("Failed to deserialize snapshot: {}", e))?;
 
         let mut data = self.data.write();
         data.clear();
@@ -801,8 +809,112 @@ impl RedisStore for MemoryStore {
             .collect();
 
         let snap = SnapshotData { entries };
-        bincode::serde::encode_to_vec(&snap, bincode::config::standard()).map_err(|e| format!("Failed to serialize snapshot: {}", e))
+        bincode::serde::encode_to_vec(&snap, bincode::config::standard())
+            .map_err(|e| format!("Failed to serialize snapshot: {}", e))
     }
+
+    fn create_split_snapshot(
+        &self,
+        slot_start: u32,
+        slot_end: u32,
+        total_slots: u32,
+    ) -> Result<Vec<u8>, String> {
+        #[derive(Serialize)]
+        struct SnapshotData {
+            entries: HashMap<Vec<u8>, (RedisValue, Option<u64>)>,
+        }
+
+        let data = self.data.read();
+        let entries: HashMap<Vec<u8>, (RedisValue, Option<u64>)> = data
+            .iter()
+            .filter(|(_, e)| !e.is_expired())
+            .filter(|(k, _)| {
+                let slot = slot_for_key(k, total_slots);
+                slot >= slot_start && slot < slot_end
+            })
+            .map(|(k, e)| (k.clone(), (e.value.clone(), e.ttl_ms)))
+            .collect();
+
+        info!(
+            "Created split snapshot: slots [{}, {}), {} keys",
+            slot_start,
+            slot_end,
+            entries.len()
+        );
+
+        let snap = SnapshotData { entries };
+        bincode::serde::encode_to_vec(&snap, bincode::config::standard())
+            .map_err(|e| format!("Failed to serialize split snapshot: {}", e))
+    }
+
+    fn merge_from_snapshot(&self, snapshot: &[u8]) -> Result<usize, String> {
+        #[derive(Deserialize)]
+        struct SnapshotData {
+            entries: HashMap<Vec<u8>, (RedisValue, Option<u64>)>,
+        }
+
+        let (snap, _): (SnapshotData, _) =
+            bincode::serde::decode_from_slice(snapshot, bincode::config::standard())
+                .map_err(|e| format!("Failed to deserialize snapshot: {}", e))?;
+
+        let mut data = self.data.write();
+        let count = snap.entries.len();
+
+        for (key, (value, ttl_ms)) in snap.entries {
+            let entry = if let Some(ms) = ttl_ms {
+                Entry::with_ttl(value, Duration::from_millis(ms))
+            } else {
+                Entry::new(value)
+            };
+            data.insert(key, entry);
+        }
+
+        info!("Merged {} keys from snapshot", count);
+        Ok(count)
+    }
+
+    fn delete_keys_in_slot_range(
+        &self,
+        slot_start: u32,
+        slot_end: u32,
+        total_slots: u32,
+    ) -> usize {
+        let mut data = self.data.write();
+        let before = data.len();
+
+        data.retain(|k, _| {
+            let slot = slot_for_key(k, total_slots);
+            slot < slot_start || slot >= slot_end
+        });
+
+        let deleted = before - data.len();
+        info!(
+            "Deleted {} keys in slot range [{}, {})",
+            deleted, slot_start, slot_end
+        );
+        deleted
+    }
+}
+
+/// 计算 key 的槽位（CRC16 XMODEM）
+fn slot_for_key(key: &[u8], total_slots: u32) -> u32 {
+    crc16(key) as u32 % total_slots
+}
+
+/// CRC16 实现（XMODEM 变种，与 Redis Cluster 兼容）
+fn crc16(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0;
+    for byte in data {
+        crc ^= (*byte as u16) << 8;
+        for _ in 0..8 {
+            if crc & 0x8000 != 0 {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
 }
 
 #[cfg(test)]
@@ -904,8 +1016,98 @@ mod tests {
         new_store.restore_from_snapshot(&snapshot).unwrap();
 
         assert_eq!(new_store.get(b"str"), Some(b"value".to_vec()));
-        assert_eq!(new_store.lrange(b"list", 0, -1), vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(
+            new_store.lrange(b"list", 0, -1),
+            vec![b"a".to_vec(), b"b".to_vec()]
+        );
         assert_eq!(new_store.hget(b"hash", b"f"), Some(b"v".to_vec()));
         assert!(new_store.sismember(b"set", b"m"));
+    }
+
+    #[test]
+    fn test_split_snapshot() {
+        let store = MemoryStore::new();
+        let total_slots = 16384u32;
+
+        // 添加多个 key，它们会分布在不同的槽位
+        for i in 0..100 {
+            let key = format!("key_{}", i);
+            let value = format!("value_{}", i);
+            store.set(key.into_bytes(), value.into_bytes());
+        }
+
+        // 创建一个只包含前半部分槽位的快照
+        let split_snapshot = store
+            .create_split_snapshot(0, 8192, total_slots)
+            .unwrap();
+
+        // 新 store 从分裂快照恢复
+        let new_store = MemoryStore::new();
+        let merged = new_store.merge_from_snapshot(&split_snapshot).unwrap();
+
+        // 验证合并的数量小于原始数量（因为只包含部分槽位）
+        assert!(merged < 100);
+        assert!(merged > 0);
+
+        // 验证新 store 中的 key 都在指定槽位范围内
+        let all_keys = new_store.keys(b"*");
+        for key in &all_keys {
+            let slot = slot_for_key(key, total_slots);
+            assert!(slot < 8192, "Key {:?} has slot {} which is >= 8192", key, slot);
+        }
+    }
+
+    #[test]
+    fn test_delete_keys_in_slot_range() {
+        let store = MemoryStore::new();
+        let total_slots = 16384u32;
+
+        // 添加多个 key
+        for i in 0..100 {
+            let key = format!("key_{}", i);
+            let value = format!("value_{}", i);
+            store.set(key.into_bytes(), value.into_bytes());
+        }
+
+        let before = store.dbsize();
+
+        // 删除前半部分槽位的 key
+        let deleted = store.delete_keys_in_slot_range(0, 8192, total_slots);
+
+        let after = store.dbsize();
+
+        // 验证删除数量
+        assert!(deleted > 0);
+        assert_eq!(before - deleted, after);
+
+        // 验证剩余的 key 都不在删除范围内
+        let remaining_keys = store.keys(b"*");
+        for key in &remaining_keys {
+            let slot = slot_for_key(key, total_slots);
+            assert!(slot >= 8192, "Key {:?} has slot {} which is < 8192", key, slot);
+        }
+    }
+
+    #[test]
+    fn test_merge_from_snapshot() {
+        let store1 = MemoryStore::new();
+        store1.set(b"key1".to_vec(), b"value1".to_vec());
+        store1.set(b"key2".to_vec(), b"value2".to_vec());
+
+        let snapshot = store1.create_snapshot().unwrap();
+
+        // 创建另一个 store 并设置一些不同的 key
+        let store2 = MemoryStore::new();
+        store2.set(b"key3".to_vec(), b"value3".to_vec());
+
+        // 合并快照
+        let merged = store2.merge_from_snapshot(&snapshot).unwrap();
+        assert_eq!(merged, 2);
+
+        // 验证两边的 key 都存在
+        assert_eq!(store2.get(b"key1"), Some(b"value1".to_vec()));
+        assert_eq!(store2.get(b"key2"), Some(b"value2".to_vec()));
+        assert_eq!(store2.get(b"key3"), Some(b"value3".to_vec()));
+        assert_eq!(store2.dbsize(), 3);
     }
 }

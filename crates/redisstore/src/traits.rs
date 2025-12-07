@@ -228,6 +228,46 @@ pub trait RedisStore: Send + Sync {
     /// 创建快照数据
     fn create_snapshot(&self) -> Result<Vec<u8>, String>;
 
+    /// 创建分裂快照 - 只包含指定槽位范围内的数据
+    ///
+    /// # 参数
+    /// - `slot_start`: 起始槽位（包含）
+    /// - `slot_end`: 结束槽位（不包含）
+    /// - `total_slots`: 总槽位数（用于计算 key 的槽位）
+    ///
+    /// # 返回
+    /// 只包含 slot ∈ [slot_start, slot_end) 的 key 的快照数据
+    fn create_split_snapshot(
+        &self,
+        slot_start: u32,
+        slot_end: u32,
+        total_slots: u32,
+    ) -> Result<Vec<u8>, String>;
+
+    /// 从分裂快照恢复 - 合并到现有数据
+    ///
+    /// 与 restore_from_snapshot 不同，此方法不会清空现有数据，
+    /// 而是将快照中的数据合并进来。
+    fn merge_from_snapshot(&self, snapshot: &[u8]) -> Result<usize, String>;
+
+    /// 删除指定槽位范围内的所有 key
+    ///
+    /// 用于分裂完成后源分片清理已转移的数据
+    ///
+    /// # 参数
+    /// - `slot_start`: 起始槽位（包含）
+    /// - `slot_end`: 结束槽位（不包含）
+    /// - `total_slots`: 总槽位数
+    ///
+    /// # 返回
+    /// 删除的 key 数量
+    fn delete_keys_in_slot_range(
+        &self,
+        slot_start: u32,
+        slot_end: u32,
+        total_slots: u32,
+    ) -> usize;
+
     // ==================== 命令执行 ====================
 
     /// 执行 Redis 命令
