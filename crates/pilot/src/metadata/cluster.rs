@@ -69,6 +69,90 @@ impl ClusterMetadata {
         self.touch();
     }
 
+    /// 创建新分片
+    /// 
+    /// # 参数
+    /// - `shard_id`: 分片 ID（如果为 None，自动生成）
+    /// - `slot_start`: 起始槽位
+    /// - `slot_end`: 结束槽位（不包含）
+    /// - `replica_nodes`: 初始副本节点列表
+    /// 
+    /// # 返回
+    /// - Ok(ShardInfo): 创建成功
+    /// - Err(String): 创建失败原因
+    pub fn create_shard(
+        &mut self,
+        shard_id: Option<String>,
+        slot_start: u32,
+        slot_end: u32,
+        replica_nodes: Vec<NodeId>,
+    ) -> Result<ShardInfo, String> {
+        // 验证槽位范围
+        if slot_start >= slot_end {
+            return Err("slot_start must be less than slot_end".to_string());
+        }
+        if slot_end > TOTAL_SLOTS {
+            return Err(format!("slot_end must not exceed {}", TOTAL_SLOTS));
+        }
+
+        // 检查槽位是否已被分配
+        for slot in slot_start..slot_end {
+            if self.routing_table.get_shard_for_slot(slot).is_some() {
+                return Err(format!("Slot {} is already assigned", slot));
+            }
+        }
+
+        // 验证节点存在
+        for node_id in &replica_nodes {
+            if !self.nodes.contains_key(node_id) {
+                return Err(format!("Node {} does not exist", node_id));
+            }
+        }
+
+        // 生成分片 ID
+        let shard_id = shard_id.unwrap_or_else(|| {
+            let max_id = self.shards.keys()
+                .filter_map(|k| k.strip_prefix("shard_").and_then(|n| n.parse::<u32>().ok()))
+                .max()
+                .unwrap_or(0);
+            format!("shard_{:04}", max_id + 1)
+        });
+
+        // 检查分片 ID 是否已存在
+        if self.shards.contains_key(&shard_id) {
+            return Err(format!("Shard {} already exists", shard_id));
+        }
+
+        // 创建分片
+        let key_range = KeyRange::new(slot_start, slot_end);
+        let mut shard = ShardInfo::new(shard_id.clone(), key_range, self.default_replica_factor);
+
+        // 添加副本节点
+        for node_id in &replica_nodes {
+            shard.add_replica(node_id.clone());
+            if let Some(node) = self.nodes.get_mut(node_id) {
+                node.add_shard(shard_id.clone());
+            }
+        }
+
+        // 设置第一个节点为 leader（如果有）
+        if let Some(leader) = replica_nodes.first() {
+            shard.set_leader(leader.clone());
+            shard.status = super::ShardStatus::Normal;
+        }
+
+        // 更新路由表
+        self.routing_table.assign_slots(&shard_id, slot_start, slot_end);
+        self.routing_table.set_shard_nodes(shard_id.clone(), replica_nodes);
+
+        // 存储分片
+        let result = shard.clone();
+        self.shards.insert(shard_id, shard);
+
+        self.touch();
+        Ok(result)
+    }
+
     /// 更新时间戳
     fn touch(&mut self) {
         self.updated_at = Utc::now();

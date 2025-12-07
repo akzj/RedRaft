@@ -103,6 +103,11 @@ impl Pilot {
         self.metadata.read().await.clone()
     }
 
+    /// 获取元数据（可写）
+    pub async fn metadata_mut(&self) -> tokio::sync::RwLockWriteGuard<'_, ClusterMetadata> {
+        self.metadata.write().await
+    }
+
     /// 获取路由表
     pub async fn routing_table(&self) -> metadata::RoutingTable {
         self.metadata.read().await.routing_table.clone()

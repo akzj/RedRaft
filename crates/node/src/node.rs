@@ -224,6 +224,54 @@ impl RedRaftNode {
         Ok(raft_id)
     }
 
+    /// 从路由表同步 Raft 组
+    /// 
+    /// 检查路由表中本节点负责的分片，自动创建缺失的 Raft 组。
+    /// 此方法应在路由表更新后调用。
+    /// 
+    /// # 返回
+    /// 返回新创建的 Raft 组数量
+    pub async fn sync_raft_groups_from_routing(&self, routing_table: &crate::pilot_client::RoutingTable) -> usize {
+        let mut created_count = 0;
+
+        for (shard_id, nodes) in &routing_table.shard_nodes {
+            // 检查本节点是否是该分片的副本
+            if !nodes.contains(&self.node_id) {
+                continue;
+            }
+
+            // 检查 Raft 组是否已存在
+            if self.get_raft_group(shard_id).is_some() {
+                continue;
+            }
+
+            // 创建 Raft 组
+            info!(
+                "Creating Raft group for shard {} (nodes: {:?})",
+                shard_id, nodes
+            );
+
+            match self.create_raft_group(shard_id.clone(), nodes.clone()).await {
+                Ok(raft_id) => {
+                    info!("Successfully created Raft group: {}", raft_id);
+                    created_count += 1;
+                }
+                Err(e) => {
+                    info!("Failed to create Raft group for shard {}: {}", shard_id, e);
+                }
+            }
+        }
+
+        if created_count > 0 {
+            info!(
+                "Synced {} Raft groups from routing table (version {})",
+                created_count, routing_table.version
+            );
+        }
+
+        created_count
+    }
+
     /// 处理客户端命令
     pub async fn handle_command(&self, cmd: Command) -> Result<RespValue, String> {
         debug!("Handling command: {:?}", cmd.name());

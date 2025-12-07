@@ -129,26 +129,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(()) => {
                 info!("Connected to pilot successfully");
                 
-                // 更新节点路由表
+                // 更新节点路由表并同步 Raft 组
                 {
                     let routing = client.routing_table();
                     let table = routing.read();
                     node.router().update_from_pilot(&table);
+                    // 根据路由表创建本节点负责的 Raft 组
+                    let created = node.sync_raft_groups_from_routing(&table).await;
+                    if created > 0 {
+                        info!("Initial sync: created {} Raft groups", created);
+                    }
                 }
                 
                 // 启动后台任务
                 let _handles = client.clone().start_background_tasks();
                 
                 // 启动路由表同步任务
-                let router = node.router();
+                let node_clone = node.clone();
                 let routing_table = client.routing_table();
                 tokio::spawn(async move {
                     use tokio::time::{interval, Duration};
                     let mut interval = interval(Duration::from_secs(5));
                     loop {
                         interval.tick().await;
-                        let table = routing_table.read();
-                        router.update_from_pilot(&table);
+                        let table = routing_table.read().clone();
+                        node_clone.router().update_from_pilot(&table);
+                        // 同步 Raft 组
+                        node_clone.sync_raft_groups_from_routing(&table).await;
                     }
                 });
                 

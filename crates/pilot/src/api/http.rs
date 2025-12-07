@@ -47,6 +47,7 @@ impl HttpApi {
             
             // 分片
             .route("/api/v1/shards", get(list_shards))
+            .route("/api/v1/shards", post(create_shard))
             .route("/api/v1/shards/:shard_id", get(get_shard))
             .route("/api/v1/shards/:shard_id/migrate", post(migrate_shard))
             
@@ -105,6 +106,18 @@ struct RegisterNodeRequest {
 struct MigrateShardRequest {
     from_node: String,
     to_node: String,
+}
+
+#[derive(Deserialize)]
+struct CreateShardRequest {
+    /// 分片 ID（可选，不提供则自动生成）
+    shard_id: Option<String>,
+    /// 起始槽位
+    slot_start: u32,
+    /// 结束槽位（不包含）
+    slot_end: u32,
+    /// 副本节点列表
+    replica_nodes: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -225,6 +238,31 @@ async fn list_shards(
     let metadata = pilot.metadata().await;
     let shards: Vec<_> = metadata.shards.values().cloned().collect();
     ApiResponse::ok(shards)
+}
+
+async fn create_shard(
+    State(pilot): State<Arc<Pilot>>,
+    Json(req): Json<CreateShardRequest>,
+) -> impl IntoResponse {
+    info!(
+        "Creating shard: id={:?}, slots=[{}, {}), replicas={:?}",
+        req.shard_id, req.slot_start, req.slot_end, req.replica_nodes
+    );
+
+    let mut metadata = pilot.metadata_mut().await;
+    match metadata.create_shard(
+        req.shard_id,
+        req.slot_start,
+        req.slot_end,
+        req.replica_nodes,
+    ) {
+        Ok(shard) => {
+            drop(metadata);
+            let _ = pilot.save().await;
+            (StatusCode::CREATED, ApiResponse::ok(shard))
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, ApiResponse::<ShardInfo>::err(e)),
+    }
 }
 
 async fn get_shard(

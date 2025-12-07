@@ -112,6 +112,11 @@ impl RoutingTable {
     pub fn unassigned_slot_count(&self) -> usize {
         self.slots.iter().filter(|s| s.is_none()).count()
     }
+
+    /// 获取指定槽位的分片 ID
+    pub fn get_shard_for_slot(&self, slot: u32) -> Option<&ShardId> {
+        self.slots.get(slot as usize)?.as_ref()
+    }
 }
 
 /// CRC16 实现（XMODEM 变种，与 Redis Cluster 兼容）
