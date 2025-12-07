@@ -3,13 +3,13 @@
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::RaftState;
 use crate::event::Role;
 use crate::error::SnapshotError;
 use crate::message::{
-    CompleteSnapshotInstallation, InstallSnapshotRequest, InstallSnapshotResponse,
+    CompleteSnapshotInstallation, HardState, InstallSnapshotRequest, InstallSnapshotResponse,
     InstallSnapshotState, Snapshot, SnapshotProbeSchedule,
 };
 use crate::types::{RaftId, RequestId};
@@ -383,11 +383,70 @@ impl RaftState {
         }
 
         if result.success {
+            info!(
+                "Node {} snapshot installation succeeded at index {}, term {}",
+                self.id, result.index, result.term
+            );
+
             self.last_snapshot_index = result.index;
             self.last_snapshot_term = result.term;
             self.commit_index = self.commit_index.max(result.index);
             self.last_applied = self.last_applied.max(result.index);
 
+            // 1. 截断快照之前的日志条目
+            if result.index > 0 {
+                let _ = self
+                    .error_handler
+                    .handle_void(
+                        self.callbacks
+                            .truncate_log_prefix(&self.id, result.index + 1)
+                            .await,
+                        "truncate_log_prefix",
+                        None,
+                    )
+                    .await;
+                info!(
+                    "Node {} truncated log prefix up to index {}",
+                    self.id, result.index
+                );
+            }
+
+            // 2. 持久化硬状态
+            let hard_state = HardState {
+                raft_id: self.id.clone(),
+                term: self.current_term,
+                voted_for: self.voted_for.clone(),
+            };
+            let _ = self
+                .error_handler
+                .handle_void(
+                    self.callbacks.save_hard_state(&self.id, hard_state).await,
+                    "save_hard_state",
+                    None,
+                )
+                .await;
+
+            // 3. 清理过期的客户端请求（索引 <= snapshot_index 的请求已经无效）
+            let snapshot_index = result.index;
+            let expired_requests: Vec<_> = self
+                .client_requests
+                .iter()
+                .filter(|(_, &idx)| idx <= snapshot_index)
+                .map(|(req_id, _)| *req_id)
+                .collect();
+
+            for req_id in expired_requests {
+                if let Some(idx) = self.client_requests.remove(&req_id) {
+                    self.client_requests_revert.remove(&idx);
+                    self.client_request_timestamps.remove(&req_id);
+                    debug!(
+                        "Node {} cleaned up expired client request {:?} at index {}",
+                        self.id, req_id, idx
+                    );
+                }
+            }
+
+            // 4. 应用快照配置
             if let Some(snapshot_config) = result.config {
                 info!(
                     "Node {} applying snapshot config: old_config={:?}, new_config={:?}",
@@ -466,6 +525,11 @@ impl RaftState {
                     }
                 }
             }
+
+            info!(
+                "Node {} completed snapshot installation: last_applied={}, commit_index={}",
+                self.id, self.last_applied, self.commit_index
+            );
         } else {
             warn!(
                 "Node {} snapshot installation failed: {}",
