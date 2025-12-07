@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::Pilot;
-use crate::metadata::{NodeInfo, ShardInfo};
+use crate::metadata::{NodeInfo, ShardInfo, SplitTask};
 use crate::node_manager::RegisterResult;
 
 /// HTTP API 服务
@@ -57,6 +57,12 @@ impl HttpApi {
             // 迁移任务
             .route("/api/v1/migrations", get(list_migrations))
             .route("/api/v1/migrations/:task_id", get(get_migration))
+            
+            // 分裂任务
+            .route("/api/v1/shards/:shard_id/split", post(split_shard))
+            .route("/api/v1/splits", get(list_splits))
+            .route("/api/v1/splits/:task_id", get(get_split))
+            .route("/api/v1/splits/:task_id", axum::routing::delete(cancel_split))
             
             // 调度
             .route("/api/v1/schedule", post(trigger_schedule))
@@ -123,6 +129,16 @@ struct CreateShardRequest {
 #[derive(Serialize)]
 struct RegisterResponse {
     is_new: bool,
+}
+
+#[derive(Deserialize)]
+struct SplitShardRequest {
+    /// 分裂点槽位（目标分片将负责 [split_slot, source.end)）
+    split_slot: u32,
+    /// 目标分片 ID（可选，自动生成）
+    target_shard_id: Option<String>,
+    /// 目标分片的节点列表（可选，复用源分片节点）
+    target_nodes: Option<Vec<String>>,
 }
 
 // ==================== 处理函数 ====================
@@ -348,4 +364,63 @@ async fn trigger_rebalance(
 #[derive(Serialize)]
 struct RebalanceResult {
     migrations: usize,
+}
+
+// 分裂任务
+async fn split_shard(
+    State(pilot): State<Arc<Pilot>>,
+    Path(shard_id): Path<String>,
+    Json(req): Json<SplitShardRequest>,
+) -> impl IntoResponse {
+    info!(
+        "Splitting shard {}: split_slot={}, target={:?}",
+        shard_id, req.split_slot, req.target_shard_id
+    );
+
+    match pilot
+        .scheduler()
+        .split_shard(&shard_id, req.split_slot, req.target_shard_id, req.target_nodes)
+        .await
+    {
+        Ok(task) => {
+            let _ = pilot.save().await;
+            (StatusCode::CREATED, ApiResponse::ok(task))
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, ApiResponse::<SplitTask>::err(e)),
+    }
+}
+
+async fn list_splits(
+    State(pilot): State<Arc<Pilot>>,
+) -> impl IntoResponse {
+    let tasks = pilot.scheduler().split_manager().all_tasks();
+    ApiResponse::ok(tasks)
+}
+
+async fn get_split(
+    State(pilot): State<Arc<Pilot>>,
+    Path(task_id): Path<String>,
+) -> impl IntoResponse {
+    match pilot.scheduler().split_manager().get_task(&task_id) {
+        Some(task) => ApiResponse::ok(task),
+        None => ApiResponse::<SplitTask>::err(format!("Split task {} not found", task_id)),
+    }
+}
+
+async fn cancel_split(
+    State(pilot): State<Arc<Pilot>>,
+    Path(task_id): Path<String>,
+) -> impl IntoResponse {
+    match pilot.scheduler().split_manager().cancel_split(&task_id).await {
+        Ok(()) => {
+            let _ = pilot.save().await;
+            ApiResponse::ok(CancelSplitResult { cancelled: true })
+        }
+        Err(e) => ApiResponse::<CancelSplitResult>::err(e),
+    }
+}
+
+#[derive(Serialize)]
+struct CancelSplitResult {
+    cancelled: bool,
 }

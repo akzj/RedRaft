@@ -8,6 +8,9 @@ mod routing;
 mod cluster;
 
 pub use node::{NodeId, NodeInfo, NodeStatus};
-pub use shard::{ShardId, ShardInfo, ShardStatus, KeyRange, TOTAL_SLOTS};
+pub use shard::{
+    KeyRange, ShardId, ShardInfo, ShardSplitState, ShardStatus,
+    SplitProgress, SplitRole, SplitStatus, SplitTask, TOTAL_SLOTS,
+};
 pub use routing::RoutingTable;
 pub use cluster::{ClusterMetadata, ClusterStats};

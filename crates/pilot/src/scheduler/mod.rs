@@ -1,33 +1,42 @@
 //! 调度器模块
 //!
-//! 负责分片放置策略和迁移任务管理
+//! 负责分片放置策略、迁移任务管理和分片分裂
 
 mod placement;
 mod migration;
+mod split;
 
 pub use placement::PlacementStrategy;
 pub use migration::{MigrationTask, MigrationStatus, MigrationManager};
+pub use split::{SplitManager, SplitManagerConfig};
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use crate::metadata::{ClusterMetadata, NodeId, NodeStatus, ShardId, ShardStatus};
+use crate::metadata::{ClusterMetadata, NodeId, NodeStatus, ShardId, ShardStatus, SplitTask};
 
 /// 调度器
 pub struct Scheduler {
     metadata: Arc<RwLock<ClusterMetadata>>,
     placement: PlacementStrategy,
     migration_manager: MigrationManager,
+    split_manager: SplitManager,
 }
 
 impl Scheduler {
     /// 创建调度器
     pub fn new(metadata: Arc<RwLock<ClusterMetadata>>) -> Self {
+        let split_manager = SplitManager::new(
+            SplitManagerConfig::default(),
+            metadata.clone(),
+        );
+        
         Self {
             metadata,
             placement: PlacementStrategy::default(),
             migration_manager: MigrationManager::new(),
+            split_manager,
         }
     }
 
@@ -187,6 +196,24 @@ impl Scheduler {
     /// 获取迁移管理器
     pub fn migration_manager(&self) -> &MigrationManager {
         &self.migration_manager
+    }
+
+    /// 获取分裂管理器
+    pub fn split_manager(&self) -> &SplitManager {
+        &self.split_manager
+    }
+
+    /// 触发分片分裂
+    pub async fn split_shard(
+        &self,
+        source_shard_id: &ShardId,
+        split_slot: u32,
+        target_shard_id: Option<String>,
+        target_nodes: Option<Vec<String>>,
+    ) -> Result<SplitTask, String> {
+        self.split_manager
+            .trigger_split(source_shard_id, split_slot, target_shard_id, target_nodes)
+            .await
     }
 
     /// Rebalance：均衡分片分布
