@@ -3,10 +3,12 @@
 //! Built on Raft consensus algorithm for reliability and consistency.
 
 pub mod node;
+pub mod pilot_client;
 pub mod router;
 pub mod server;
 pub mod state_machine;
 
 pub use node::RedRaftNode;
+pub use pilot_client::{PilotClient, PilotClientConfig, RoutingTable};
 pub use server::RedisServer;
 pub use state_machine::KVStateMachine;
