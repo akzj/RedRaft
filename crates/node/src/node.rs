@@ -424,7 +424,6 @@ struct NodeCallbacks {
     #[allow(dead_code)]
     node_id: String,
     storage: Arc<dyn Storage>,
-    #[allow(dead_code)]
     network: Arc<dyn Network>,
     state_machine: Arc<KVStateMachine>,
     timers: raft::multi_raft_driver::Timers,
@@ -445,74 +444,74 @@ impl raft::traits::EventNotify for NodeCallbacks {
 impl raft::traits::Network for NodeCallbacks {
     async fn send_request_vote_request(
         &self,
-        _from: &RaftId,
-        _target: &RaftId,
-        _args: raft::RequestVoteRequest,
+        from: &RaftId,
+        target: &RaftId,
+        args: raft::RequestVoteRequest,
     ) -> raft::RpcResult<()> {
-        Ok(())
+        self.network.send_request_vote_request(from, target, args).await
     }
 
     async fn send_request_vote_response(
         &self,
-        _from: &RaftId,
-        _target: &RaftId,
-        _args: raft::RequestVoteResponse,
+        from: &RaftId,
+        target: &RaftId,
+        args: raft::RequestVoteResponse,
     ) -> raft::RpcResult<()> {
-        Ok(())
+        self.network.send_request_vote_response(from, target, args).await
     }
 
     async fn send_append_entries_request(
         &self,
-        _from: &RaftId,
-        _target: &RaftId,
-        _args: raft::AppendEntriesRequest,
+        from: &RaftId,
+        target: &RaftId,
+        args: raft::AppendEntriesRequest,
     ) -> raft::RpcResult<()> {
-        Ok(())
+        self.network.send_append_entries_request(from, target, args).await
     }
 
     async fn send_append_entries_response(
         &self,
-        _from: &RaftId,
-        _target: &RaftId,
-        _args: raft::AppendEntriesResponse,
+        from: &RaftId,
+        target: &RaftId,
+        args: raft::AppendEntriesResponse,
     ) -> raft::RpcResult<()> {
-        Ok(())
+        self.network.send_append_entries_response(from, target, args).await
     }
 
     async fn send_install_snapshot_request(
         &self,
-        _from: &RaftId,
-        _target: &RaftId,
-        _args: raft::InstallSnapshotRequest,
+        from: &RaftId,
+        target: &RaftId,
+        args: raft::InstallSnapshotRequest,
     ) -> raft::RpcResult<()> {
-        Ok(())
+        self.network.send_install_snapshot_request(from, target, args).await
     }
 
     async fn send_install_snapshot_response(
         &self,
-        _from: &RaftId,
-        _target: &RaftId,
-        _args: raft::InstallSnapshotResponse,
+        from: &RaftId,
+        target: &RaftId,
+        args: raft::InstallSnapshotResponse,
     ) -> raft::RpcResult<()> {
-        Ok(())
+        self.network.send_install_snapshot_response(from, target, args).await
     }
 
     async fn send_pre_vote_request(
         &self,
-        _from: &RaftId,
-        _target: &RaftId,
-        _args: PreVoteRequest,
+        from: &RaftId,
+        target: &RaftId,
+        args: PreVoteRequest,
     ) -> raft::RpcResult<()> {
-        Ok(())
+        self.network.send_pre_vote_request(from, target, args).await
     }
 
     async fn send_pre_vote_response(
         &self,
-        _from: &RaftId,
-        _target: &RaftId,
-        _args: PreVoteResponse,
+        from: &RaftId,
+        target: &RaftId,
+        args: PreVoteResponse,
     ) -> raft::RpcResult<()> {
-        Ok(())
+        self.network.send_pre_vote_response(from, target, args).await
     }
 }
 
