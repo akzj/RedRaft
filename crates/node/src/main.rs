@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     node.start().await?;
 
     // 如果指定了 Pilot 地址，则连接 Pilot
-    let pilot_client = if let Some(pilot_addr) = args.pilot_addr {
+    let _pilot_client = if let Some(pilot_addr) = args.pilot_addr {
         info!("Connecting to pilot at {}", pilot_addr);
 
         let config = PilotClientConfig {
@@ -129,8 +129,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(()) => {
                 info!("Connected to pilot successfully");
                 
+                // 更新节点路由表
+                {
+                    let routing = client.routing_table();
+                    let table = routing.read();
+                    node.router().update_from_pilot(&table);
+                }
+                
                 // 启动后台任务
                 let _handles = client.clone().start_background_tasks();
+                
+                // 启动路由表同步任务
+                let router = node.router();
+                let routing_table = client.routing_table();
+                tokio::spawn(async move {
+                    use tokio::time::{interval, Duration};
+                    let mut interval = interval(Duration::from_secs(5));
+                    loop {
+                        interval.tick().await;
+                        let table = routing_table.read();
+                        router.update_from_pilot(&table);
+                    }
+                });
                 
                 Some(client)
             }
@@ -145,14 +165,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 打印路由信息
-    if let Some(ref client) = pilot_client {
-        let routing = client.routing_table();
-        let table = routing.read();
-        info!(
-            "Routing table: version {}, {} shards",
-            table.version,
-            table.shard_nodes.len()
-        );
+    {
+        let router = node.router();
+        if router.is_pilot_routing() {
+            info!(
+                "Using pilot routing: version {}, {} shards",
+                router.routing_version(),
+                router.shard_count()
+            );
+        } else {
+            info!(
+                "Using local routing: {} shards",
+                router.shard_count()
+            );
+        }
     }
 
     // 创建并启动 Redis 服务器

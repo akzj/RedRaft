@@ -33,7 +33,7 @@ pub struct RedRaftNode {
     /// 网络层
     network: Arc<dyn Network>,
     /// Shard Router
-    router: ShardRouter,
+    router: Arc<ShardRouter>,
     /// Raft 组状态机映射 (shard_id -> state_machine)
     state_machines: Arc<Mutex<HashMap<String, Arc<KVStateMachine>>>>,
 }
@@ -50,9 +50,19 @@ impl RedRaftNode {
             driver: raft::multi_raft_driver::MultiRaftDriver::new(),
             storage,
             network,
-            router: ShardRouter::new(shard_count),
+            router: Arc::new(ShardRouter::new(shard_count)),
             state_machines: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// 获取节点 ID
+    pub fn node_id(&self) -> &str {
+        &self.node_id
+    }
+
+    /// 获取路由器引用
+    pub fn router(&self) -> Arc<ShardRouter> {
+        self.router.clone()
     }
 
     /// 创建或获取 Raft 组
