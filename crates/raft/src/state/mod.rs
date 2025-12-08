@@ -432,7 +432,7 @@ impl RaftState {
         self.leader_transfer_request_id = None;
         self.leader_transfer_start_time = None;
 
-        // 清理 Pipeline 状态
+        // Clear Pipeline state
         self.pipeline.clear_all();
 
         // Clear heartbeat timer

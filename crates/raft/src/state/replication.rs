@@ -576,10 +576,10 @@ impl RaftState {
 
                 self.update_commit_index().await;
                 
-                // 处理 ReadIndex 确认（心跳成功表示仍是 Leader）
+                // Handle ReadIndex confirmation (successful heartbeat indicates still Leader)
                 self.handle_read_index_ack(&peer).await;
                 
-                // 尝试延长 LeaderLease
+                // Try to extend LeaderLease
                 self.try_extend_lease_from_majority();
             } else {
                 warn!(
@@ -601,7 +601,7 @@ impl RaftState {
                 );
             }
 
-            // 检查领导权转移状态
+            // Check leadership transfer state
             if self
                 .leader_transfer_target
                 .as_ref()
@@ -611,7 +611,7 @@ impl RaftState {
                     .await;
             }
 
-            // 若当前处于联合配置，更新确认状态
+            // If in joint configuration, update confirmation state
             if response.success && self.config.is_joint() {
                 debug!(
                     "Checking joint exit condition after successful replication to {}",
@@ -622,7 +622,7 @@ impl RaftState {
         }
     }
 
-    /// 解析日志冲突并计算新的next_index
+    /// Resolve log conflict and calculate new next_index
     pub(crate) async fn resolve_log_conflict(
         &self,
         peer: &RaftId,
@@ -725,7 +725,7 @@ impl RaftState {
         }
     }
 
-    /// 更新提交索引
+    /// Update commit index
     pub(crate) async fn update_commit_index(&mut self) {
         use crate::cluster_config::QuorumRequirement;
 
@@ -735,7 +735,7 @@ impl RaftState {
 
         let candidate_index = match self.config.quorum() {
             QuorumRequirement::Joint { old, new } => {
-                // 防御性检查：虽然在 Joint 分支，但仍需确保 joint() 返回有效值
+                // Defensive check: Although in Joint branch, still ensure joint() returns valid value
                 let joint = match self.config.joint() {
                     Some(j) => j,
                     None => {
@@ -813,7 +813,7 @@ impl RaftState {
         }
     }
 
-    /// 在指定配置中找到多数派索引
+    /// Find majority index in specified configuration
     pub(crate) async fn find_majority_index(
         &self,
         voters: &std::collections::HashSet<RaftId>,

@@ -647,7 +647,7 @@ impl RaftState {
         Ok(())
     }
 
-    /// 计算配置变更中被删除的 voter 数量
+    /// Calculate the number of voters removed in configuration change
     pub(crate) fn calculate_voter_removal_count(&self, new_config: &ClusterConfig) -> Option<usize> {
         let current_voters: HashSet<_> =
             self.config.get_effective_voters().iter().cloned().collect();

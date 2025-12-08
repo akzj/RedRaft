@@ -1,19 +1,19 @@
-//! ReadIndex 和 LeaderLease 实现 - 用于线性一致性读
-//!
-//! ## ReadIndex 机制
-//! ReadIndex 允许 Leader 在不写入日志的情况下提供线性一致性读:
-//! 1. 记录当前 commit_index 作为 read_index
-//! 2. 发送心跳确认仍是 Leader（1 RTT）
-//! 3. 等待 last_applied >= read_index
-//! 4. 返回读取结果
-//!
-//! ## LeaderLease 优化
-//! LeaderLease 在 ReadIndex 基础上进一步优化，实现 0 RTT 读:
-//! 1. Leader 通过心跳响应维护一个租约（lease）
-//! 2. 租约有效期内，Leader 可确信自己仍是唯一 Leader
-//! 3. 租约有效时，ReadIndex 可跳过心跳确认，直接返回
-//!
-//! **注意**: LeaderLease 依赖时钟同步，在时钟偏移较大的环境下有风险
+//! ReadIndex and LeaderLease implementation for linearizable reads
+//! 
+//! ## ReadIndex Mechanism
+//! ReadIndex allows the Leader to provide linearizable reads without writing to the log:
+//! 1. Record current commit_index as read_index
+//! 2. Send heartbeat to confirm still Leader (1 RTT)
+//! 3. Wait until last_applied >= read_index
+//! 4. Return read result
+//! 
+//! ## LeaderLease Optimization
+//! LeaderLease further optimizes ReadIndex to achieve 0 RTT reads:
+//! 1. Leader maintains a lease through heartbeat responses
+//! 2. During lease validity, Leader can be confident it's still the only Leader
+//! 3. When lease is valid, ReadIndex can skip heartbeat confirmation and return directly
+//! 
+//! **Note**: LeaderLease relies on clock synchronization and has risks in environments with large clock skew
 
 use std::collections::HashSet;
 use std::time::Instant;
@@ -25,17 +25,17 @@ use crate::error::ClientError;
 use crate::event::Role;
 use crate::types::{RaftId, RequestId};
 
-/// ReadIndex 请求超时时间
+/// ReadIndex request timeout
 const READ_INDEX_TIMEOUT_MS: u64 = 5000;
 
-/// LeaderLease 安全系数（租约时长 = election_timeout_min * LEASE_FACTOR）
-/// 使用 0.9 确保在选举超时前租约过期，避免脑裂
+/// LeaderLease safety factor (lease duration = election_timeout_min * LEASE_FACTOR)
+/// Use 0.9 to ensure lease expires before election timeout, avoiding split brain
 const LEASE_FACTOR: f64 = 0.9;
 
 impl RaftState {
-    /// 处理 ReadIndex 请求
+    /// Handle ReadIndex request
     pub(crate) async fn handle_read_index(&mut self, request_id: RequestId) {
-        // 非 Leader 返回错误
+        // Not Leader, return error
         if self.role != Role::Leader {
             warn!(
                 "Node {} received ReadIndex but not leader (role: {:?})",
@@ -60,7 +60,7 @@ impl RaftState {
 
         let read_index = self.commit_index;
 
-        // 单节点集群：直接返回
+        // Single-node cluster: return directly
         if self.is_single_voter() {
             debug!(
                 "Node {} single-node cluster, completing ReadIndex immediately at index {}",
@@ -70,7 +70,7 @@ impl RaftState {
             return;
         }
 
-        // LeaderLease 优化：如果租约有效，直接完成（0 RTT）
+        // LeaderLease optimization: if lease is valid, complete directly (0 RTT)
         if self.options.leader_lease_enabled && self.is_lease_valid() {
             debug!(
                 "Node {} LeaderLease valid, completing ReadIndex {} immediately (0 RTT)",
@@ -80,10 +80,10 @@ impl RaftState {
             return;
         }
 
-        // 标准 ReadIndex 流程：需要心跳确认（1 RTT）
+        // Standard ReadIndex flow: heartbeat confirmation required (1 RTT)
         let state = ReadIndexState {
             read_index,
-            acks: HashSet::from([self.id.clone()]), // Leader 自己
+            acks: HashSet::from([self.id.clone()]), // Leader itself
             request_time: Instant::now(),
         };
         self.pending_read_indices.insert(request_id, state);
@@ -93,19 +93,19 @@ impl RaftState {
             self.id, request_id, read_index
         );
 
-        // 利用下一次心跳确认 Leader 身份
-        // 心跳响应会调用 handle_read_index_ack
+        // Use next heartbeat to confirm Leader identity
+        // Heartbeat response will call handle_read_index_ack
     }
 
-    /// 检查是否是单节点 voter
+    /// Check if it's a single voter node
     fn is_single_voter(&self) -> bool {
         let voters = self.config.get_effective_voters();
         voters.len() == 1 && voters.contains(&self.id)
     }
 
-    // ==================== LeaderLease 相关方法 ====================
+    // ==================== LeaderLease Related Methods ====================
 
-    /// 检查租约是否有效
+    /// Check if lease is valid
     pub(crate) fn is_lease_valid(&self) -> bool {
         if let Some(lease_end) = self.lease_end {
             Instant::now() < lease_end
@@ -114,20 +114,20 @@ impl RaftState {
         }
     }
 
-    /// 延长租约（在收到多数派心跳响应时调用）
+    /// Extend lease (called when receiving majority heartbeat responses)
     pub(crate) fn extend_lease(&mut self) {
         if !self.options.leader_lease_enabled {
             return;
         }
 
-        // 租约时长 = election_timeout_min * LEASE_FACTOR
+        // Lease duration = election_timeout_min * LEASE_FACTOR
         let lease_duration = self.election_timeout_min.mul_f64(LEASE_FACTOR);
         let new_lease_end = Instant::now() + lease_duration;
 
-        // 只延长，不缩短
+        // Only extend, do not shorten
         match self.lease_end {
             Some(current) if current >= new_lease_end => {
-                // 当前租约更长，不更新
+                // Current lease is longer, no update
             }
             _ => {
                 self.lease_end = Some(new_lease_end);
@@ -139,39 +139,39 @@ impl RaftState {
         }
     }
 
-    /// 尝试基于当前 match_index 延长租约
-    /// 当多数派的 match_index 确认时调用
+    /// Try to extend lease based on current match_index
+    /// Called when majority match_index is confirmed
     pub(crate) fn try_extend_lease_from_majority(&mut self) {
         if !self.options.leader_lease_enabled || self.role != Role::Leader {
             return;
         }
 
-        // 收集所有有 match_index 记录的节点（包括自己）
+        // Collect all nodes with match_index records (including self)
         let mut responsive_nodes: HashSet<RaftId> = self.match_index.keys().cloned().collect();
         responsive_nodes.insert(self.id.clone());
 
-        // 检查是否达到多数派
+        // Check if majority is achieved
         if self.config.majority(&responsive_nodes) {
             self.extend_lease();
         }
     }
 
-    /// 处理心跳响应中的 ReadIndex 确认
-    /// 在 handle_append_entries_response 成功时调用
+    /// Handle ReadIndex confirmation in heartbeat response
+    /// Called when handle_append_entries_response succeeds
     pub(crate) async fn handle_read_index_ack(&mut self, peer: &crate::types::RaftId) {
-        // 收集需要完成的 ReadIndex 请求
+        // Collect ReadIndex requests that need to be completed
         let mut completed = Vec::new();
 
         for (request_id, state) in self.pending_read_indices.iter_mut() {
             state.acks.insert(peer.clone());
 
-            // 检查是否获得多数派确认
+            // Check if majority confirmation is achieved
             if self.config.majority(&state.acks) {
                 completed.push((*request_id, state.read_index));
             }
         }
 
-        // 完成已确认的请求
+        // Complete confirmed requests
         for (request_id, read_index) in completed {
             self.pending_read_indices.remove(&request_id);
             info!(
@@ -182,10 +182,10 @@ impl RaftState {
         }
     }
 
-    /// 完成 ReadIndex：等待应用后返回
+    /// Complete ReadIndex: wait for application and return
     async fn complete_read_index(&mut self, request_id: RequestId, read_index: u64) {
         if self.last_applied >= read_index {
-            // 已经应用，直接返回
+            // Already applied, return directly
             debug!(
                 "Node {} ReadIndex {} completed immediately (last_applied={} >= read_index={})",
                 self.id, request_id, self.last_applied, read_index
@@ -201,7 +201,7 @@ impl RaftState {
                 )
                 .await;
         } else {
-            // 等待应用到 read_index
+            // Wait for application to read_index
             debug!(
                 "Node {} ReadIndex {} waiting for apply (last_applied={} < read_index={})",
                 self.id, request_id, self.last_applied, read_index
@@ -210,7 +210,7 @@ impl RaftState {
         }
     }
 
-    /// 检查待处理的读请求（在 apply_committed_logs 中调用）
+    /// Check pending read requests (called in apply_committed_logs)
     pub(crate) async fn check_pending_reads(&mut self) {
         if self.pending_reads.is_empty() {
             return;
@@ -242,7 +242,7 @@ impl RaftState {
         }
     }
 
-    /// 清理超时的 ReadIndex 请求
+    /// Clean up timeout ReadIndex requests
     pub(crate) async fn cleanup_timeout_read_indices(&mut self) {
         let now = Instant::now();
         let timeout = std::time::Duration::from_millis(READ_INDEX_TIMEOUT_MS);
@@ -276,14 +276,14 @@ impl RaftState {
                 .await;
         }
 
-        // 同样清理等待应用的读请求
+        // Also clean up read requests waiting for application
         let expired_reads: Vec<_> = self
             .pending_reads
             .keys()
             .cloned()
             .collect();
 
-        // 如果不再是 Leader，清理所有待处理的读请求
+        // If no longer Leader, clean up all pending read requests
         if self.role != Role::Leader {
             for request_id in expired_reads {
                 self.pending_reads.remove(&request_id);
@@ -305,7 +305,7 @@ impl RaftState {
         }
     }
 
-    /// 清理 Leader 状态时清理 ReadIndex 相关状态
+    /// Clean up ReadIndex related state when cleaning up Leader state
     pub(crate) fn clear_read_index_state(&mut self) {
         self.pending_read_indices.clear();
         self.pending_reads.clear();

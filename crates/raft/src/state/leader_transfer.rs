@@ -87,15 +87,15 @@ impl RaftState {
             return;
         }
 
-        // 记录转移状态
+        // Record transfer state
         self.leader_transfer_target = Some(target.clone());
         self.leader_transfer_request_id = Some(request_id);
         self.leader_transfer_start_time = Some(Instant::now());
 
-        // 立即发送心跳重置目标节点选举计时器
+        // Immediately send heartbeat to reset target node's election timer
         self.send_heartbeat_to(target).await;
 
-        // 设置超时定时器
+        // Set timeout timer
         self.leader_transfer_timer = Some(
             self.callbacks
                 .set_leader_transfer_timer(&self.id, self.leader_transfer_timeout),

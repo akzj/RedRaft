@@ -41,28 +41,28 @@ impl RaftState {
             self.current_term + 1
         );
 
-        // 生成 Pre-Vote ID 并初始化跟踪状态
+        // Generate Pre-Vote ID and initialize tracking state
         let pre_vote_id = RequestId::new();
         self.current_pre_vote_id = Some(pre_vote_id);
         self.pre_vote_votes.clear();
-        self.pre_vote_votes.insert(self.id.clone(), true); // 自己投自己
+        self.pre_vote_votes.insert(self.id.clone(), true); // Vote for self
 
-        // 重置选举定时器
+        // Reset election timer
         self.reset_election().await;
 
-        // 获取日志信息
+        // Get log information
         let last_log_index = self.get_last_log_index();
         let last_log_term = self.get_last_log_term();
 
         let req = PreVoteRequest {
-            term: self.current_term + 1, // 使用 prospective term，但不实际递增
+            term: self.current_term + 1, // Use prospective term, but don't actually increment
             candidate_id: self.id.clone(),
             last_log_index,
             last_log_term,
             request_id: pre_vote_id,
         };
 
-        // 发送 Pre-Vote 请求
+        // Send Pre-Vote requests
         for peer in self.config.get_effective_voters() {
             if *peer != self.id {
                 let target = peer;
@@ -88,7 +88,7 @@ impl RaftState {
             }
         }
 
-        // 单节点集群：立即检查结果
+        // Single-node cluster: check result immediately
         self.check_pre_vote_result().await;
     }
 
@@ -100,29 +100,29 @@ impl RaftState {
             self.current_term + 1
         );
 
-        // 清理 Pre-Vote 状态
+        // Clean up Pre-Vote state
         self.current_pre_vote_id = None;
         self.pre_vote_votes.clear();
 
-        // 切换为 Candidate 并递增任期
+        // Switch to Candidate and increment term
         self.current_term += 1;
         self.role = Role::Candidate;
         self.voted_for = Some(self.id.clone());
 
-        // 持久化状态变更
+        // Persist state changes
         self.persist_hard_state().await;
 
-        // 重置选举定时器
+        // Reset election timer
         self.reset_election().await;
 
-        // 生成新选举ID并初始化跟踪状态
+        // Generate new election ID and initialize tracking state
         let election_id = RequestId::new();
         self.current_election_id = Some(election_id);
         self.election_votes.clear();
         self.election_votes.insert(self.id.clone(), true);
         self.election_max_term = self.current_term;
 
-        // 获取日志信息用于选举
+        // Get log information for election
         let last_log_index = self.get_last_log_index();
         let last_log_term = self.get_last_log_term();
 
@@ -134,7 +134,7 @@ impl RaftState {
             request_id: election_id,
         };
 
-        // 发送投票请求
+        // Send vote requests
         for peer in self.config.get_effective_voters() {
             if *peer != self.id {
                 let target = peer;
@@ -160,7 +160,7 @@ impl RaftState {
             }
         }
 
-        // 通知上层应用状态变更
+        // Notify upper layer of state change
         let _ = self
             .error_handler
             .handle_void(
@@ -172,7 +172,7 @@ impl RaftState {
             )
             .await;
 
-        // 单节点集群：立即检查结果
+        // Single-node cluster: check result immediately
         self.check_election_result().await;
     }
 
@@ -188,10 +188,10 @@ impl RaftState {
 
         let mut vote_granted = false;
 
-        // Pre-Vote 条件检查（注意：不修改自身状态！）
-        // 1. prospective term >= 当前 term
-        // 2. 日志必须足够新
-        // 3. 最近没有收到 Leader 心跳（防止干扰正常运行的集群）
+        // Pre-Vote condition check (Note: Does not modify own state!)
+        // 1. prospective term >= current term
+        // 2. logs must be up-to-date
+        // 3. no recent Leader heartbeat (to avoid disturbing a running cluster)
         let leader_active = self.last_heartbeat.elapsed() < self.election_timeout_min;
 
         if request.term >= self.current_term {
@@ -225,7 +225,7 @@ impl RaftState {
             );
         }
 
-        // 发送响应（使用自己的 current_term）
+        // Send response (using own current_term)
         let resp = PreVoteResponse {
             term: self.current_term,
             vote_granted,
@@ -246,7 +246,7 @@ impl RaftState {
 
     /// Handle Pre-Vote response
     pub(crate) async fn handle_pre_vote_response(&mut self, peer: RaftId, response: PreVoteResponse) {
-        // 检查是否是当前 Pre-Vote 轮次
+        // Check if it's the current Pre-Vote round
         if self.current_pre_vote_id != Some(response.request_id) {
             debug!(
                 "Node {} ignoring stale pre-vote response from {} (expected {:?}, got {:?})",
@@ -255,7 +255,7 @@ impl RaftState {
             return;
         }
 
-        // 过滤无效投票者
+        // Filter invalid voters
         if !self.config.voters_contains(&peer) {
             warn!(
                 "Node {}: received pre-vote response from unknown peer {}",
@@ -264,27 +264,27 @@ impl RaftState {
             return;
         }
 
-        // 如果发现更高的 term，不需要降级（因为 Pre-Vote 不增加 term）
-        // 但需要更新对集群状态的认知
+        // If a higher term is discovered, no need to step down (since Pre-Vote doesn't increment term)
+        // But need to update cluster state awareness
         if response.term > self.current_term {
             info!(
                 "Node {} discovered higher term {} from {} during pre-vote (current term {})",
                 self.id, response.term, peer, self.current_term
             );
-            // 放弃当前 Pre-Vote
+            // Abandon current Pre-Vote
             self.current_pre_vote_id = None;
             self.pre_vote_votes.clear();
             return;
         }
 
-        // 记录 Pre-Vote 结果
+        // Record Pre-Vote result
         self.pre_vote_votes.insert(peer.clone(), response.vote_granted);
         info!(
             "Node {} received pre-vote response from {}: granted={}",
             self.id, peer, response.vote_granted
         );
 
-        // 检查是否获得多数
+        // Check if majority is achieved
         self.check_pre_vote_result().await;
     }
 
@@ -307,7 +307,7 @@ impl RaftState {
                 self.id,
                 granted_votes.len()
             );
-            // Pre-Vote 成功，开始真实选举
+            // Pre-Vote succeeded, starting real election
             self.start_real_election().await;
         }
     }
@@ -326,7 +326,7 @@ impl RaftState {
             return;
         }
 
-        // 处理更高任期
+        // Handle higher term
         if request.term > self.current_term {
             info!(
                 "Node {} stepping down to Follower, updating term from {} to {}",
@@ -335,7 +335,7 @@ impl RaftState {
             self.step_down_to_follower(Some(request.term)).await;
         }
 
-        // 决定是否投票
+        // Decide whether to vote
         let mut vote_granted = false;
 
         if request.term >= self.current_term
@@ -373,7 +373,7 @@ impl RaftState {
             );
         }
 
-        // 发送响应
+        // Send response
         let resp = RequestVoteResponse {
             term: self.current_term,
             vote_granted,
@@ -416,7 +416,7 @@ impl RaftState {
             return;
         }
 
-        // 过滤无效投票者
+        // Filter out invalid voters
         if !self.config.voters_contains(&peer) {
             warn!(
                 "node {}: received vote response from unknown peer {}",
@@ -425,7 +425,7 @@ impl RaftState {
             return;
         }
 
-        // 处理更高任期
+        // Handle higher term
         if response.term > self.current_term {
             info!(
                 "Stepping down from candidate due to higher term {} from peer {} (current term {})",
@@ -437,12 +437,12 @@ impl RaftState {
             return;
         }
 
-        // 记录投票结果
+        // Record vote result
         if response.term == self.current_term {
             self.election_votes.insert(peer, response.vote_granted);
         }
 
-        // 检查是否赢得选举
+        // Check if election is won
         self.check_election_result().await;
     }
 
@@ -492,7 +492,7 @@ impl RaftState {
         self.current_election_id = None;
         self.leader_id = None;
 
-        // 初始化复制状态
+        // Initialize replication state
         let last_log_index = self.get_last_log_index();
         self.next_index.clear();
         self.match_index.clear();
@@ -500,7 +500,7 @@ impl RaftState {
         self.follower_last_snapshot_index.clear();
         self.snapshot_probe_schedules.clear();
 
-        // 收集所有需要管理的节点
+        // Collect all nodes that need to be managed
         let all_peers: Vec<_> = self
             .config
             .get_all_nodes()
@@ -527,10 +527,10 @@ impl RaftState {
             );
         }
 
-        // 立即发送心跳
+        // Send heartbeat immediately
         self.broadcast_append_entries().await;
 
-        // 启动日志应用定时器
+        // Start log apply timer
         self.adjust_apply_interval().await;
     }
 
