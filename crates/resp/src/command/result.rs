@@ -1,63 +1,63 @@
-//! 命令执行结果类型
+//! Command execution result type
 
 use crate::RespValue;
 
-/// 命令执行结果
+/// Command execution result
 /// 
-/// 表示 Redis 命令的所有可能返回类型，可以方便地转换为 RespValue
+/// Represents all possible return types for Redis commands, which can be easily converted to RespValue
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommandResult {
-    /// OK 响应
+    /// OK response
     Ok,
-    /// PONG 响应
+    /// PONG response
     Pong,
-    /// 自定义简单字符串
+    /// Custom simple string
     SimpleString(String),
-    /// 整数响应
+    /// Integer response
     Integer(i64),
-    /// 单个值（可能为空）
+    /// Single value (may be empty)
     Value(Option<Vec<u8>>),
-    /// 值数组
+    /// Array of values
     Array(Vec<Option<Vec<u8>>>),
-    /// 键值对数组（用于 HGETALL 等）
+    /// Key-value array (for HGETALL etc.)
     KeyValueArray(Vec<(Vec<u8>, Vec<u8>)>),
-    /// 错误响应
+    /// Error response
     Error(String),
-    /// 类型错误
+    /// Type error
     WrongType,
-    /// Null 响应
+    /// Null response
     Null,
-    /// SCAN 结果 (cursor, keys)
+    /// SCAN result (cursor, keys)
     Scan(u64, Vec<Vec<u8>>),
 }
 
 impl CommandResult {
-    /// 创建 OK 响应
+    /// Create OK response
     pub fn ok() -> Self {
         CommandResult::Ok
     }
 
-    /// 创建整数响应
+    /// Create integer response
     pub fn integer(n: i64) -> Self {
         CommandResult::Integer(n)
     }
 
-    /// 创建值响应
+    /// Create value response
     pub fn value(v: Option<Vec<u8>>) -> Self {
         CommandResult::Value(v)
     }
 
-    /// 创建数组响应
+    /// Create array response
     pub fn array(arr: Vec<Option<Vec<u8>>>) -> Self {
         CommandResult::Array(arr)
     }
 
-    /// 创建错误响应
+    /// Create error response
     pub fn error(msg: impl Into<String>) -> Self {
         CommandResult::Error(msg.into())
     }
 
-    /// 创建类型错误响应
+    /// Create type error response
     pub fn wrong_type() -> Self {
         CommandResult::WrongType
     }

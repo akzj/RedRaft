@@ -56,14 +56,14 @@ impl SimpleKvStore {
     }
 }
 
-// --- 实现 RaftCallbacks ---
-// TestStateMachine 将包含 KvStore 和与 Raft 交互所需的其他组件
+// --- Implement RaftCallbacks ---
+// TestStateMachine will contain KvStore and other components needed for Raft interaction
 
 #[derive(Clone)]
 pub struct TestStateMachine {
     id: RaftId,
     pub store: Arc<RwLock<SimpleKvStore>>,
-    // 跟踪已应用的日志索引和任期
+    // Track applied log index and term
     last_applied_index: Arc<RwLock<u64>>,
     last_applied_term: Arc<RwLock<u64>>,
 }

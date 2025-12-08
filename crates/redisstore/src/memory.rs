@@ -1,7 +1,7 @@
-//! 内存存储实现
-//!
-//! 使用 HashMap 实现的内存存储，支持 Redis 多种数据类型
-//! 后续可以替换为 RocksDB 等持久化存储
+//! In-memory storage implementation
+//! 
+//! HashMap-based in-memory storage that supports multiple Redis data types
+//! Can be replaced with persistent storage like RocksDB later
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use tracing::info;
 
 use crate::traits::{RedisStore, StoreError, StoreResult};
 
-/// Redis 值类型
+/// Redis value type
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RedisValue {
     String(Vec<u8>),
@@ -32,13 +32,13 @@ impl RedisValue {
     }
 }
 
-/// 带过期时间的值
+/// Value with expiration time
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Entry {
     value: RedisValue,
     #[serde(skip)]
     expire_at: Option<Instant>,
-    /// 序列化用的 TTL（毫秒）
+    /// TTL for serialization (milliseconds)
     ttl_ms: Option<u64>,
 }
 
@@ -68,17 +68,17 @@ impl Entry {
             Some(t) => {
                 let now = Instant::now();
                 if now >= t {
-                    -2 // 已过期
+                    -2 // Expired
                 } else {
                     (t - now).as_secs() as i64
                 }
             }
-            None => -1, // 永不过期
+            None => -1, // Never expires
         }
     }
 }
 
-/// 内存存储实现
+/// In-memory storage implementation
 #[derive(Clone)]
 pub struct MemoryStore {
     data: Arc<RwLock<HashMap<Vec<u8>, Entry>>>,
@@ -91,23 +91,23 @@ impl MemoryStore {
         }
     }
 
-    /// 清理过期键
+    /// Clean up expired keys
     fn cleanup_expired(&self, data: &mut HashMap<Vec<u8>, Entry>) {
         data.retain(|_, entry| !entry.is_expired());
     }
 
-    /// 获取值，自动跳过过期的
+    /// Get value, automatically skip expired ones
     fn get_entry(&self, data: &HashMap<Vec<u8>, Entry>, key: &[u8]) -> Option<Entry> {
         data.get(key).filter(|e| !e.is_expired()).cloned()
     }
 
-    /// 获取可变值
+    /// Get mutable value
     fn get_entry_mut<'a>(
         &self,
         data: &'a mut HashMap<Vec<u8>, Entry>,
         key: &[u8],
     ) -> Option<&'a mut Entry> {
-        // 先检查是否过期
+        // Check if expired first
         if let Some(entry) = data.get(key) {
             if entry.is_expired() {
                 data.remove(key);
@@ -117,7 +117,7 @@ impl MemoryStore {
         data.get_mut(key)
     }
 
-    /// 解析整数
+    /// Parse integer
     fn parse_int(value: &[u8]) -> StoreResult<i64> {
         std::str::from_utf8(value)
             .map_err(|_| StoreError::InvalidArgument("value is not a valid string".to_string()))?
@@ -133,7 +133,7 @@ impl Default for MemoryStore {
 }
 
 impl RedisStore for MemoryStore {
-    // ==================== String 操作 ====================
+    // ==================== String Operations ====================
 
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         let data = self.data.read();
@@ -142,7 +142,7 @@ impl RedisStore for MemoryStore {
                 value: RedisValue::String(v),
                 ..
             }) => Some(v),
-            _ => None, // 类型不匹配返回 None
+            _ => None, // Return None if type mismatch
         }
     }
 
@@ -233,7 +233,7 @@ impl RedisStore for MemoryStore {
                 v.extend_from_slice(value);
                 v.len()
             }
-            Some(_) => 0, // 类型不匹配
+            Some(_) => 0, // Type mismatch
             None => {
                 let v = value.to_vec();
                 let len = v.len();
@@ -269,7 +269,7 @@ impl RedisStore for MemoryStore {
         old
     }
 
-    // ==================== List 操作 ====================
+    // ==================== List Operations ====================
 
     fn lpush(&self, key: &[u8], values: Vec<Vec<u8>>) -> usize {
         let mut data = self.data.write();
@@ -284,7 +284,7 @@ impl RedisStore for MemoryStore {
             }
             list.len()
         } else {
-            0 // 类型不匹配
+            0 // Type mismatch
         }
     }
 
@@ -419,7 +419,7 @@ impl RedisStore for MemoryStore {
         }
     }
 
-    // ==================== Hash 操作 ====================
+    // ==================== Hash Operations ====================
 
     fn hget(&self, key: &[u8], field: &[u8]) -> Option<Vec<u8>> {
         let data = self.data.read();
@@ -577,7 +577,7 @@ impl RedisStore for MemoryStore {
         }
     }
 
-    // ==================== Set 操作 ====================
+    // ==================== Set Operations ====================
 
     fn sadd(&self, key: &[u8], members: Vec<Vec<u8>>) -> usize {
         let mut data = self.data.write();
@@ -651,7 +651,7 @@ impl RedisStore for MemoryStore {
         }
     }
 
-    // ==================== 通用操作 ====================
+    // ==================== Generic Operations ====================
 
     fn del(&self, keys: &[&[u8]]) -> usize {
         let mut data = self.data.write();
@@ -767,7 +767,7 @@ impl RedisStore for MemoryStore {
         }
     }
 
-    // ==================== 快照操作 ====================
+    // ==================== Snapshot Operations ====================
 
     fn restore_from_snapshot(&self, snapshot: &[u8]) -> Result<(), String> {
         #[derive(Deserialize)]
@@ -896,12 +896,12 @@ impl RedisStore for MemoryStore {
     }
 }
 
-/// 计算 key 的槽位（CRC16 XMODEM）
+/// Calculate key slot (CRC16 XMODEM)
 fn slot_for_key(key: &[u8], total_slots: u32) -> u32 {
     crc16(key) as u32 % total_slots
 }
 
-/// CRC16 实现（XMODEM 变种，与 Redis Cluster 兼容）
+/// CRC16 implementation (XMODEM variant, compatible with Redis Cluster)
 fn crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0;
     for byte in data {
@@ -1029,27 +1029,27 @@ mod tests {
         let store = MemoryStore::new();
         let total_slots = 16384u32;
 
-        // 添加多个 key，它们会分布在不同的槽位
+        // Add multiple keys, they will be distributed across different slots
         for i in 0..100 {
             let key = format!("key_{}", i);
             let value = format!("value_{}", i);
             store.set(key.into_bytes(), value.into_bytes());
         }
 
-        // 创建一个只包含前半部分槽位的快照
+        // Create a snapshot containing only the first half of slots
         let split_snapshot = store
             .create_split_snapshot(0, 8192, total_slots)
             .unwrap();
 
-        // 新 store 从分裂快照恢复
+        // New store restores from split snapshot
         let new_store = MemoryStore::new();
         let merged = new_store.merge_from_snapshot(&split_snapshot).unwrap();
 
-        // 验证合并的数量小于原始数量（因为只包含部分槽位）
+        // Verify merged count is less than original (since it only contains partial slots)
         assert!(merged < 100);
         assert!(merged > 0);
 
-        // 验证新 store 中的 key 都在指定槽位范围内
+        // Verify keys in new store are within specified slot range
         let all_keys = new_store.keys(b"*");
         for key in &all_keys {
             let slot = slot_for_key(key, total_slots);
@@ -1062,7 +1062,7 @@ mod tests {
         let store = MemoryStore::new();
         let total_slots = 16384u32;
 
-        // 添加多个 key
+        // Add multiple keys
         for i in 0..100 {
             let key = format!("key_{}", i);
             let value = format!("value_{}", i);
@@ -1071,16 +1071,16 @@ mod tests {
 
         let before = store.dbsize();
 
-        // 删除前半部分槽位的 key
+        // Delete keys in first half slots
         let deleted = store.delete_keys_in_slot_range(0, 8192, total_slots);
 
         let after = store.dbsize();
 
-        // 验证删除数量
+        // Verify delete count
         assert!(deleted > 0);
         assert_eq!(before - deleted, after);
 
-        // 验证剩余的 key 都不在删除范围内
+        // Verify remaining keys are not in delete range
         let remaining_keys = store.keys(b"*");
         for key in &remaining_keys {
             let slot = slot_for_key(key, total_slots);
@@ -1096,15 +1096,15 @@ mod tests {
 
         let snapshot = store1.create_snapshot().unwrap();
 
-        // 创建另一个 store 并设置一些不同的 key
+        // Create another store and set some different keys
         let store2 = MemoryStore::new();
         store2.set(b"key3".to_vec(), b"value3".to_vec());
 
-        // 合并快照
+        // Merge snapshot
         let merged = store2.merge_from_snapshot(&snapshot).unwrap();
         assert_eq!(merged, 2);
 
-        // 验证两边的 key 都存在
+        // Verify keys from both sides exist
         assert_eq!(store2.get(b"key1"), Some(b"value1".to_vec()));
         assert_eq!(store2.get(b"key2"), Some(b"value2".to_vec()));
         assert_eq!(store2.get(b"key3"), Some(b"value3".to_vec()));

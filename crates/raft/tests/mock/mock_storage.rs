@@ -73,7 +73,7 @@ impl MockStorage {
         }
     }
 
-    /// 保存快照到存储中（用于测试）
+    /// Save snapshot to storage (for testing)
     pub fn save_snapshot_internal(&self, snapshot: Snapshot) {
         let mut storage_snapshot = self.snapshot.write().unwrap();
         *storage_snapshot = Some(snapshot);
@@ -651,11 +651,11 @@ mod tests {
             .await
             .unwrap();
 
-        // 由于MockStorage是共享存储，两次保存会覆盖
+        // Since MockStorage is shared storage, two saves will overwrite each other
         let state1_load = storage.load_hard_state(&node1).await.unwrap().unwrap();
         let state2_load = storage.load_hard_state(&node2).await.unwrap().unwrap();
 
-        // 最后一次保存的状态会被保留
+        // The state from the last save will be retained
         assert_eq!(state1_load, state1);
         assert_eq!(state2_load, state2);
     }
@@ -665,7 +665,7 @@ mod tests {
         let storage = MockStorage::new();
         let node_id = create_test_raft_id("group1", "node1");
 
-        // 分批追加日志
+        // Append logs in batches
         let batch1 = vec![
             create_test_log_entry(1, 1, "command1"),
             create_test_log_entry(2, 1, "command2"),
@@ -678,7 +678,7 @@ mod tests {
         ];
         storage.append_log_entries(&node_id, &batch2).await.unwrap();
 
-        // 验证所有日志都存在
+        // Verify all logs exist
         let all = storage.get_log_entries(&node_id, 1, 5).await.unwrap();
         assert_eq!(all.len(), 4);
         assert_eq!(all[0].index, 1);

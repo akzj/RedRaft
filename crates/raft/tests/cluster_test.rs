@@ -13,7 +13,7 @@ use common::test_statemachine::KvCommand;
 async fn test_cluster_config_operations() {
     tracing_subscriber::fmt().init();
 
-    // 创建 3 节点集群
+    // Create a 3-node cluster
     let node1 = RaftId::new("test_group".to_string(), "node1".to_string());
     let node2 = RaftId::new("test_group".to_string(), "node2".to_string());
     let node3 = RaftId::new("test_group".to_string(), "node3".to_string());
@@ -24,14 +24,14 @@ async fn test_cluster_config_operations() {
     };
     let cluster = TestCluster::new(config).await;
 
-    // 3. 启动集群在后台
+    // 3. Start cluster in the background
     let cluster_clone = cluster.clone();
     tokio::spawn(async move { cluster_clone.start().await });
 
-    // 等待 Leader 选举
+    // Wait for leader election
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // 检查是否有 Leader
+    // Check if there is a leader
     let mut leader_found = false;
     for node_id in &[&node1, &node2, &node3] {
         if let Some(node) = cluster.get_node(node_id) {
@@ -47,9 +47,9 @@ async fn test_cluster_config_operations() {
     assert!(leader_found, "No leader found after election");
     println!("✓ Leader election successful");
 
-    // 模拟网络丢包，测试网络恢复后 Leader 是否仍然存在
+    // Simulate network partition to test if leader still exists after recovery
 
-    // 1. 记录当前的 Leader
+    // 1. Record the current leader
     let mut current_leader = None;
     for node_id in &[&node1, &node2, &node3] {
         if let Some(node) = cluster.get_node(node_id) {
@@ -64,10 +64,10 @@ async fn test_cluster_config_operations() {
     let leader_id = current_leader.expect("Should have found a leader");
     println!("Current leader before network partition: {:?}", leader_id);
 
-    // ===== 1. 发送业务消息测试 =====
+    // ===== 1. Business message handling test =====
     println!("\n=== Testing business message handling ===");
 
-    // 发送一些业务命令到leader
+    // Send some business commands to the leader
     for i in 1..=20 {
         let command = KvCommand::Set {
             key: format!("key{}", i),
@@ -78,10 +78,10 @@ async fn test_cluster_config_operations() {
             Ok(()) => println!("✓ Successfully proposed command: {:?}", command),
             Err(e) => println!("✗ Failed to propose command {:?}: {}", command, e),
         }
-        tokio::time::sleep(Duration::from_millis(100)).await; // 给一些时间处理
+        tokio::time::sleep(Duration::from_millis(100)).await; // Give some time to process
     }
 
-    // 等待数据复制到所有节点
+    // Wait for data replication to all nodes
     println!("Waiting for data replication...");
     match cluster
         .wait_for_data_replication(Duration::from_secs(5))
@@ -93,7 +93,7 @@ async fn test_cluster_config_operations() {
 
     println!("✓ Business message handling test completed");
 
-    // ===== 2. 新加节点测试 =====
+    // ===== 2. Add new node test =====
     println!("\n=== Testing adding new node ===");
 
     let node4 = RaftId::new("test_group".to_string(), "node4".to_string());
@@ -101,15 +101,15 @@ async fn test_cluster_config_operations() {
         Ok(()) => {
             println!("✓ Successfully added new node: {:?}", node4);
 
-            // 等待一段时间让新节点同步
+            // Wait for new node to sync
             tokio::time::sleep(Duration::from_secs(3)).await;
 
-            // 检查新节点状态
+            // Check new node status
             if let Some(new_node) = cluster.get_node(&node4) {
                 let role = new_node.get_role();
                 println!("New node {:?} role: {:?}", node4, role);
 
-                // 新节点可能成为 Leader、Follower 或 Candidate，这些都是正常的
+                // New node could become Leader, Follower, or Candidate, all are normal
                 match role {
                     raft::Role::Leader => {
                         println!("✓ New node successfully joined and became leader");
@@ -130,7 +130,7 @@ async fn test_cluster_config_operations() {
                 panic!("New node not found after adding");
             }
 
-            // 验证新节点是否同步了之前的数据
+            // Verify if new node has synced previous data
             println!("Verifying data synchronization for new node...");
             match cluster
                 .wait_for_data_replication(Duration::from_secs(10))
@@ -139,10 +139,10 @@ async fn test_cluster_config_operations() {
                 Ok(()) => {
                     println!("✓ New node successfully synchronized all data");
 
-                    // 显示新节点的数据内容
+                    // Display new node's data content
                     if let Some(node_data) = cluster.get_node_data(&node4) {
                         println!("New node data: {:?}", node_data);
-                        // 验证包含我们之前发送的命令
+                        // Verify it contains our previously sent commands
                         for i in 1..=5 {
                             let key = format!("key{}", i);
                             let expected_value = format!("value{}", i);
@@ -167,7 +167,7 @@ async fn test_cluster_config_operations() {
                 Err(e) => {
                     println!("⚠️ New node data synchronization issue: {}", e);
 
-                    // 显示各节点数据状态进行调试
+                    // Display data state of all nodes for debugging
                     println!("Current data state across nodes:");
                     for node_id in &[&node1, &node2, &node3, &node4] {
                         if let Some(data) = cluster.get_node_data(node_id) {
@@ -182,20 +182,20 @@ async fn test_cluster_config_operations() {
         }
     }
 
-    // ===== 3. 循环测试：添加节点、删除follower节点、校验集群状态 =====
+    // ===== 3. Dynamic cluster test: add nodes, remove followers, verify cluster state =====
     println!("\n=== Testing cluster dynamics ===");
 
     for iteration in 1..=3 {
         println!("\n--- Iteration {} ---", iteration);
 
-        // 3.1 添加一个新节点
+        // 3.1 Add a new node
         let new_node_id = RaftId::new("test_group".to_string(), format!("node_dyn_{}", iteration));
 
         println!("Adding dynamic node: {:?}", new_node_id);
         match cluster.add_node(&new_node_id).await {
             Ok(()) => {
                 println!("✓ Added dynamic node: {:?}", new_node_id);
-                tokio::time::sleep(Duration::from_secs(2)).await; // 等待同步
+                tokio::time::sleep(Duration::from_secs(2)).await; // Wait for sync
             }
             Err(e) => {
                 println!("✗ Failed to add dynamic node: {}", e);
@@ -203,7 +203,7 @@ async fn test_cluster_config_operations() {
             }
         }
 
-        // 3.2 获取当前集群状态
+        // 3.2 Get current cluster status
         let status = cluster.get_cluster_status();
         println!("Cluster status after adding node:");
         let mut follower_candidates = Vec::new();
@@ -214,14 +214,14 @@ async fn test_cluster_config_operations() {
             }
         }
 
-        // 3.3 移除一个follower节点（如果有的话）
+        // 3.3 Remove a follower node (if any)
         if !follower_candidates.is_empty() {
             let to_remove = &follower_candidates[0];
             println!("Removing follower node: {:?}", to_remove);
             match cluster.remove_node(to_remove).await {
                 Ok(()) => {
                     println!("✓ Removed follower node: {:?}", to_remove);
-                    tokio::time::sleep(Duration::from_secs(1)).await; // 等待状态稳定
+                    tokio::time::sleep(Duration::from_secs(1)).await; // Wait for state to stabilize
                 }
                 Err(e) => {
                     println!("✗ Failed to remove follower node: {}", e);
@@ -231,7 +231,7 @@ async fn test_cluster_config_operations() {
             println!("No follower nodes available for removal");
         }
 
-        // 3.4 验证集群仍然有leader
+        // 3.4 Verify cluster still has a leader
         match cluster.wait_for_leader(Duration::from_secs(5)).await {
             Ok(leader) => {
                 println!(
@@ -244,7 +244,7 @@ async fn test_cluster_config_operations() {
             }
         }
 
-        // 3.5 发送一个测试命令确保集群仍然可用，并验证新节点数据同步
+        // 3.5 Send a test command to ensure cluster remains available and verify data sync
         let leaders = cluster.get_current_leader().await;
         if let Some(current_leader) = leaders.first() {
             let command = KvCommand::Set {
@@ -259,7 +259,7 @@ async fn test_cluster_config_operations() {
                         iteration
                     );
 
-                    // 等待数据复制并验证所有节点同步
+                    // Wait for data replication and verify all nodes are synced
                     tokio::time::sleep(Duration::from_millis(1000)).await;
                     match cluster
                         .wait_for_data_replication(Duration::from_secs(5))
@@ -285,10 +285,10 @@ async fn test_cluster_config_operations() {
             }
         }
 
-        tokio::time::sleep(Duration::from_millis(500)).await; // 短暂等待
+        tokio::time::sleep(Duration::from_millis(500)).await; // Brief wait
     }
 
-    // ===== 最终状态验证 =====
+    // ===== Final state verification =====
     println!("\n=== Final cluster state verification ===");
     let final_status = cluster.get_cluster_status();
     println!("Final cluster composition:");
@@ -313,7 +313,7 @@ async fn test_cluster_config_operations() {
     println!("  Candidates: {}", candidate_count);
     println!("  Total nodes: {}", final_status.len());
 
-    // 验证集群基本健康状态
+    // Verify basic cluster health state
     if leader_count == 1 {
         println!("✅ Perfect: Exactly one leader found");
     } else if leader_count == 0 && candidate_count > 0 {
@@ -363,13 +363,13 @@ async fn test_cluster_config_operations() {
     println!("  during node additions and removals while preserving leadership");
     println!("  Final cluster size: {} nodes", final_status.len());
 
-    // ===== 最终数据一致性验证 =====
+    // ===== Final data consistency verification =====
     println!("\n=== Final data consistency verification ===");
     match cluster.verify_data_consistency().await {
         Ok(()) => {
             println!("✅ All nodes have consistent data!");
 
-            // 显示最终的数据状态
+            // Display final data state
             if let Some(sample_node_id) = final_status.keys().next() {
                 if let Some(final_data) = cluster.get_node_data(sample_node_id) {
                     println!("Final consistent data across all nodes:");
@@ -383,7 +383,7 @@ async fn test_cluster_config_operations() {
         Err(e) => {
             println!("⚠️ Data consistency issue found: {}", e);
 
-            // 显示各节点的数据状态进行调试
+            // Display data state per node for debugging
             println!("Data state per node:");
             for (node_id, _) in &final_status {
                 if let Some(data) = cluster.get_node_data(node_id) {
@@ -393,9 +393,9 @@ async fn test_cluster_config_operations() {
         }
     }
 
-    // 发送业务message
+    // Send business messages
 
-    // 1 新加的node，校验新的node 是否正常跟上集群
+    // 1. For newly added nodes, verify they can catch up with the cluster
 
-    // 循环测试，加入新的node,删除follower节点，校验集群状态
+    // Loop test: add new nodes, remove follower nodes, verify cluster status
 }

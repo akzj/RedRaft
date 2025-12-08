@@ -1,25 +1,25 @@
-//! 命令解析错误类型
+//! Command parsing error types
 
 use std::fmt;
 
-/// 命令错误类型
+/// Command error kind
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandErrorKind {
-    /// 空命令
+    /// Empty command
     EmptyCommand,
-    /// 未知命令
+    /// Unknown command
     UnknownCommand,
-    /// 参数数量错误
+    /// Wrong argument count
     WrongArity,
-    /// 无效参数
+    /// Invalid argument
     InvalidArgument,
-    /// 无效格式
+    /// Invalid format
     InvalidFormat,
-    /// 语法错误
+    /// Syntax error
     SyntaxError,
 }
 
-/// 命令解析错误
+/// Command parsing error
 #[derive(Debug, Clone)]
 pub struct CommandError {
     kind: CommandErrorKind,
@@ -27,7 +27,7 @@ pub struct CommandError {
 }
 
 impl CommandError {
-    /// 创建新的命令错误
+    /// Create a new command error
     pub fn new(kind: CommandErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
@@ -35,17 +35,17 @@ impl CommandError {
         }
     }
 
-    /// 获取错误类型
+    /// Get error kind
     pub fn kind(&self) -> CommandErrorKind {
         self.kind
     }
 
-    /// 获取错误消息
+    /// Get error message
     pub fn message(&self) -> &str {
         &self.message
     }
 
-    /// 转换为 Redis 错误前缀
+    /// Convert to Redis error prefix
     pub fn error_prefix(&self) -> &'static str {
         match self.kind {
             CommandErrorKind::EmptyCommand => "ERR",

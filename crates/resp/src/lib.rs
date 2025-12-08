@@ -1,6 +1,6 @@
-//! RESP (REdis Serialization Protocol) 支持库
-//!
-//! 实现 RESP 协议的解析和编码，以及类型安全的命令解析
+//! RESP (REdis Serialization Protocol) support library
+//! 
+//! Implements RESP protocol parsing, encoding, and type-safe command parsing
 
 mod parser;
 mod encoder;
@@ -16,25 +16,25 @@ pub use command::{Command, CommandType, CommandResult, CommandError, CommandErro
 
 use std::io;
 
-/// RESP 数据类型
+/// RESP data type
 #[derive(Debug, Clone, PartialEq)]
 pub enum RespValue {
-    /// 简单字符串: +OK\r\n
+    /// Simple string: +OK\r\n
     SimpleString(String),
-    /// 错误: -ERR message\r\n
+    /// Error: -ERR message\r\n
     Error(String),
-    /// 整数: :123\r\n
+    /// Integer: :123\r\n
     Integer(i64),
-    /// 批量字符串: $5\r\nhello\r\n
+    /// Bulk string: $5\r\nhello\r\n
     BulkString(Option<Vec<u8>>),
-    /// 数组: *2\r\n$3\r\nGET\r\n$3\r\nkey\r\n
+    /// Array: *2\r\n$3\r\nGET\r\n$3\r\nkey\r\n
     Array(Vec<RespValue>),
     /// Null: $-1\r\n
     Null,
 }
 
 impl RespValue {
-    /// 转换为 Redis 命令字符串数组
+    /// Convert to Redis command string array
     pub fn to_command(&self) -> Option<Vec<String>> {
         match self {
             RespValue::Array(items) => {
@@ -56,7 +56,7 @@ impl RespValue {
         }
     }
 
-    /// 从命令创建 RESP 数组
+    /// Create RESP array from command
     pub fn from_command(cmd: Vec<String>) -> Self {
         RespValue::Array(
             cmd.into_iter()
@@ -66,7 +66,7 @@ impl RespValue {
     }
 }
 
-/// RESP 解析错误
+/// RESP parsing error
 #[derive(Debug, thiserror::Error)]
 pub enum RespError {
     #[error("IO error: {0}")]

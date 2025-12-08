@@ -8,7 +8,7 @@
 //! - Routing table maintenance and distribution
 //! - Data migration coordination
 //!
-//! # 使用示例
+//! # Usage Example
 //! ```ignore
 //! use pilot::{Pilot, PilotConfig};
 //!

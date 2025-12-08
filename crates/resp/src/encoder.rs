@@ -1,9 +1,9 @@
-//! RESP 协议同步编码器
+//! RESP protocol sync encoder
 
 use crate::RespValue;
 use std::io::{self, Write};
 
-/// RESP 协议同步编码器
+/// RESP protocol sync encoder
 pub struct RespEncoder<W: Write> {
     writer: W,
 }
@@ -13,7 +13,7 @@ impl<W: Write> RespEncoder<W> {
         Self { writer }
     }
 
-    /// 编码 RESP 值并写入
+    /// Encode RESP value and write
     pub fn encode(&mut self, value: &RespValue) -> io::Result<()> {
         match value {
             RespValue::SimpleString(s) => {
@@ -45,7 +45,7 @@ impl<W: Write> RespEncoder<W> {
     }
 }
 
-/// 编码 RESP 值并返回字节向量（用于测试）
+/// Encode RESP value and return byte vector (for testing)
 pub fn encode_to_vec(value: &RespValue) -> Vec<u8> {
     let mut buffer = Vec::new();
     let mut encoder = RespEncoder::new(&mut buffer);

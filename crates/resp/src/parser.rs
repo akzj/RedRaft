@@ -1,10 +1,10 @@
-//! RESP 协议同步解析器
+//! RESP protocol sync parser
 
 use crate::{RespError, RespValue};
 use std::io::{BufRead, BufReader, Read};
 use std::str;
 
-/// RESP 协议同步解析器
+/// RESP protocol sync parser
 pub struct RespParser<R: Read> {
     reader: BufReader<R>,
     buffer: Vec<u8>,
@@ -18,7 +18,7 @@ impl<R: Read> RespParser<R> {
         }
     }
 
-    /// 解析下一个 RESP 值
+    /// Parse next RESP value
     pub fn parse(&mut self) -> Result<RespValue, RespError> {
         let mut line = String::new();
         self.reader.read_line(&mut line)?;
@@ -39,7 +39,7 @@ impl<R: Read> RespParser<R> {
         match prefix {
             '+' => {
                 // Simple String: +OK\r\n
-                // 验证不包含未转义的 CRLF
+                // Verify no unescaped CRLF
                 let value = &line[1..];
                 if value.contains('\r') || value.contains('\n') {
                     return Err(RespError::InvalidFormat(
@@ -50,19 +50,19 @@ impl<R: Read> RespParser<R> {
             }
             '-' => {
                 // Error: -ERR message\r\n
-                // 错误消息可能包含 CRLF，但 read_line 已经处理了
+                // Error message may contain CRLF, but read_line already handled it
                 let error = line[1..].to_string();
                 Ok(RespValue::Error(error))
             }
             ':' => {
                 // Integer: :123\r\n
                 let num_str = &line[1..];
-                // 检查整数溢出：先尝试解析为 i128 以检测溢出，再转换为 i64
+                // Check for integer overflow: first parse as i128 to detect overflow, then convert to i64
                 let num = num_str.parse::<i128>().map_err(|_| {
                     RespError::InvalidFormat(format!("Invalid integer: {}", num_str))
                 })?;
                 
-                // 检查是否在 i64 范围内
+                // Check if within i64 range
                 if num > i64::MAX as i128 || num < i64::MIN as i128 {
                     return Err(RespError::IntegerOverflow);
                 }
@@ -170,12 +170,12 @@ mod tests {
 
     #[test]
     fn test_simple_string_crlf_validation() {
-        // 测试简单字符串不能包含 CR
+        // Test that simple string cannot contain CR
         let data = b"+OK\rHI\r\n";
         let mut parser = RespParser::new(Cursor::new(data));
         assert!(parser.parse().is_err());
         
-        // 测试简单字符串不能包含 LF
+        // Test that simple string cannot contain LF
         let data = b"+OK\nHI\r\n";
         let mut parser = RespParser::new(Cursor::new(data));
         assert!(parser.parse().is_err());
@@ -183,12 +183,12 @@ mod tests {
 
     #[test]
     fn test_integer_overflow() {
-        // 测试整数溢出（超过 i64::MAX）
+        // Test integer overflow (exceeding i64::MAX)
         let data = format!(":{}\r\n", i64::MAX as i128 + 1);
         let mut parser = RespParser::new(Cursor::new(data.as_bytes()));
         assert!(matches!(parser.parse(), Err(RespError::IntegerOverflow)));
         
-        // 测试正常范围内的整数
+        // Test integer within normal range
         let data = format!(":{}\r\n", i64::MAX);
         let mut parser = RespParser::new(Cursor::new(data.as_bytes()));
         assert!(matches!(parser.parse(), Ok(RespValue::Integer(i64::MAX))));

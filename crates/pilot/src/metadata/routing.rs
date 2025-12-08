@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_slot_for_key() {
-        // 测试槽位计算
+        // Test slot calculation
         let slot1 = RoutingTable::slot_for_key(b"hello");
         let slot2 = RoutingTable::slot_for_key(b"hello");
         assert_eq!(slot1, slot2);

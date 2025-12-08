@@ -124,7 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.redis_addr.clone(),
         ));
 
-        // 连接并初始化
+        // Connect and initialize
         match client.connect().await {
             Ok(()) => {
                 info!("Connected to pilot successfully");

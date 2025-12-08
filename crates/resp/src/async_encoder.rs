@@ -1,9 +1,9 @@
-//! RESP 协议异步编码器
+//! RESP protocol async encoder
 
 use crate::RespValue;
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
-/// RESP 协议异步编码器
+/// RESP protocol async encoder
 pub struct AsyncRespEncoder<W: AsyncWrite + Unpin> {
     writer: BufWriter<W>,
 }
@@ -15,7 +15,7 @@ impl<W: AsyncWrite + Unpin> AsyncRespEncoder<W> {
         }
     }
 
-    /// 编码 RESP 值并写入
+    /// Encode RESP value and write
     pub async fn encode(&mut self, value: &RespValue) -> std::io::Result<()> {
         match value {
             RespValue::SimpleString(s) => {

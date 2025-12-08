@@ -1,6 +1,6 @@
-//! Redis 命令解析模块
-//!
-//! 将 RespValue 解析为类型安全的 Command 结构
+//! Redis command parsing module
+//! 
+//! Parses RespValue into type-safe Command structures
 
 mod error;
 mod result;
@@ -11,19 +11,19 @@ pub use result::CommandResult;
 use crate::RespValue;
 use serde::{Deserialize, Serialize};
 
-/// 命令类型标记
+/// Command type marker
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandType {
-    /// 读命令 - 可以本地读取或通过 ReadIndex
+    /// Read command - can be read locally or via ReadIndex
     Read,
-    /// 写命令 - 必须通过 Raft 共识
+    /// Write command - must go through Raft consensus
     Write,
 }
 
-/// Redis 命令
+/// Redis command
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
-    // ==================== 连接/管理命令 ====================
+    // ==================== Connection/Management Commands ====================
     /// PING [message]
     Ping { message: Option<Vec<u8>> },
     /// ECHO message
@@ -37,7 +37,7 @@ pub enum Command {
     /// FLUSHDB
     FlushDb,
 
-    // ==================== String 读命令 ====================
+    // ==================== String Read Commands ====================
     /// GET key
     Get { key: Vec<u8> },
     /// MGET key [key ...]
@@ -47,7 +47,7 @@ pub enum Command {
     /// GETRANGE key start end
     GetRange { key: Vec<u8>, start: i64, end: i64 },
 
-    // ==================== String 写命令 ====================
+    // ==================== String Write Commands ====================
     /// SET key value [EX seconds] [PX milliseconds] [NX|XX]
     Set {
         key: Vec<u8>,
@@ -84,7 +84,7 @@ pub enum Command {
     /// SETRANGE key offset value
     SetRange { key: Vec<u8>, offset: i64, value: Vec<u8> },
 
-    // ==================== List 读命令 ====================
+    // ==================== List Read Commands ====================
     /// LLEN key
     LLen { key: Vec<u8> },
     /// LINDEX key index
@@ -92,7 +92,7 @@ pub enum Command {
     /// LRANGE key start stop
     LRange { key: Vec<u8>, start: i64, stop: i64 },
 
-    // ==================== List 写命令 ====================
+    // ==================== List Write Commands ====================
     /// LPUSH key value [value ...]
     LPush { key: Vec<u8>, values: Vec<Vec<u8>> },
     /// RPUSH key value [value ...]
@@ -108,7 +108,7 @@ pub enum Command {
     /// LREM key count value
     LRem { key: Vec<u8>, count: i64, value: Vec<u8> },
 
-    // ==================== Hash 读命令 ====================
+    // ==================== Hash Read Commands ====================
     /// HGET key field
     HGet { key: Vec<u8>, field: Vec<u8> },
     /// HMGET key field [field ...]
@@ -124,7 +124,7 @@ pub enum Command {
     /// HEXISTS key field
     HExists { key: Vec<u8>, field: Vec<u8> },
 
-    // ==================== Hash 写命令 ====================
+    // ==================== Hash Write Commands ====================
     /// HSET key field value [field value ...]
     HSet { key: Vec<u8>, fvs: Vec<(Vec<u8>, Vec<u8>)> },
     /// HSETNX key field value
@@ -138,7 +138,7 @@ pub enum Command {
     /// HINCRBYFLOAT key field increment
     HIncrByFloat { key: Vec<u8>, field: Vec<u8>, delta: f64 },
 
-    // ==================== Set 读命令 ====================
+    // ==================== Set Read Commands ====================
     /// SMEMBERS key
     SMembers { key: Vec<u8> },
     /// SISMEMBER key member
@@ -152,7 +152,7 @@ pub enum Command {
     /// SDIFF key [key ...]
     SDiff { keys: Vec<Vec<u8>> },
 
-    // ==================== Set 写命令 ====================
+    // ==================== Set Write Commands ====================
     /// SADD key member [member ...]
     SAdd { key: Vec<u8>, members: Vec<Vec<u8>> },
     /// SREM key member [member ...]
@@ -160,7 +160,7 @@ pub enum Command {
     /// SPOP key [count]
     SPop { key: Vec<u8>, count: Option<u64> },
 
-    // ==================== Key 命令 ====================
+    // ==================== Key Commands ====================
     /// DEL key [key ...]
     Del { keys: Vec<Vec<u8>> },
     /// EXISTS key [key ...]
@@ -188,15 +188,15 @@ pub enum Command {
 }
 
 impl Command {
-    /// 获取命令类型（读/写）
+    /// Get command type (read/write)
     pub fn command_type(&self) -> CommandType {
         match self {
-            // 管理命令
+            // Management commands
             Command::Ping { .. } | Command::Echo { .. } | Command::CommandInfo |
             Command::Info { .. } | Command::DbSize => CommandType::Read,
             Command::FlushDb => CommandType::Write,
 
-            // String 命令
+            // String commands
             Command::Get { .. } | Command::MGet { .. } | Command::StrLen { .. } |
             Command::GetRange { .. } => CommandType::Read,
             Command::Set { .. } | Command::SetNx { .. } | Command::SetEx { .. } |
@@ -205,25 +205,25 @@ impl Command {
             Command::Decr { .. } | Command::DecrBy { .. } | Command::Append { .. } |
             Command::GetSet { .. } | Command::SetRange { .. } => CommandType::Write,
 
-            // List 命令
+            // List commands
             Command::LLen { .. } | Command::LIndex { .. } | Command::LRange { .. } => CommandType::Read,
             Command::LPush { .. } | Command::RPush { .. } | Command::LPop { .. } |
             Command::RPop { .. } | Command::LSet { .. } | Command::LTrim { .. } |
             Command::LRem { .. } => CommandType::Write,
 
-            // Hash 命令
+            // Hash commands
             Command::HGet { .. } | Command::HMGet { .. } | Command::HGetAll { .. } |
             Command::HKeys { .. } | Command::HVals { .. } | Command::HLen { .. } |
             Command::HExists { .. } => CommandType::Read,
             Command::HSet { .. } | Command::HSetNx { .. } | Command::HMSet { .. } |
             Command::HDel { .. } | Command::HIncrBy { .. } | Command::HIncrByFloat { .. } => CommandType::Write,
 
-            // Set 命令
+            // Set commands
             Command::SMembers { .. } | Command::SIsMember { .. } | Command::SCard { .. } |
             Command::SInter { .. } | Command::SUnion { .. } | Command::SDiff { .. } => CommandType::Read,
             Command::SAdd { .. } | Command::SRem { .. } | Command::SPop { .. } => CommandType::Write,
 
-            // Key 命令
+            // Key commands
             Command::Exists { .. } | Command::Ttl { .. } | Command::PTtl { .. } |
             Command::Type { .. } | Command::Keys { .. } | Command::Scan { .. } => CommandType::Read,
             Command::Del { .. } | Command::Expire { .. } | Command::PExpire { .. } |
@@ -231,25 +231,25 @@ impl Command {
         }
     }
 
-    /// 是否为写命令
+    /// Whether it's a write command
     pub fn is_write(&self) -> bool {
         self.command_type() == CommandType::Write
     }
 
-    /// 是否为读命令
+    /// Whether it's a read command
     pub fn is_read(&self) -> bool {
         self.command_type() == CommandType::Read
     }
 
-    /// 获取命令的主 key（用于路由）
-    /// 返回 None 表示命令不涉及特定 key（如 PING, DBSIZE 等）
+    /// Get the command's primary key (for routing)
+    /// Returns None if the command doesn't involve a specific key (like PING, DBSIZE, etc.)
     pub fn get_key(&self) -> Option<&[u8]> {
         match self {
-            // 无 key 命令
+            // No key commands
             Command::Ping { .. } | Command::Echo { .. } | Command::CommandInfo |
             Command::Info { .. } | Command::DbSize | Command::FlushDb => None,
 
-            // 单 key 命令
+            // Single key commands
             Command::Get { key } | Command::StrLen { key } | Command::GetRange { key, .. } |
             Command::Set { key, .. } | Command::SetNx { key, .. } | Command::SetEx { key, .. } |
             Command::PSetEx { key, .. } | Command::Incr { key } | Command::IncrBy { key, .. } |
@@ -270,23 +270,23 @@ impl Command {
             Command::PTtl { key } | Command::Persist { key } | Command::Type { key } |
             Command::Rename { key, .. } | Command::RenameNx { key, .. } => Some(key),
 
-            // 多 key 命令，取第一个 key
+            // Multi-key commands, take the first key
             Command::MGet { keys } | Command::Del { keys } | Command::Exists { keys } |
             Command::SInter { keys } | Command::SUnion { keys } | Command::SDiff { keys } => {
                 keys.first().map(|k| k.as_slice())
             }
 
-            // 多 key-value 对，取第一个 key
+            // Multi key-value pairs, take the first key
             Command::MSet { kvs } | Command::MSetNx { kvs } => {
                 kvs.first().map(|(k, _)| k.as_slice())
             }
 
-            // 全局扫描命令
+            // Global scan commands
             Command::Keys { .. } | Command::Scan { .. } => None,
         }
     }
 
-    /// 获取命令名称
+    /// Get command name
     pub fn name(&self) -> &'static str {
         match self {
             Command::Ping { .. } => "PING",
@@ -385,7 +385,7 @@ impl TryFrom<&RespValue> for Command {
     }
 }
 
-/// 从 RespValue 提取参数列表
+/// Extract argument list from RespValue
 fn extract_args(value: &RespValue) -> Result<Vec<Vec<u8>>, CommandError> {
     match value {
         RespValue::Array(items) => {
@@ -410,7 +410,7 @@ fn extract_args(value: &RespValue) -> Result<Vec<Vec<u8>>, CommandError> {
     }
 }
 
-/// 解析整数参数
+/// Parse integer argument
 fn parse_int(arg: &[u8], name: &str) -> Result<i64, CommandError> {
     std::str::from_utf8(arg)
         .map_err(|_| CommandError::new(CommandErrorKind::InvalidArgument, format!("{} must be valid UTF-8", name)))?
@@ -418,7 +418,7 @@ fn parse_int(arg: &[u8], name: &str) -> Result<i64, CommandError> {
         .map_err(|_| CommandError::new(CommandErrorKind::InvalidArgument, format!("{} must be an integer", name)))
 }
 
-/// 解析无符号整数参数
+/// Parse unsigned integer argument
 fn parse_uint(arg: &[u8], name: &str) -> Result<u64, CommandError> {
     std::str::from_utf8(arg)
         .map_err(|_| CommandError::new(CommandErrorKind::InvalidArgument, format!("{} must be valid UTF-8", name)))?
@@ -426,7 +426,7 @@ fn parse_uint(arg: &[u8], name: &str) -> Result<u64, CommandError> {
         .map_err(|_| CommandError::new(CommandErrorKind::InvalidArgument, format!("{} must be a non-negative integer", name)))
 }
 
-/// 解析浮点数参数
+/// Parse float argument
 fn parse_float(arg: &[u8], name: &str) -> Result<f64, CommandError> {
     std::str::from_utf8(arg)
         .map_err(|_| CommandError::new(CommandErrorKind::InvalidArgument, format!("{} must be valid UTF-8", name)))?
@@ -434,7 +434,7 @@ fn parse_float(arg: &[u8], name: &str) -> Result<f64, CommandError> {
         .map_err(|_| CommandError::new(CommandErrorKind::InvalidArgument, format!("{} must be a float", name)))
 }
 
-/// 检查参数数量
+/// Check argument count
 fn check_arity(args: &[Vec<u8>], min: usize, max: Option<usize>, cmd: &str) -> Result<(), CommandError> {
     if args.len() < min {
         return Err(CommandError::new(
@@ -453,10 +453,10 @@ fn check_arity(args: &[Vec<u8>], min: usize, max: Option<usize>, cmd: &str) -> R
     Ok(())
 }
 
-/// 解析命令
+/// Parse command
 fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
     match cmd {
-        // 连接/管理命令
+        // Connection/Management commands
         "PING" => {
             check_arity(args, 0, Some(1), cmd)?;
             Ok(Command::Ping {
@@ -483,7 +483,7 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
             Ok(Command::FlushDb)
         }
 
-        // String 读命令
+        // String read commands
         "GET" => {
             check_arity(args, 1, Some(1), cmd)?;
             Ok(Command::Get { key: args[0].clone() })
@@ -505,7 +505,7 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
             })
         }
 
-        // String 写命令
+        // String write commands
         "SET" => {
             check_arity(args, 2, None, cmd)?;
             let key = args[0].clone();
@@ -624,7 +624,7 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
             })
         }
 
-        // List 命令
+        // List commands
         "LLEN" => {
             check_arity(args, 1, Some(1), cmd)?;
             Ok(Command::LLen { key: args[0].clone() })
@@ -691,7 +691,7 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
             })
         }
 
-        // Hash 命令
+        // Hash commands
         "HGET" => {
             check_arity(args, 2, Some(2), cmd)?;
             Ok(Command::HGet { key: args[0].clone(), field: args[1].clone() })
@@ -771,7 +771,7 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
             })
         }
 
-        // Set 命令
+        // Set commands
         "SMEMBERS" => {
             check_arity(args, 1, Some(1), cmd)?;
             Ok(Command::SMembers { key: args[0].clone() })
@@ -818,7 +818,7 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
             })
         }
 
-        // Key 命令
+        // Key commands
         "DEL" => {
             check_arity(args, 1, None, cmd)?;
             Ok(Command::Del { keys: args.to_vec() })

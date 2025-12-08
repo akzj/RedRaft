@@ -1,12 +1,12 @@
-//! RESP 协议异步解析器
+//! RESP protocol async parser
 
 use crate::{RespError, RespValue};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 
-/// 默认最大帧大小：512MB（防止内存溢出攻击）
+/// Default maximum frame size: 512MB (prevents memory overflow attacks)
 pub const DEFAULT_MAX_FRAME_SIZE: usize = 512 * 1024 * 1024;
 
-/// RESP 协议异步解析器
+/// RESP protocol async parser
 pub struct AsyncRespParser<R: AsyncRead + Unpin> {
     reader: BufReader<R>,
     max_bytes: usize,
@@ -14,16 +14,16 @@ pub struct AsyncRespParser<R: AsyncRead + Unpin> {
 }
 
 impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
-    /// 创建新的异步解析器（使用默认最大帧大小）
+    /// Create a new async parser (using default max frame size)
     pub fn new(reader: R) -> Self {
         Self::with_max_bytes(reader, DEFAULT_MAX_FRAME_SIZE)
     }
 
-    /// 创建新的异步解析器（指定最大帧大小）
+    /// Create a new async parser (specify max frame size)
     ///
     /// # Arguments
-    /// * `reader` - 异步读取器
-    /// * `max_bytes` - 最大帧大小限制（字节），防止内存溢出攻击
+    /// * `reader` - Async reader
+    /// * `max_bytes` - Maximum frame size limit (bytes), prevents memory overflow attacks
     pub fn with_max_bytes(reader: R, max_bytes: usize) -> Self {
         Self {
             reader: BufReader::new(reader),
@@ -32,7 +32,7 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
         }
     }
 
-    /// 检查并更新已读取字节数
+    /// Check and update the number of bytes read
     fn check_frame_size(&mut self, additional: usize) -> Result<(), RespError> {
         self.bytes_read = self.bytes_read.saturating_add(additional);
         if self.bytes_read > self.max_bytes {
@@ -42,14 +42,14 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
         }
     }
 
-    /// 重置字节计数器（用于 Pipeline 解析）
+    /// Reset byte counter (for Pipeline parsing)
     pub fn reset_bytes_read(&mut self) {
         self.bytes_read = 0;
     }
 
-    /// 从 EOF 缓冲区解析多个 RESP 值（Pipeline 支持）
+    /// Parse multiple RESP values from EOF buffer (Pipeline support)
     ///
-    /// 用于处理 `redis-benchmark -P 32` 等场景，一次读取可能包含多条命令
+    /// Used for scenarios like `redis-benchmark -P 32`, where a single read may contain multiple commands
     pub async fn decode_eof(&mut self) -> Result<Vec<RespValue>, RespError> {
         let mut results = Vec::new();
 
@@ -57,7 +57,7 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
             match self.parse().await {
                 Ok(value) => results.push(value),
                 Err(RespError::UnexpectedEof) => {
-                    // EOF 是正常的，表示没有更多数据
+                    // EOF is normal, indicating no more data
                     break;
                 }
                 Err(e) => return Err(e),
@@ -67,7 +67,7 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
         Ok(results)
     }
 
-    /// 解析下一个 RESP 值
+    /// Parse next RESP value
     pub async fn parse(&mut self) -> Result<RespValue, RespError> {
         let mut line = String::new();
         let bytes_read = self.reader.read_line(&mut line).await?;
@@ -76,7 +76,7 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
             return Err(RespError::UnexpectedEof);
         }
 
-        // 检查帧大小
+        // Check frame size
         self.check_frame_size(bytes_read)?;
 
         let line = line.trim_end();
@@ -84,7 +84,7 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
             return Err(RespError::InvalidFormat("Empty line".to_string()));
         }
 
-        // 获取第一个字节作为类型标识
+        // Get the first byte as type identifier
         let buf = line.as_bytes();
         if buf.is_empty() {
             return Err(RespError::InvalidFormat("Empty line".to_string()));
@@ -100,10 +100,10 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
         }
     }
 
-    /// 解析简单字符串: +OK\r\n
+    /// Parse simple string: +OK\r\n
     async fn parse_simple(&mut self, line: &str) -> Result<RespValue, RespError> {
         let value = &line[1..];
-        // 验证不包含未转义的 CRLF
+        // Verify no unescaped CRLF
         if value.contains('\r') || value.contains('\n') {
             return Err(RespError::InvalidFormat(
                 "Simple string cannot contain CR or LF".to_string(),
@@ -112,21 +112,21 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
         Ok(RespValue::SimpleString(value.to_string()))
     }
 
-    /// 解析错误: -ERR message\r\n
+    /// Parse error: -ERR message\r\n
     async fn parse_error(&mut self, line: &str) -> Result<RespValue, RespError> {
         let error = line[1..].to_string();
         Ok(RespValue::Error(error))
     }
 
-    /// 解析整数: :123\r\n
+    /// Parse integer: :123\r\n
     async fn parse_int(&mut self, line: &str) -> Result<RespValue, RespError> {
         let num_str = &line[1..];
-        // 检查整数溢出：先尝试解析为 i128 以检测溢出，再转换为 i64
+        // Check integer overflow: first try parsing as i128 to detect overflow, then convert to i64
         let num = num_str
             .parse::<i128>()
             .map_err(|_| RespError::InvalidFormat(format!("Invalid integer: {}", num_str)))?;
 
-        // 检查是否在 i64 范围内
+        // Check if within i64 range
         if num > i64::MAX as i128 || num < i64::MIN as i128 {
             return Err(RespError::IntegerOverflow);
         }
@@ -134,7 +134,7 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
         Ok(RespValue::Integer(num as i64))
     }
 
-    /// 解析批量字符串: $5\r\nhello\r\n
+    /// Parse bulk string: $5\r\nhello\r\n
     async fn parse_bulk(&mut self, line: &str) -> Result<RespValue, RespError> {
         let len_str = &line[1..];
         let len = len_str.parse::<i64>().map_err(|_| {
@@ -151,7 +151,7 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
             )))
         } else {
             let len = len as usize;
-            // 检查帧大小（包括数据 + CRLF）
+            // Check frame size (including data + CRLF)
             self.check_frame_size(len + 2)?;
 
             let mut buffer = vec![0u8; len];
@@ -170,7 +170,7 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
         }
     }
 
-    /// 解析数组: *2\r\n$3\r\nGET\r\n$3\r\nkey\r\n
+    /// Parse array: *2\r\n$3\r\nGET\r\n$3\r\nkey\r\n
     async fn parse_array(&mut self, line: &str) -> Result<RespValue, RespError> {
         let count_str = &line[1..];
         let count = count_str.parse::<i64>().map_err(|_| {
@@ -187,7 +187,7 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
             )))
         } else {
             let count = count as usize;
-            // 检查数组大小是否合理（防止恶意客户端发送超大数组）
+            // Check array size is reasonable (prevent malicious clients from sending oversized arrays)
             if count > 1024 * 1024 {
                 return Err(RespError::InvalidFormat(format!(
                     "Array too large: {} elements",

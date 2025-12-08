@@ -127,8 +127,8 @@ impl TestCluster {
     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
         if self.nodes.lock().unwrap().remove(id).is_some() {
             info!("Stopped node {:?}", id);
-            // 可能还需要通知网络层该节点已失效
-            // hub.unregister_node(id) ? (如果 MockNetworkHub 有此方法)
+            // May also need to notify network layer that this node is down
+            // hub.unregister_node(id) ? (if MockNetworkHub has this method)
             true
         } else {
             warn!("Attempted to stop non-existent node {:?}", id);
@@ -176,7 +176,7 @@ impl TestCluster {
         }
     }
 
-    // 发送业务命令
+    // Send business command
     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
         let request_id = raft::RequestId::new();
         let event = raft::Event::CreateSnapshot {};
@@ -216,13 +216,13 @@ impl TestCluster {
             new_node_id
         );
 
-        // 1. 首先获取当前 leader
+        // 1. First get current leader
         let leader_id = self
             .wait_for_leader(Duration::from_secs(5))
             .await
             .map_err(|e| format!("No leader available for config change: {}", e))?;
 
-        // 2. 准备新的配置（当前所有节点 + 新节点）
+        // 2. Prepare new configuration (current all nodes + new node)
         let mut new_voters: std::collections::HashSet<RaftId> = {
             let nodes = self.nodes.lock().unwrap();
             nodes.keys().cloned().collect()
@@ -234,7 +234,7 @@ impl TestCluster {
             new_node_id, new_voters
         );
 
-        // 3. 通过 leader 提交配置变更
+        // 3. Submit configuration change through leader
         let request_id = raft::RequestId::new();
         let config_change_event = raft::Event::ChangeConfig {
             new_voters,
@@ -267,11 +267,11 @@ impl TestCluster {
             return Err(format!("Leader node {:?} not found", leader_id));
         }
 
-        // 4. 等待配置变更提交（给一些时间让配置变更日志被复制）
+        // 4. Wait for configuration change to commit (give some time for configuration change log to be replicated)
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // 5. 现在创建新节点（此时配置变更应该已经在进行中）
-        // 新节点的初始peers是当前集群中除自己外的所有节点
+        // 5. Now create new node (configuration change should be in progress at this point)
+        // New node's initial peers are all nodes in current cluster except itself
         // let initial_peers: Vec<RaftId> = {
         //     let nodes = self.nodes.lock().unwrap();
         //     nodes.keys().cloned().collect()
@@ -283,12 +283,12 @@ impl TestCluster {
             self.driver.get_timer_service(),
             self.snapshot_storage.clone(),
             self.driver.clone(),
-            Vec::new(), // 初始peers为空，配置变更后会自动更新
+            Vec::new(), // Initial peers are empty, will be automatically updated after configuration change
         )
         .await
         .map_err(|e| format!("Failed to create new node: {}", e))?;
 
-        // 6. 将新节点添加到本地集群管理
+        // 6. Add new node to local cluster management
         self.nodes
             .lock()
             .unwrap()
@@ -301,7 +301,7 @@ impl TestCluster {
             new_node_id
         );
 
-        // 7. 等待新节点同步数据
+        // 7. Wait for new node to sync data
         info!(
             "Waiting for new node {:?} to synchronize data...",
             new_node_id
@@ -318,20 +318,20 @@ impl TestCluster {
             node_id
         );
 
-        // 1. 检查节点是否存在
+        // 1. Check if node exists
 
         let node = self.get_node(node_id);
         if node.is_none() {
             return Err(format!("Node {:?} not found in cluster", node_id));
         }
 
-        // 2. 获取当前 leader
+        // 2. Get current leader
         let leader_id = self
             .wait_for_leader(Duration::from_secs(5))
             .await
             .map_err(|e| format!("No leader available for config change: {}", e))?;
 
-        // 3. 准备新的配置（当前所有节点 - 要移除的节点）
+        // 3. Prepare new configuration (current all nodes - node to remove)
         let mut new_voters: std::collections::HashSet<RaftId> = {
             let nodes = self.nodes.lock().unwrap();
             nodes.keys().cloned().collect()
@@ -343,7 +343,7 @@ impl TestCluster {
             node_id, new_voters
         );
 
-        // 4. 通过 leader 提交配置变更
+        // 4. Submit configuration change through leader
         let request_id = raft::RequestId::new();
         let config_change_event = raft::Event::ChangeConfig {
             new_voters,
@@ -376,7 +376,7 @@ impl TestCluster {
             return Err(format!("Leader node {:?} not found", leader_id));
         }
 
-        // 5. 等待配置变更提交
+        // 5. Wait for configuration change to commit
 
         timeout(
             Duration::from_secs(5),
@@ -386,7 +386,7 @@ impl TestCluster {
         .ok();
 
         self.driver.del_raft_group(&node_id);
-        // 6. 从本地集群管理中移除节点
+        // 6. Remove node from local cluster management
         if self.nodes.lock().unwrap().remove(node_id).is_some() {
             info!(
                 "Successfully removed node {:?} from cluster via Raft config change",
@@ -534,13 +534,13 @@ impl TestCluster {
     pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
         info!("Adding learner {:?} to cluster", learner_id);
 
-        // 1. 获取当前 leader
+        // 1. Get current leader
         let leader_id = self
             .wait_for_leader(Duration::from_secs(5))
             .await
             .map_err(|e| format!("No leader available for adding learner: {}", e))?;
 
-        // 2. 通过 leader 添加 learner
+        // 2. Add learner through leader
         let request_id = raft::RequestId::new();
         let add_learner_event = raft::Event::AddLearner {
             learner: learner_id.clone(),
@@ -566,11 +566,11 @@ impl TestCluster {
             }
         }
 
-        // 3. 等待配置变更传播
+        // 3. Wait for configuration change to propagate
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        // 4. 创建新的 learner 节点
-        // 获取当前的 voters 列表作为 learner 的初始配置
+        // 4. Create new learner node
+        // Get current voters list as learner's initial configuration
         let current_voters: Vec<RaftId> = self.config.node_ids.clone();
         let learner_node = TestNode::new_learner(
             learner_id.clone(),
@@ -578,7 +578,7 @@ impl TestCluster {
             self.driver.get_timer_service(),
             self.snapshot_storage.clone(),
             self.driver.clone(),
-            current_voters, // learner 需要知道当前的 voters
+            current_voters, // Learner needs to know current voters
         )
         .await
         .map_err(|e| format!("Failed to create learner node: {}", e))?;
@@ -601,18 +601,18 @@ impl TestCluster {
 
         let learner = self.get_node(learner_id);
 
-        // 1. 检查 learner 是否存在
+        // 1. Check if learner exists
         if learner.is_none() {
             return Err(format!("Learner {:?} not found in cluster", learner_id));
         }
 
-        // 2. 获取当前 leader
+        // 2. Get current leader
         let leader_id = self
             .wait_for_leader(Duration::from_secs(5))
             .await
             .map_err(|e| format!("No leader available for removing learner: {}", e))?;
 
-        // 3. 通过 leader 移除 learner
+        // 3. Remove learner through leader
         let request_id = raft::RequestId::new();
         let remove_learner_event = raft::Event::RemoveLearner {
             learner: learner_id.clone(),
@@ -638,7 +638,7 @@ impl TestCluster {
             }
         }
 
-        // 4. 等待配置变更传播
+        // 4. Wait for configuration change to propagate
 
         timeout(
             Duration::from_secs(5),
@@ -647,7 +647,7 @@ impl TestCluster {
         .await
         .ok();
 
-        // 5. 从本地集群管理中移除 learner
+        // 5. Remove learner from local cluster management
         self.driver.del_raft_group(learner_id);
         if self.nodes.lock().unwrap().remove(learner_id).is_some() {
             info!("Successfully removed learner {:?} from cluster", learner_id);
@@ -668,7 +668,7 @@ impl TestCluster {
     ) -> Result<(), String> {
         let start = std::time::Instant::now();
 
-        // 获取参考节点的数据（从任意一个 voter 获取）
+        // Get reference node's data (from any voter)
         let reference_data = {
             let nodes = self.nodes.lock().unwrap();
             let voter_node = nodes.values().find(|node| {
@@ -682,7 +682,7 @@ impl TestCluster {
             }
         };
 
-        // 等待 learner 的数据与参考数据一致
+        // Wait for learner's data to match reference data
         while start.elapsed() < timeout {
             if let Some(learner_data) = self.get_node_data(learner_id) {
                 if learner_data == reference_data {

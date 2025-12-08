@@ -58,7 +58,7 @@ impl Default for MockRaftNetworkConfig {
     }
 }
 
-// --- 内部用于延迟队列的消息 ---
+// --- Internal message for delay queue ---
 
 /// Message waiting to be sent in the delay queue
 #[derive(Debug, Clone)] // Added Clone for moving between structures
@@ -68,9 +68,9 @@ struct DelayedMessage {
     event: NetworkEvent,
 }
 
-// 移除了 Ord, PartialOrd, Eq, PartialEq 的实现，因为我们不再使用 BinaryHeap
+// Removed Ord, PartialOrd, Eq, PartialEq implementations since we no longer use BinaryHeap
 
-// --- 模拟网络核心 ---
+// --- Mock network core ---
 
 /// Mock network hub that manages all nodes' receivers and global state
 #[derive(Clone)]
@@ -103,7 +103,7 @@ struct MockNetworkHubInner {
 }
 
 impl MockNetworkHubInner {
-    /// 更新节点的网络配置
+    /// Update node network configuration
     pub async fn update_config(&self, node_id: RaftId, config: MockRaftNetworkConfig) {
         self.raft_config
             .write()
@@ -111,15 +111,15 @@ impl MockNetworkHubInner {
             .insert(node_id, Arc::new(config));
     }
 
-    /// 获取节点的网络配置
+    /// Get node network configuration
     pub async fn get_config(&self, node_id: &RaftId) -> Option<Arc<MockRaftNetworkConfig>> {
         self.raft_config.read().await.get(node_id).cloned()
     }
 }
 
-/// 内部类型，用于通过通道传递实际发送的消息
+/// Internal type for passing actual messages through channels
 
-/// 通过 real_send 通道传递的实际发送项
+/// Actual send item passed through real_send channel
 type RealSendItem = (RaftId, NetworkEvent); // (target, event)
 
 impl MockNetworkHub {
@@ -144,26 +144,26 @@ impl MockNetworkHub {
         Self { inner }
     }
 
-    /// 延迟队列处理器：检查所有节点的延迟队列并按计划时间发送消息
-    /// 保证每个节点内部消息的 FIFO 顺序
+    /// Delay queue processor: Checks all nodes' delay queues and sends messages according to scheduled time
+    /// Ensures FIFO order for messages within each node
     async fn run_delayed_queue_processor(inner: Arc<MockNetworkHubInner>) {
         loop {
-            // 1. 获取所有队列的只读锁，找到最早到期的消息
+            // 1. Get read-only locks for all queues, find earliest expiring message
             let queues = inner.delayed_queues.read().await;
             let mut earliest_msg: Option<DelayedMessage> = None;
             let mut earliest_sender: Option<RaftId> = None;
 
             for (sender_id, queue) in queues.iter() {
                 if let Some(msg) = queue.front() {
-                    // 查看队首元素
+                    // Check front element
                     match &earliest_msg {
                         None => {
-                            // 第一个找到的消息
+                            // First message found
                             earliest_msg = Some(msg.clone()); // Clone for temporary use
                             earliest_sender = Some(sender_id.clone());
                         }
                         Some(current_earliest) => {
-                            // 比较 scheduled_time
+                            // Compare scheduled_time
                             if msg.scheduled_time < current_earliest.scheduled_time {
                                 earliest_msg = Some(msg.clone());
                                 earliest_sender = Some(sender_id.clone());
@@ -172,29 +172,29 @@ impl MockNetworkHub {
                     }
                 }
             }
-            drop(queues); // 释放只读锁
+            drop(queues); // Release read lock
 
-            // 2. 处理找到的最早消息
+            // 2. Process the earliest message found
             if let (Some(msg_to_send), Some(sender_id)) = (earliest_msg, earliest_sender) {
                 let now = Instant::now();
                 if msg_to_send.scheduled_time <= now {
-                    // 时间到了，需要发送
-                    // 3. 重新获取写锁，从对应队列移除消息
+                    // Time arrived, need to send
+                    // 3. Re-acquire write lock, remove message from corresponding queue
                     let mut queues_mut = inner.delayed_queues.write().await;
                     if let Some(queue) = queues_mut.get_mut(&sender_id) {
-                        // 再次检查队首是否还是该消息（防止并发修改）
-                        // 简单起见，我们假设如果 sender_id 和 scheduled_time 匹配，就是同一条消息
-                        // 更严格的比较可能需要在 DelayedMessage 中加入唯一 ID
+                        // Recheck if front is still the same message (prevent concurrent modification)
+                        // For simplicity, we assume if sender_id and scheduled_time match, it's the same message
+                        // More strict comparison might require adding a unique ID to DelayedMessage
                         if let Some(front_msg) = queue.front() {
                             if front_msg.scheduled_time == msg_to_send.scheduled_time {
-                                let _removed_msg = queue.pop_front(); // 移除队首消息
-                                drop(queues_mut); // 释放写锁
+                                let _removed_msg = queue.pop_front(); // Remove front message
+                                drop(queues_mut); // Release write lock
 
                                 // info!(
                                 //     "Delayed message from {} to {} ready for sending",
                                 //     sender_id, msg_to_send.target
                                 // );
-                                // 4. 发送到 real_send 通道
+                                // 4. Send to real_send channel
                                 if let Err(_e) = inner
                                     .real_send_tx
                                     .send((msg_to_send.target, msg_to_send.event))
@@ -204,56 +204,56 @@ impl MockNetworkHub {
                                     );
                                     break; // Channel closed, stop
                                 }
-                                // 处理完一个消息后，立即继续循环检查下一个
+                                // After processing one message, immediately continue checking the next one
                                 //             info!("send message done,continue");
                                 continue;
                             }
                         }
                     }
-                    // 如果队列为空或队首已变，则继续循环
-                    // (通常不会发生，除非有并发修改，但 VecDeque 的 front/pop 是原子的)
+                    // If queue is empty or front has changed, continue loop
+                    // (Unlikely to happen unless there's concurrent modification, but VecDeque's front/pop are atomic)
                 } else {
-                    // 还没到时间，计算等待时长
+                    // Not time yet, calculate wait duration
                     let wait_duration = msg_to_send.scheduled_time.duration_since(now);
                     // info!(
                     //     "Waiting {:?} for next delayed message from {}",
                     //     wait_duration, sender_id
                     // );
-                    // 等待指定时间或被新消息入队通知唤醒
+                    // Wait for specified time or wake up when notified of new message enqueue
                     tokio::select! {
                         _ = tokio::time::sleep(wait_duration) => {
                            // info!("continue to dispatch message")
                         }
                         _ = inner.delay_queue_notify.notified() => {
-                            // 被通知，可能有新消息或更早的消息，继续循环检查
+                            // Notified, possibly new messages or earlier messages, continue loop check
                          //   info!("Woken up by notification, rechecking queues");
                         }
                     }
-                    continue; // 继续循环
+                    continue; // Continue loop
                 }
             } else {
-                // 所有队列都为空
+                // All queues are empty
                 log::trace!("All delayed queues empty, waiting for notification");
                 inner.delay_queue_notify.notified().await;
-                // 被通知，继续循环检查
+                // Notified, continue loop check
             }
         }
     }
 
-    /// 实际发送器：从 real_send 通道批量接收并发送消息
+    /// Real sender: Batch receive and send messages from real_send channel
     async fn run_real_sender(inner: Arc<MockNetworkHubInner>) {
         let mut rx = inner.real_send_rx.lock().await;
         loop {
             let mut batch = Vec::with_capacity(inner.hub_config.batch_size);
             let timeout_duration = Duration::from_millis(inner.hub_config.batch_max_wait_ms);
 
-            // 尝试收集一个批次
+            // Try to collect a batch
             tokio::select! {
-                // 接收第一个消息
+                // Receive first message
                 first_item = rx.recv() => {
                     if let Some(item) = first_item {
                         batch.push(item);
-                        // 在超时时间内尝试接收更多消息以填满批次
+                        // Try to receive more messages within timeout to fill the batch
                         let deadline = Instant::now() + timeout_duration;
                         while batch.len() < inner.hub_config.batch_size {
                             tokio::select! {
@@ -272,17 +272,17 @@ impl MockNetworkHub {
                         break;
                     }
                 }
-                // 如果第一个都没收到，超时后也继续（虽然 batch 会是空的）
+                // If no first message received, continue after timeout (batch will be empty)
                 _ = tokio::time::sleep(timeout_duration) => {
                     // info!("wait message timeout");
                 }
             }
 
-            // 发送批次中的消息
+            // Send messages in the batch
             if !batch.is_empty() {
                 //     log::trace!("Sending batch of {} messages", batch.len());
                 for (target, event) in batch.drain(..) {
-                    // 模拟实际发送时的失败率
+                    // Simulate failure rate during actual sending
 
                     let config = inner
                         .raft_config
@@ -303,12 +303,12 @@ impl MockNetworkHub {
                             "MockNetwork: Simulating send failure for message to {}",
                             target
                         );
-                        // 这里模拟发送失败，可以选择记录或忽略
-                        // 对于 Raft 来说，发送失败通常等同于超时或丢包，由上层处理
-                        continue; // 跳过这次发送
+                        // Simulate sending failure here, can choose to log or ignore
+                        // For Raft, sending failure is usually equivalent to timeout or packet loss, handled by upper layer
+                        continue; // Skip this send
                     }
 
-                    // 实际“发送”：转发到目标节点的接收端
+                    // Actual "send": Forward to target node's receiver
                     let senders = inner.node_senders.read().await;
                     if let Some(sender) = senders.get(&target) {
                         match (sender.dispatch.as_ref(), sender.sender.as_ref()) {
@@ -347,11 +347,11 @@ impl MockNetworkHub {
                     }
                 }
             }
-            // 继续循环等待下一批
+            // Continue loop waiting for next batch
         }
     }
 
-    /// 为一个 Raft 节点注册到网络中，返回其对应的 Network 实例和接收端
+    /// Register a Raft node to the network, return its corresponding Network instance and receiver
     pub async fn register_node(
         &self,
         node_id: RaftId,
@@ -386,7 +386,7 @@ impl MockNetworkHub {
             node_id.clone(),
             NodeSender {
                 dispatch: Some(dispatch),
-                // 当提供 dispatch 时，不应再提供 sender，避免双通道导致 panic
+                // When dispatch is provided, sender should not be provided to avoid panic from dual channels
                 sender: None,
             },
         );
@@ -401,17 +401,17 @@ impl MockNetworkHub {
     }
 }
 
-// --- 代表单个节点的网络接口 ---
+// --- Network Interface for Single Node ---
 
-/// 代表单个 Raft 节点的网络接口实现
+/// Network interface implementation for a single Raft node
 pub struct MockNodeNetwork {
     node_id: RaftId,
-    hub_inner: Arc<MockNetworkHubInner>, // 引用 Hub 的内部状态
+    hub_inner: Arc<MockNetworkHubInner>, // Reference to Hub's internal state
 }
 
-// --- 内部用于通道传递的事件 ---
+// --- Internal Events for Channel Communication ---
 
-/// 内部枚举，用于通过通道传递不同类型的网络消息
+/// Internal enum for passing different types of network messages through channels
 #[derive(Debug, Clone)] // Clone is needed for putting into DelayedMessage and sending
 
 // (sender, target, event)
@@ -430,10 +430,10 @@ impl MockNodeNetwork {
     // Isolate node from network
     pub async fn isolate(&self) {
         info!("Isolating node {:?}", self.node_id);
-        // 清空该节点的发送端，模拟网络隔离
+        // Clear the node's sender, simulate network isolation
         let mut config = MockRaftNetworkConfig::default(); // Reset to default config
-        config.drop_rate = 1.0; // 设置丢包率为 100%
-        config.failure_rate = 1.0; // 设置失败率为 100%
+        config.drop_rate = 1.0; // Set packet loss rate to 100%
+        config.failure_rate = 1.0; // Set failure rate to 100%
         self.hub_inner
             .update_config(self.node_id.clone(), config)
             .await;
@@ -442,14 +442,14 @@ impl MockNodeNetwork {
     // Restore node network connection
     pub async fn restore(&self) {
         info!("Restoring node {:?}", self.node_id);
-        // 恢复到默认配置
+        // Restore to default configuration
         let config = MockRaftNetworkConfig::default();
         self.hub_inner
             .update_config(self.node_id.clone(), config)
             .await;
     }
 
-    /// 内部辅助函数，用于模拟延迟和丢包，然后将消息放入延迟队列
+    /// Internal helper function to simulate delay and packet loss, then put message into delay queue
     async fn send_to_target(
         &self,
         from: RaftId,
@@ -461,7 +461,7 @@ impl MockNodeNetwork {
         let config = self.hub_inner.raft_config.read().await;
         let config = config.get(&from).cloned().unwrap_or_default();
         let mut rng = rand::rngs::StdRng::from_os_rng(); // [!code ++]
-                                                         // 1. 模拟丢包 (在入队前就决定是否丢弃)
+                                                         // 1. Simulate packet loss (decide whether to drop before queuing)
 
         if rng.random::<f64>() < config.drop_rate {
             // [!code ++]
@@ -469,17 +469,17 @@ impl MockNodeNetwork {
                 "MockNetwork: Dropping message from {} to {} (before queuing)",
                 self.node_id, target
             );
-            // 对于丢包，操作被视为“成功”（消息已发出但丢失）
+            // For packet loss, operation is considered "successful" (message sent but lost)
             return Ok(());
         }
 
-        // 2. 计算延迟
+        // 2. Calculate delay
         let latency_ms = config.base_latency_ms + rng.random_range(0..=config.jitter_max_ms);
         let delay = Duration::from_millis(latency_ms);
         let scheduled_time = Instant::now() + delay;
         drop(config); // Release read lock early
 
-        // 3. 创建延迟消息并放入对应发送方的队列末尾
+        // 3. Create delayed message and put it at the end of the sender's queue
         let delayed_msg = DelayedMessage {
             scheduled_time,
             target: target.clone(),
@@ -488,14 +488,14 @@ impl MockNodeNetwork {
 
         {
             let mut queues = self.hub_inner.delayed_queues.write().await;
-            // 获取或创建该节点的队列
+            // Get or create queue for this node
             let queue = queues
                 .entry(self.node_id.clone())
                 .or_insert_with(VecDeque::new);
             queue.push_back(delayed_msg); // Push to back to maintain FIFO for this sender
         } // Lock released here
 
-        // 4. 通知延迟队列处理器有新消息
+        // 4. Notify delayed queue processor of new message
         self.hub_inner.delay_queue_notify.notify_one();
 
         // info!(
@@ -503,7 +503,7 @@ impl MockNodeNetwork {
         //     self.node_id, target, delay, scheduled_time
         // );
 
-        // 5. 立即返回，模拟网络调用瞬间完成
+        // 5. Return immediately, simulate instant network call completion
         Ok(())
     }
 }
@@ -626,7 +626,7 @@ impl Network for MockNodeNetwork {
 // --- Helper function: Dispatch internal events back to Raft state machine ---
 // (This part is the same as before, adjust according to your Event enum)
 
-// use crate::Event; // 引入您实际的 Event 枚举
+// use crate::Event; // Import your actual Event enum
 
 pub fn dispatch_network_event(event: NetworkEvent) -> Option<Event> {
     match event {
@@ -1221,10 +1221,10 @@ mod additional_tests {
     use super::*;
     use tokio::time::{timeout, Instant};
 
-    /// 测试发送失败率（failure_rate）生效
+    /// Test if failure_rate takes effect
     #[tokio::test]
     async fn test_send_failure_rate() {
-        // 配置：100% 发送失败率（消息入队后，实际发送时失败）
+        // Configuration: 100% send failure rate (message enqueued but fails during actual sending)
         let config = MockNetworkHubConfig {
             batch_size: 1,
             batch_max_wait_ms: 1,
@@ -1249,22 +1249,22 @@ mod additional_tests {
 
         let (_network_receiver, mut rx_receiver) = hub.register_node(receiver.clone()).await;
 
-        // 发送消息（应入队但发送阶段失败）
+        // Send message (should be enqueued but fail during sending phase)
         let vote_req = create_test_request_vote();
         let result = network
             .send_request_vote_request(&sender, &receiver, vote_req)
             .await;
-        assert!(result.is_ok()); // 发送操作本身无错误
+        assert!(result.is_ok()); // Send operation itself has no error
 
-        // 接收端应收不到消息（发送失败）
+        // Receiver should not receive message (send failed)
         let received = timeout(Duration::from_millis(100), rx_receiver.recv()).await;
-        assert!(received.is_err(), "消息应因发送失败而丢失");
+        assert!(received.is_err(), "Message should be lost due to sending failure");
     }
 
-    /// 测试批量发送边界场景
+    /// Test batch sending boundary scenarios
     #[tokio::test]
     async fn test_batch_sending_boundaries() {
-        // 配置：批量大小2，最大等待时间10ms
+        // Configuration: batch size 2, max wait time 10ms
         let config = MockNetworkHubConfig {
             batch_size: 2,
             batch_max_wait_ms: 10,
@@ -1289,7 +1289,7 @@ mod additional_tests {
 
         let (_network_receiver, mut rx_receiver) = hub.register_node(receiver.clone()).await;
 
-        // 场景1：发送2条消息，应一次批量发送
+        // Scenario 1: Send 2 messages, should be sent in one batch
         let start = Instant::now();
         for i in 1..=2 {
             let mut vote_req = create_test_request_vote();
@@ -1300,7 +1300,7 @@ mod additional_tests {
                 .unwrap();
         }
 
-        // 验证两条消息在短时间内连续收到（批量发送）
+        // Verify both messages are received consecutively within a short time (batch sent)
         let _msg1 = timeout(Duration::from_millis(50), rx_receiver.recv())
             .await
             .unwrap()
@@ -1311,10 +1311,10 @@ mod additional_tests {
             .unwrap();
         assert!(
             start.elapsed() < Duration::from_millis(20),
-            "批量发送应无显著延迟"
+            "Batch sending should have no significant delay"
         );
 
-        // 场景2：发送1条消息，应在超时后发送
+        // Scenario 2: Send 1 message, should be sent after timeout
         let start = Instant::now();
         let mut vote_req = create_test_request_vote();
         vote_req.term = 3;
@@ -1330,9 +1330,9 @@ mod additional_tests {
         let elapsed = start.elapsed();
         assert!(
             elapsed >= Duration::from_millis(10),
-            "单条消息应等待批量超时"
+            "Single message should wait for batch timeout"
         );
-        assert!(elapsed < Duration::from_millis(30), "超时不应过长");
+        assert!(elapsed < Duration::from_millis(30), "Timeout should not be too long");
     }
 
     #[tokio::test]
@@ -1343,7 +1343,7 @@ mod additional_tests {
         };
         let hub = MockNetworkHub::new(config);
 
-        // 注册3个节点：sender1、sender2发送消息，receiver接收
+        // Register 3 nodes: sender1, sender2 send messages, receiver receives
         let sender1 = create_test_raft_id("group1", "sender1");
         let sender2 = create_test_raft_id("group1", "sender2");
         let receiver = create_test_raft_id("group1", "receiver");
@@ -1352,29 +1352,29 @@ mod additional_tests {
         let (network2, _rx2) = hub.register_node(sender2.clone()).await;
         let (_network_r, mut rx_r) = hub.register_node(receiver.clone()).await;
 
-        // sender1 发送3条消息（term 1-3），并设置正确的candidate_id
+        // sender1 sends 3 messages (term 1-3), with correct candidate_id
         for term in 1..=3 {
             let mut req = create_test_request_vote();
             req.term = term;
-            req.candidate_id = sender1.clone(); // 关键修复：设置正确的发送者ID
+            req.candidate_id = sender1.clone(); // Key fix: Set correct sender ID
             network1
                 .send_request_vote_request(&sender1, &receiver, req)
                 .await
                 .unwrap();
         }
 
-        // sender2 发送3条消息（term 10-12），并设置正确的candidate_id
+        // sender2 sends 3 messages (term 10-12), with correct candidate_id
         for term in 10..=12 {
             let mut req = create_test_request_vote();
             req.term = term;
-            req.candidate_id = sender2.clone(); // 关键修复：设置正确的发送者ID
+            req.candidate_id = sender2.clone(); // Key fix: Set correct sender ID
             network2
                 .send_request_vote_request(&sender2, &receiver, req)
                 .await
                 .unwrap();
         }
 
-        // 收集接收端消息，按发送节点分组
+        // Collect receiver messages, group by sending node
         let mut sender1_terms = vec![];
         let mut sender2_terms = vec![];
         for _ in 0..6 {
@@ -1391,15 +1391,15 @@ mod additional_tests {
             }
         }
 
-        // 验证各节点消息顺序正确（FIFO）
-        assert_eq!(sender1_terms, vec![1, 2, 3], "sender1消息顺序错误");
-        assert_eq!(sender2_terms, vec![10, 11, 12], "sender2消息顺序错误");
+        // Verify message order is correct for each node (FIFO)
+        assert_eq!(sender1_terms, vec![1, 2, 3], "sender1 message order is incorrect");
+        assert_eq!(sender2_terms, vec![10, 11, 12], "sender2 message order is incorrect");
     }
     #[tokio::test]
     async fn test_large_batch_processing() {
         let config = MockNetworkHubConfig {
-            batch_size: 3,         // 每批最多3条
-            batch_max_wait_ms: 10, // 增加超时时间到10ms，确保批次分离
+            batch_size: 3,         // Max 3 per batch
+            batch_max_wait_ms: 10, // Increase timeout to 10ms to ensure batch separation
         };
         let hub = MockNetworkHub::new(config);
 
@@ -1409,7 +1409,7 @@ mod additional_tests {
         let (network, _rx_sender) = hub.register_node(sender.clone()).await;
         let (_network_receiver, mut rx_receiver) = hub.register_node(receiver.clone()).await;
 
-        // 分阶段发送消息，避免所有消息瞬间入队导致批次边界模糊
+        // Send messages in stages to avoid batch boundary blur from all messages enqueued instantly
         let send_batch = |network: Arc<MockNodeNetwork>,
                           sender: RaftId,
                           receiver: RaftId,
@@ -1427,24 +1427,24 @@ mod additional_tests {
 
         let network = Arc::new(network);
 
-        // 第一批3条（1-3）
+        // First batch: 3 messages (1-3)
         send_batch(Arc::clone(&network), sender.clone(), receiver.clone(), 1, 3).await;
-        // 等待第一批发送完成
+        // Wait for first batch to be sent
         tokio::time::sleep(Duration::from_millis(15)).await;
 
-        // 第二批3条（4-6）
+        // Second batch: 3 messages (4-6)
         send_batch(Arc::clone(&network), sender.clone(), receiver.clone(), 4, 6).await;
-        // 等待第二批发送完成
+        // Wait for second batch to be sent
         tokio::time::sleep(Duration::from_millis(15)).await;
 
-        // 第三批1条（7）
+        // Third batch: 1 message (7)
         send_batch(Arc::clone(&network), sender.clone(), receiver.clone(), 7, 7).await;
 
-        // 简化测试：只验证所有消息都能正确接收
+        // Simplified test: Only verify all messages are received correctly
         let mut received_count = 0;
         let mut received_terms = vec![];
 
-        // 收集所有消息
+        // Collect all messages
         while received_count < 7 {
             if let Ok(msg) = timeout(Duration::from_millis(100), rx_receiver.recv()).await {
                 if let Some(NetworkEvent::RequestVote(_, _, req)) = msg {
@@ -1456,12 +1456,12 @@ mod additional_tests {
             }
         }
 
-        // 验证收到了所有消息且顺序正确（FIFO）
-        assert_eq!(received_count, 7, "应该收到7条消息");
+        // Verify all messages are received with correct order (FIFO)
+        assert_eq!(received_count, 7, "Should receive 7 messages");
         assert_eq!(
             received_terms,
             vec![1, 2, 3, 4, 5, 6, 7],
-            "消息应按发送顺序到达"
+            "Messages should arrive in sending order"
         );
     }
 }

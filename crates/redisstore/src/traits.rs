@@ -1,42 +1,42 @@
-//! Redis 存储 trait 定义
-//!
-//! 支持 Redis 的多种数据类型和操作
+//! Redis storage trait definition
+//! 
+//! Supports multiple Redis data types and operations
 
 use resp::Command;
 
-/// 命令执行结果
+/// Command execution result
 #[derive(Debug, Clone, PartialEq)]
 pub enum ApplyResult {
-    /// 简单字符串响应 (OK, PONG 等)
+    /// Simple string response (OK, PONG, etc.)
     Ok,
-    /// PONG 响应
+    /// PONG response
     Pong(Option<Vec<u8>>),
-    /// 整数响应
+    /// Integer response
     Integer(i64),
-    /// 字符串响应（可能为 nil）
+    /// String response (may be nil)
     Value(Option<Vec<u8>>),
-    /// 数组响应
+    /// Array response
     Array(Vec<Option<Vec<u8>>>),
-    /// 键值对数组 (用于 HGETALL 等)
+    /// Key-value array (used for HGETALL, etc.)
     KeyValues(Vec<(Vec<u8>, Vec<u8>)>),
-    /// 类型字符串
+    /// Type string
     Type(Option<&'static str>),
-    /// 错误响应
+    /// Error response
     Error(StoreError),
 }
 
-/// Redis 存储错误
+/// Redis storage error
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
-    /// 键不存在
+    /// Key not found
     KeyNotFound,
-    /// 类型不匹配（如对 String 执行 List 操作）
+    /// Type mismatch (e.g., performing List operations on String)
     WrongType,
-    /// 索引越界
+    /// Index out of range
     IndexOutOfRange,
-    /// 无效参数
+    /// Invalid argument
     InvalidArgument(String),
-    /// 内部错误
+    /// Internal error
     Internal(String),
 }
 
@@ -58,185 +58,185 @@ impl std::error::Error for StoreError {}
 
 pub type StoreResult<T> = Result<T, StoreError>;
 
-/// Redis 存储抽象 trait
-///
-/// 定义了 Redis 兼容的键值存储操作，支持：
+/// Redis storage abstraction trait
+/// 
+/// Defines Redis-compatible key-value storage operations, supporting:
 /// - String: GET, SET, MGET, MSET, INCR, DECR, APPEND, STRLEN
 /// - List: LPUSH, RPUSH, LPOP, RPOP, LRANGE, LLEN, LINDEX
 /// - Hash: HGET, HSET, HDEL, HGETALL, HKEYS, HVALS, HLEN
 /// - Set: SADD, SREM, SMEMBERS, SISMEMBER, SCARD
-/// - 通用: DEL, EXISTS, KEYS, TYPE, TTL, EXPIRE, DBSIZE, FLUSHDB
-///
-/// 后续可以轻松替换为 RocksDB 等持久化存储
+/// - Generic: DEL, EXISTS, KEYS, TYPE, TTL, EXPIRE, DBSIZE, FLUSHDB
+/// 
+/// Can be easily replaced with persistent storage like RocksDB later
 pub trait RedisStore: Send + Sync {
-    // ==================== String 操作 ====================
+    // ==================== String Operations ====================
 
-    /// GET: 获取字符串值
+    /// GET: Get string value
     fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
 
-    /// SET: 设置字符串值
+    /// SET: Set string value
     fn set(&self, key: Vec<u8>, value: Vec<u8>);
 
-    /// SETNX: 仅当键不存在时设置
+    /// SETNX: Set only if key does not exist
     fn setnx(&self, key: Vec<u8>, value: Vec<u8>) -> bool;
 
-    /// SETEX: 设置值并指定过期时间（秒）
+    /// SETEX: Set value with expiration time (seconds)
     fn setex(&self, key: Vec<u8>, value: Vec<u8>, ttl_secs: u64);
 
-    /// MGET: 批量获取
+    /// MGET: Batch get
     fn mget(&self, keys: &[&[u8]]) -> Vec<Option<Vec<u8>>>;
 
-    /// MSET: 批量设置
+    /// MSET: Batch set
     fn mset(&self, kvs: Vec<(Vec<u8>, Vec<u8>)>);
 
-    /// INCR: 整数自增 1
+    /// INCR: Increment integer by 1
     fn incr(&self, key: &[u8]) -> StoreResult<i64>;
 
-    /// INCRBY: 整数自增指定值
+    /// INCRBY: Increment integer by specified value
     fn incrby(&self, key: &[u8], delta: i64) -> StoreResult<i64>;
 
-    /// DECR: 整数自减 1
+    /// DECR: Decrement integer by 1
     fn decr(&self, key: &[u8]) -> StoreResult<i64>;
 
-    /// DECRBY: 整数自减指定值
+    /// DECRBY: Decrement integer by specified value
     fn decrby(&self, key: &[u8], delta: i64) -> StoreResult<i64>;
 
-    /// APPEND: 追加字符串
+    /// APPEND: Append string
     fn append(&self, key: &[u8], value: &[u8]) -> usize;
 
-    /// STRLEN: 获取字符串长度
+    /// STRLEN: Get string length
     fn strlen(&self, key: &[u8]) -> usize;
 
-    /// GETSET: 设置新值并返回旧值
+    /// GETSET: Set new value and return old value
     fn getset(&self, key: Vec<u8>, value: Vec<u8>) -> Option<Vec<u8>>;
 
-    // ==================== List 操作 ====================
+    // ==================== List Operations ====================
 
-    /// LPUSH: 从左侧插入元素
+    /// LPUSH: Insert elements from left
     fn lpush(&self, key: &[u8], values: Vec<Vec<u8>>) -> usize;
 
-    /// RPUSH: 从右侧插入元素
+    /// RPUSH: Insert elements from right
     fn rpush(&self, key: &[u8], values: Vec<Vec<u8>>) -> usize;
 
-    /// LPOP: 从左侧弹出元素
+    /// LPOP: Pop element from left
     fn lpop(&self, key: &[u8]) -> Option<Vec<u8>>;
 
-    /// RPOP: 从右侧弹出元素
+    /// RPOP: Pop element from right
     fn rpop(&self, key: &[u8]) -> Option<Vec<u8>>;
 
-    /// LRANGE: 获取列表范围
+    /// LRANGE: Get list range
     fn lrange(&self, key: &[u8], start: i64, stop: i64) -> Vec<Vec<u8>>;
 
-    /// LLEN: 获取列表长度
+    /// LLEN: Get list length
     fn llen(&self, key: &[u8]) -> usize;
 
-    /// LINDEX: 获取指定索引的元素
+    /// LINDEX: Get element at specified index
     fn lindex(&self, key: &[u8], index: i64) -> Option<Vec<u8>>;
 
-    /// LSET: 设置指定索引的元素
+    /// LSET: Set element at specified index
     fn lset(&self, key: &[u8], index: i64, value: Vec<u8>) -> StoreResult<()>;
 
-    // ==================== Hash 操作 ====================
+    // ==================== Hash Operations ====================
 
-    /// HGET: 获取 hash 字段值
+    /// HGET: Get hash field value
     fn hget(&self, key: &[u8], field: &[u8]) -> Option<Vec<u8>>;
 
-    /// HSET: 设置 hash 字段值
+    /// HSET: Set hash field value
     fn hset(&self, key: &[u8], field: Vec<u8>, value: Vec<u8>) -> bool;
 
-    /// HMGET: 批量获取 hash 字段
+    /// HMGET: Batch get hash fields
     fn hmget(&self, key: &[u8], fields: &[&[u8]]) -> Vec<Option<Vec<u8>>>;
 
-    /// HMSET: 批量设置 hash 字段
+    /// HMSET: Batch set hash fields
     fn hmset(&self, key: &[u8], fvs: Vec<(Vec<u8>, Vec<u8>)>);
 
-    /// HDEL: 删除 hash 字段
+    /// HDEL: Delete hash fields
     fn hdel(&self, key: &[u8], fields: &[&[u8]]) -> usize;
 
-    /// HEXISTS: 检查 hash 字段是否存在
+    /// HEXISTS: Check if hash field exists
     fn hexists(&self, key: &[u8], field: &[u8]) -> bool;
 
-    /// HGETALL: 获取所有 hash 字段和值
+    /// HGETALL: Get all hash fields and values
     fn hgetall(&self, key: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)>;
 
-    /// HKEYS: 获取所有 hash 字段名
+    /// HKEYS: Get all hash field names
     fn hkeys(&self, key: &[u8]) -> Vec<Vec<u8>>;
 
-    /// HVALS: 获取所有 hash 字段值
+    /// HVALS: Get all hash field values
     fn hvals(&self, key: &[u8]) -> Vec<Vec<u8>>;
 
-    /// HLEN: 获取 hash 字段数量
+    /// HLEN: Get number of hash fields
     fn hlen(&self, key: &[u8]) -> usize;
 
-    /// HINCRBY: hash 字段整数自增
+    /// HINCRBY: Increment hash field integer
     fn hincrby(&self, key: &[u8], field: &[u8], delta: i64) -> StoreResult<i64>;
 
-    // ==================== Set 操作 ====================
+    // ==================== Set Operations ====================
 
-    /// SADD: 添加集合成员
+    /// SADD: Add set members
     fn sadd(&self, key: &[u8], members: Vec<Vec<u8>>) -> usize;
 
-    /// SREM: 删除集合成员
+    /// SREM: Remove set members
     fn srem(&self, key: &[u8], members: &[&[u8]]) -> usize;
 
-    /// SMEMBERS: 获取所有集合成员
+    /// SMEMBERS: Get all set members
     fn smembers(&self, key: &[u8]) -> Vec<Vec<u8>>;
 
-    /// SISMEMBER: 检查是否为集合成员
+    /// SISMEMBER: Check if set member
     fn sismember(&self, key: &[u8], member: &[u8]) -> bool;
 
-    /// SCARD: 获取集合大小
+    /// SCARD: Get set size
     fn scard(&self, key: &[u8]) -> usize;
 
-    // ==================== 通用操作 ====================
+    // ==================== Generic Operations ====================
 
-    /// DEL: 删除键（支持多个）
+    /// DEL: Delete keys (supports multiple)
     fn del(&self, keys: &[&[u8]]) -> usize;
 
-    /// EXISTS: 检查键是否存在（支持多个）
+    /// EXISTS: Check if keys exist (supports multiple)
     fn exists(&self, keys: &[&[u8]]) -> usize;
 
-    /// KEYS: 获取匹配模式的所有键（简化版，只支持 * 通配符）
+    /// KEYS: Get all keys matching pattern (simplified, only * wildcard)
     fn keys(&self, pattern: &[u8]) -> Vec<Vec<u8>>;
 
-    /// TYPE: 获取键的类型
+    /// TYPE: Get key type
     fn key_type(&self, key: &[u8]) -> Option<&'static str>;
 
-    /// TTL: 获取剩余过期时间（秒），-1 表示永不过期，-2 表示键不存在
+    /// TTL: Get remaining expiration time (seconds), -1 for never expire, -2 for key not found
     fn ttl(&self, key: &[u8]) -> i64;
 
-    /// EXPIRE: 设置过期时间（秒）
+    /// EXPIRE: Set expiration time (seconds)
     fn expire(&self, key: &[u8], ttl_secs: u64) -> bool;
 
-    /// PERSIST: 移除过期时间
+    /// PERSIST: Remove expiration time
     fn persist(&self, key: &[u8]) -> bool;
 
-    /// DBSIZE: 获取键值对数量
+    /// DBSIZE: Get number of key-value pairs
     fn dbsize(&self) -> usize;
 
-    /// FLUSHDB: 清空所有数据
+    /// FLUSHDB: Clear all data
     fn flushdb(&self);
 
-    /// RENAME: 重命名键
+    /// RENAME: Rename key
     fn rename(&self, key: &[u8], new_key: Vec<u8>) -> StoreResult<()>;
 
-    // ==================== 快照操作 ====================
+    // ==================== Snapshot Operations ====================
 
-    /// 从快照数据恢复
+    /// Restore from snapshot data
     fn restore_from_snapshot(&self, snapshot: &[u8]) -> Result<(), String>;
 
-    /// 创建快照数据
+    /// Create snapshot data
     fn create_snapshot(&self) -> Result<Vec<u8>, String>;
 
-    /// 创建分裂快照 - 只包含指定槽位范围内的数据
-    ///
-    /// # 参数
-    /// - `slot_start`: 起始槽位（包含）
-    /// - `slot_end`: 结束槽位（不包含）
-    /// - `total_slots`: 总槽位数（用于计算 key 的槽位）
-    ///
-    /// # 返回
-    /// 只包含 slot ∈ [slot_start, slot_end) 的 key 的快照数据
+    /// Create split snapshot - only contains data within specified slot range
+    /// 
+    /// # Arguments
+    /// - `slot_start`: Start slot (inclusive)
+    /// - `slot_end`: End slot (exclusive)
+    /// - `total_slots`: Total number of slots (used to calculate key slots)
+    /// 
+    /// # Returns
+    /// Snapshot data containing only keys with slot ∈ [slot_start, slot_end)
     fn create_split_snapshot(
         &self,
         slot_start: u32,
@@ -244,23 +244,23 @@ pub trait RedisStore: Send + Sync {
         total_slots: u32,
     ) -> Result<Vec<u8>, String>;
 
-    /// 从分裂快照恢复 - 合并到现有数据
-    ///
-    /// 与 restore_from_snapshot 不同，此方法不会清空现有数据，
-    /// 而是将快照中的数据合并进来。
+    /// Restore from split snapshot - merge into existing data
+    /// 
+    /// Unlike restore_from_snapshot, this method does not clear existing data,
+    /// but merges the snapshot data into it.
     fn merge_from_snapshot(&self, snapshot: &[u8]) -> Result<usize, String>;
 
-    /// 删除指定槽位范围内的所有 key
-    ///
-    /// 用于分裂完成后源分片清理已转移的数据
-    ///
-    /// # 参数
-    /// - `slot_start`: 起始槽位（包含）
-    /// - `slot_end`: 结束槽位（不包含）
-    /// - `total_slots`: 总槽位数
-    ///
-    /// # 返回
-    /// 删除的 key 数量
+    /// Delete all keys within specified slot range
+    /// 
+    /// Used by source shard to clean up transferred data after splitting
+    /// 
+    /// # Arguments
+    /// - `slot_start`: Start slot (inclusive)
+    /// - `slot_end`: End slot (exclusive)
+    /// - `total_slots`: Total number of slots
+    /// 
+    /// # Returns
+    /// Number of keys deleted
     fn delete_keys_in_slot_range(
         &self,
         slot_start: u32,
@@ -268,14 +268,14 @@ pub trait RedisStore: Send + Sync {
         total_slots: u32,
     ) -> usize;
 
-    // ==================== 命令执行 ====================
+    // ==================== Command Execution ====================
 
-    /// 执行 Redis 命令
-    ///
-    /// 统一的命令执行入口，根据 Command 类型调用对应的操作方法
+    /// Execute Redis command
+    /// 
+    /// Unified command execution entry, calls corresponding operation method based on Command type
     fn apply(&self, cmd: &Command) -> ApplyResult {
         match cmd {
-            // ==================== 连接/管理命令 ====================
+            // ==================== Connection/Management Commands ====================
             Command::Ping { message } => ApplyResult::Pong(message.clone()),
             Command::Echo { message } => ApplyResult::Value(Some(message.clone())),
             Command::DbSize => ApplyResult::Integer(self.dbsize() as i64),
@@ -284,11 +284,11 @@ pub trait RedisStore: Send + Sync {
                 ApplyResult::Ok
             }
             Command::CommandInfo | Command::Info { .. } => {
-                // 这些命令由上层处理
+                // These commands are handled by the upper layer
                 ApplyResult::Ok
             }
 
-            // ==================== String 读命令 ====================
+            // ==================== String Read Commands ====================
             Command::Get { key } => ApplyResult::Value(self.get(key)),
             Command::MGet { keys } => {
                 let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
@@ -296,18 +296,18 @@ pub trait RedisStore: Send + Sync {
             }
             Command::StrLen { key } => ApplyResult::Integer(self.strlen(key) as i64),
             Command::GetRange { key, start, end } => {
-                // TODO: 实现 GETRANGE
+                // TODO: Implement GETRANGE
                 let _ = (key, start, end);
                 ApplyResult::Value(None)
             }
 
-            // ==================== String 写命令 ====================
+            // ==================== String Write Commands ====================
             Command::Set { key, value, ex, px, nx, xx } => {
-                // 处理 XX 条件：键必须存在
+                // Handle XX condition: key must exist
                 if *xx && self.get(key).is_none() {
                     return ApplyResult::Value(None);
                 }
-                // 处理 NX 条件：键必须不存在
+                // Handle NX condition: key must not exist
                 if *nx {
                     if !self.setnx(key.clone(), value.clone()) {
                         return ApplyResult::Value(None);
@@ -315,7 +315,7 @@ pub trait RedisStore: Send + Sync {
                 } else {
                     self.set(key.clone(), value.clone());
                 }
-                // 处理过期时间
+                // Handle expiration time
                 if let Some(secs) = ex {
                     self.expire(key, *secs);
                 } else if let Some(ms) = px {
@@ -340,7 +340,7 @@ pub trait RedisStore: Send + Sync {
                 ApplyResult::Ok
             }
             Command::MSetNx { kvs } => {
-                // 检查所有键是否都不存在
+                // Check if all keys do not exist
                 let all_new = kvs.iter().all(|(k, _)| self.get(k).is_none());
                 if all_new {
                     self.mset(kvs.clone());
@@ -358,7 +358,7 @@ pub trait RedisStore: Send + Sync {
                 Err(e) => ApplyResult::Error(e),
             },
             Command::IncrByFloat { .. } => {
-                // TODO: 实现 INCRBYFLOAT
+                // TODO: Implement INCRBYFLOAT
                 ApplyResult::Error(StoreError::Internal("INCRBYFLOAT not implemented".into()))
             }
             Command::Decr { key } => match self.decr(key) {
@@ -378,12 +378,12 @@ pub trait RedisStore: Send + Sync {
                 ApplyResult::Value(old)
             }
             Command::SetRange { key, offset, value } => {
-                // TODO: 实现 SETRANGE
+                // TODO: Implement SETRANGE
                 let _ = (key, offset, value);
                 ApplyResult::Integer(0)
             }
 
-            // ==================== List 读命令 ====================
+            // ==================== List Read Commands ====================
             Command::LLen { key } => ApplyResult::Integer(self.llen(key) as i64),
             Command::LIndex { key, index } => ApplyResult::Value(self.lindex(key, *index)),
             Command::LRange { key, start, stop } => {
@@ -391,7 +391,7 @@ pub trait RedisStore: Send + Sync {
                 ApplyResult::Array(list.into_iter().map(Some).collect())
             }
 
-            // ==================== List 写命令 ====================
+            // ==================== List Write Commands ====================
             Command::LPush { key, values } => {
                 let len = self.lpush(key, values.clone());
                 ApplyResult::Integer(len as i64)
@@ -407,17 +407,17 @@ pub trait RedisStore: Send + Sync {
                 Err(e) => ApplyResult::Error(e),
             },
             Command::LTrim { key, start, stop } => {
-                // TODO: 实现 LTRIM
+                // TODO: Implement LTRIM
                 let _ = (key, start, stop);
                 ApplyResult::Ok
             }
             Command::LRem { key, count, value } => {
-                // TODO: 实现 LREM
+                // TODO: Implement LREM
                 let _ = (key, count, value);
                 ApplyResult::Integer(0)
             }
 
-            // ==================== Hash 读命令 ====================
+            // ==================== Hash Read Commands ====================
             Command::HGet { key, field } => ApplyResult::Value(self.hget(key, field)),
             Command::HMGet { key, fields } => {
                 let fields_refs: Vec<&[u8]> = fields.iter().map(|f| f.as_slice()).collect();
@@ -437,7 +437,7 @@ pub trait RedisStore: Send + Sync {
                 ApplyResult::Integer(if self.hexists(key, field) { 1 } else { 0 })
             }
 
-            // ==================== Hash 写命令 ====================
+            // ==================== Hash Write Commands ====================
             Command::HSet { key, fvs } => {
                 self.hmset(key, fvs.clone());
                 ApplyResult::Integer(fvs.len() as i64)
@@ -464,11 +464,11 @@ pub trait RedisStore: Send + Sync {
                 Err(e) => ApplyResult::Error(e),
             },
             Command::HIncrByFloat { .. } => {
-                // TODO: 实现 HINCRBYFLOAT
+                // TODO: Implement HINCRBYFLOAT
                 ApplyResult::Error(StoreError::Internal("HINCRBYFLOAT not implemented".into()))
             }
 
-            // ==================== Set 读命令 ====================
+            // ==================== Set Read Commands ====================
             Command::SMembers { key } => {
                 let members = self.smembers(key);
                 ApplyResult::Array(members.into_iter().map(Some).collect())
@@ -478,11 +478,11 @@ pub trait RedisStore: Send + Sync {
             }
             Command::SCard { key } => ApplyResult::Integer(self.scard(key) as i64),
             Command::SInter { .. } | Command::SUnion { .. } | Command::SDiff { .. } => {
-                // TODO: 实现集合运算
+                // TODO: Implement set operations
                 ApplyResult::Array(vec![])
             }
 
-            // ==================== Set 写命令 ====================
+            // ==================== Set Write Commands ====================
             Command::SAdd { key, members } => {
                 let count = self.sadd(key, members.clone());
                 ApplyResult::Integer(count as i64)
@@ -493,11 +493,11 @@ pub trait RedisStore: Send + Sync {
                 ApplyResult::Integer(count as i64)
             }
             Command::SPop { .. } => {
-                // TODO: 实现 SPOP
+                // TODO: Implement SPOP
                 ApplyResult::Value(None)
             }
 
-            // ==================== Key 读命令 ====================
+            // ==================== Key Read Commands ====================
             Command::Exists { keys } => {
                 let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
                 ApplyResult::Integer(self.exists(&keys_refs) as i64)
@@ -510,11 +510,11 @@ pub trait RedisStore: Send + Sync {
                 ApplyResult::Array(keys.into_iter().map(Some).collect())
             }
             Command::Scan { .. } => {
-                // TODO: 实现 SCAN 命令
+                // TODO: Implement SCAN command
                 ApplyResult::Array(vec![])
             }
 
-            // ==================== Key 写命令 ====================
+            // ==================== Key Write Commands ====================
             Command::Del { keys } => {
                 let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
                 let count = self.del(&keys_refs);

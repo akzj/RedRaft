@@ -155,7 +155,7 @@ impl Scheduler {
         Ok(task)
     }
 
-    /// 完成迁移
+    /// Complete migration
     pub async fn complete_migration(&self, task_id: &str) -> Result<(), String> {
         let task = self.migration_manager.get_task(task_id)
             .ok_or_else(|| format!("Migration task {} not found", task_id))?;

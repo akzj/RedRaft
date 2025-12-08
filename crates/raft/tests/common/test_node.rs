@@ -29,7 +29,7 @@ pub struct TestNodeInner {
 #[derive(Clone)]
 pub struct TestNode {
     inner: Arc<TestNodeInner>,
-    pub raft_state: Arc<Mutex<RaftState>>, // RaftState 需要是 Send + Sync
+    pub raft_state: Arc<Mutex<RaftState>>, // RaftState needs to be Send + Sync
 }
 
 impl Deref for TestNode {
@@ -99,13 +99,13 @@ impl TestNode {
         // Initialize and save cluster config to avoid reading None during RaftState::new
         {
             let (voters, learners) = if is_voter {
-                // 如果是 voter，将自己和 initial_peers_or_voters 都添加到 voters
+                // If it's a voter, add itself and initial_peers_or_voters to voters
                 let voters: std::collections::HashSet<raft::RaftId> = std::iter::once(id.clone())
                     .chain(initial_peers_or_voters.iter().cloned())
                     .collect();
                 (voters, None)
             } else {
-                // 如果是 learner，initial_peers_or_voters 是现有的 voters，自己是 learner
+                // If it's a learner, initial_peers_or_voters are existing voters, and itself is a learner
                 let voters: std::collections::HashSet<raft::RaftId> =
                     initial_peers_or_voters.iter().cloned().collect();
                 let learners: std::collections::HashSet<raft::RaftId> =
@@ -124,7 +124,7 @@ impl TestNode {
             .register_node_with_dispatch(
                 id.clone(),
                 Box::new(move |event| {
-                    // 将 NetworkEvent 转换为 Event
+                    // Convert NetworkEvent to Event
                     let event = match event {
                         NetworkEvent::RequestVote(source, _target, req) => {
                             raft::Event::RequestVoteRequest(source, req)
@@ -162,10 +162,10 @@ impl TestNode {
             )
             .await;
 
-        // 创建状态机回调
+        // Create state machine callbacks
         let state_machine = TestStateMachine::new(id.clone());
 
-        // 创建 RaftState 选项，使用超快的超时参数
+        // Create RaftState options with ultra-fast timeout parameters
         let options = RaftStateOptions {
             id: id.clone(),
             peers: initial_peers_or_voters,
@@ -180,17 +180,17 @@ impl TestNode {
             schedule_snapshot_probe_retries: 3,
             pre_vote_enabled: true,      // Enable Pre-Vote
             leader_lease_enabled: false, // Disable LeaderLease (test default)
-            max_inflight_requests: 100,  // 调整InFlight限制
+            max_inflight_requests: 100,  // Adjust InFlight limit
             initial_batch_size: 10,
             max_batch_size: 100,
             min_batch_size: 1,
             feedback_window_size: 10,
             // Ultra-fast smart timeout configuration - most aggressive fast timeouts and retries
-            base_request_timeout: Duration::from_millis(25), // 基础超时25ms
-            max_request_timeout: Duration::from_millis(5000), // 最大超时500ms
-            min_request_timeout: Duration::from_millis(10),  // 最小超时10ms
-            timeout_response_factor: 2.0,                    // 响应时间因子2.0倍
-            target_response_time: Duration::from_millis(100), // 目标响应时间
+            base_request_timeout: Duration::from_millis(25), // Base timeout 25ms
+            max_request_timeout: Duration::from_millis(5000), // Max timeout 500ms
+            min_request_timeout: Duration::from_millis(10),  // Min timeout 10ms
+            timeout_response_factor: 2.0,                    // Response time factor 2.0x
+            target_response_time: Duration::from_millis(100), // Target response time
         };
 
         let inner = Arc::new(TestNodeInner {
@@ -203,12 +203,12 @@ impl TestNode {
             driver: driver2,
         });
 
-        // 创建 RaftState 实例
+        // Create RaftState instance
         let raft_state = RaftState::new(options, inner.clone())
             .await
             .map_err(|e| format!("Failed to create RaftState: {:?}", e))?;
 
-        // 只为 voter 节点设置初始选举定时器
+        // Set initial election timer only for voter nodes
         if is_voter {
             let election_timeout =
                 std::time::Duration::from_millis(500 + rand::random::<u64>() % 500); // 500-1000ms
@@ -292,19 +292,19 @@ impl TestNode {
         state.get_inflight_request_count()
     }
 
-    /// 获取当前节点的 term
+    /// Get the current node's term
     pub async fn get_term(&self) -> u64 {
         let state = self.raft_state.lock().await;
         state.get_current_term()
     }
 
-    /// 获取当前节点的 commit_index
+    /// Get the current node's commit_index
     pub async fn get_commit_index(&self) -> u64 {
         let state = self.raft_state.lock().await;
         state.get_commit_index()
     }
 
-    /// 获取当前节点的 last_applied
+    /// Get the current node's last_applied
     pub async fn get_last_applied(&self) -> u64 {
         let state = self.raft_state.lock().await;
         state.get_last_applied()
@@ -608,7 +608,7 @@ impl StateMachine for TestNodeInner {
         _request_id: RequestId,
         _result: raft::traits::ClientResult<u64>,
     ) -> raft::traits::ClientResult<()> {
-        // ReadIndex 响应（测试环境下简单处理）
+        // ReadIndex response (simple handling in test environment)
         Ok(())
     }
 
@@ -648,7 +648,7 @@ impl StateMachine for TestNodeInner {
         config: ClusterConfig,
         saver: Arc<dyn SnapshotStorage>,
     ) -> StorageResult<(u64, u64)> {
-        // 使用TestStateMachine生成快照数据，它会返回已应用的索引、任期和数据
+        // Use TestStateMachine to generate snapshot data, which returns applied index, term, and data
         let (snapshot_index, snapshot_term, snapshot_data) =
             match self.state_machine.create_snapshot(from.clone()) {
                 Ok(data) => data,
@@ -660,7 +660,7 @@ impl StateMachine for TestNodeInner {
                 }
             };
 
-        // 创建快照对象
+        // Create snapshot object
         let snapshot = raft::message::Snapshot {
             index: snapshot_index,
             term: snapshot_term,
@@ -668,17 +668,17 @@ impl StateMachine for TestNodeInner {
             data: snapshot_data,
         };
 
-        // 保存快照到存储
+        // Save snapshot to storage
         saver.save_snapshot(from, snapshot).await.unwrap();
 
         Ok((snapshot_index, snapshot_term))
     }
 }
 
-// 实现 Drop trait 来清理资源（如果需要）
+// Implement Drop trait to clean up resources (if needed)
 impl Drop for TestNodeInner {
     fn drop(&mut self) {
-        // 可以在这里 abort task 或执行其他清理
+        // Can abort tasks or perform other cleanup here
         info!("Dropping TestNodeInner {:?}", self.id);
     }
 }

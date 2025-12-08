@@ -13,9 +13,9 @@ use crate::common::test_statemachine::KvCommand;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_basic_raft_kv_cluster() {
-    let _ = tracing_subscriber::fmt::try_init(); // 初始化日志
+    let _ = tracing_subscriber::fmt::try_init(); // Initialize logging
 
-    // 1. 定义集群配置
+    // 1. Define cluster configuration
     let node1 = RaftId::new("test_group".to_string(), "node1".to_string());
     let node2 = RaftId::new("test_group".to_string(), "node2".to_string());
     let node3 = RaftId::new("test_group".to_string(), "node3".to_string());
@@ -25,14 +25,14 @@ async fn test_basic_raft_kv_cluster() {
         node_ids: vec![node1.clone(), node2.clone(), node3.clone()],
     };
 
-    // 2. 创建并启动集群
+    // 2. Create and start cluster
     let cluster = TestCluster::new(config).await;
 
-    // 3. 启动集群在后台
+    // 3. Start cluster in background
     let cluster_clone = cluster.clone();
     tokio::spawn(async move { cluster_clone.start().await });
 
-    // 4. 等待选举完成，寻找 Leader
+    // 4. Wait for election to complete and find Leader
     println!("Waiting for leader election to complete...");
     let leader_node = wait_for_leader(&cluster, &[&node1, &node2, &node3])
         .await
@@ -43,11 +43,11 @@ async fn test_basic_raft_kv_cluster() {
         leader_node.get_role()
     );
 
-    // 等待额外时间确保选举完全稳定
+    // Wait additional time to ensure election stability
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     println!("Additional wait for election stability complete");
 
-    // 5. 执行业务操作 (SET) 仅当确认节点仍然是 Leader
+    // 5. Execute business operation (SET) only if node is still Leader
     let set_cmd = KvCommand::Set {
         key: "key1".to_string(),
         value: "value1".to_string(),
@@ -55,11 +55,11 @@ async fn test_basic_raft_kv_cluster() {
 
     let request_id = RequestId::new();
 
-    // 再次检查 Leader 状态，确保没有发生选举切换
+    // Check Leader status again to ensure no election switch occurred
     let current_role = leader_node.get_role();
     println!("Leader role before sending command: {:?}", current_role);
     if current_role != raft::Role::Leader {
-        // 如果角色已经改变，重新等待 Leader
+        // If role has changed, wait for new Leader
         println!("Leader role changed, waiting for new leader...");
         let new_leader = wait_for_leader(&cluster, &[&node1, &node2, &node3])
             .await
@@ -78,7 +78,7 @@ async fn test_basic_raft_kv_cluster() {
             request_id
         );
     } else {
-        // 如果 Leader 状态正常，直接发送命令
+        // If Leader status is normal, send command directly
         cluster.propose_command(&leader_node.id, &set_cmd).unwrap();
 
         println!(
@@ -87,26 +87,26 @@ async fn test_basic_raft_kv_cluster() {
         );
     }
 
-    // 6. 等待命令被提交和应用 - 增加更长等待时间，确保日志复制和应用完成
+    // 6. Wait for command to be committed and applied - increased wait time to ensure log replication and application completion
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-    println!("Waited 300 ms  for command to be applied and replicated");
+    println!("Waited 300 ms for command to be applied and replicated");
 
-    // 7. 验证 Leader 状态
+    // 7. Verify Leader state
     let leader_value = leader_node.get_value("key1");
     println!("Leader value for key1: {:?}", leader_value);
     assert_eq!(leader_value, Some("value1".to_string()));
     println!("✓ Verified SET on leader");
 
-    // 8. 验证 Follower 状态机 (等待日志复制)
+    // 8. Verify Follower state machine (wait for log replication)
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     println!("Waited additional 100 milliseconds for follower consistency");
 
-    // 检查所有节点的状态一致性
+    // Check state consistency across all nodes
     for node_id in &[&node1, &node2, &node3] {
         if let Some(node) = cluster.get_node(node_id) {
             let value = node.get_value("key1");
             println!("Node {:?} value for key1: {:?}", node_id, value);
-            // 暂时注释掉断言，先看看实际的值
+            // Temporarily commented out assertion to check actual values first
             // assert_eq!(value, Some("value1".to_string()),
             //           "Node {:?} should have key1=value1", node_id);
             if value == Some("value1".to_string()) {
@@ -120,7 +120,7 @@ async fn test_basic_raft_kv_cluster() {
         }
     }
 
-    // 9. 测试另一个命令
+    // 9. Test another command
     let set_cmd2 = KvCommand::Set {
         key: "key2".to_string(),
         value: "value2".to_string(),
@@ -132,7 +132,7 @@ async fn test_basic_raft_kv_cluster() {
         request_id2
     );
 
-    // 重新检查当前的 leader，确保发送到正确的节点
+    // Recheck current leader to ensure sending to correct node
     let current_leader = wait_for_leader(&cluster, &[&node1, &node2, &node3])
         .await
         .expect("Should have a stable leader");
@@ -148,7 +148,7 @@ async fn test_basic_raft_kv_cluster() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
-    // 验证第二个命令
+    // Verify second command
     for node_id in &[&node1, &node2, &node3] {
         if let Some(node) = cluster.get_node(node_id) {
             let value = node.get_value("key2");
@@ -159,11 +159,11 @@ async fn test_basic_raft_kv_cluster() {
 
     println!("✓ Basic Raft KV cluster test completed successfully!");
 
-    // 10. pipeline 测试
-    // 发送多个命令，验证 pipeline 行为
+    // 10. Pipeline test
+    // Send multiple commands to verify pipeline behavior
 
-    // 重新检测当前leader，以防leader在之前的测试中发生了变化
-    sleep(tokio::time::Duration::from_millis(50)).await; // 给leader选举一点时间稳定
+    // Re-detect current leader in case leader changed during previous tests
+    sleep(tokio::time::Duration::from_millis(50)).await; // Give leader election some time to stabilize
     let current_leader_for_pipeline = wait_for_leader(&cluster, &[&node1, &node2, &node3])
         .await
         .expect("Should have a leader for pipeline");
@@ -183,7 +183,7 @@ async fn test_basic_raft_kv_cluster() {
     }
 
     for cmd in pipeline_commands {
-        sleep(tokio::time::Duration::from_micros(100)).await; // 每个命令间隔 1ms
+        sleep(tokio::time::Duration::from_micros(100)).await; // 1ms interval between commands
         cluster
             .propose_command(&current_leader_for_pipeline.id, &cmd)
             .unwrap();
@@ -192,10 +192,10 @@ async fn test_basic_raft_kv_cluster() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    // 验证管道中的命令 - 在所有节点上检查所有keys
+    // Verify pipeline commands - check all keys on all nodes
     println!("Verifying pipeline commands on all nodes...");
 
-    // 选择几个关键的key进行验证，而不是全部97个
+    // Select a few key keys for verification instead of all 97
     let sample_keys = [3, 10, 25, 50, 75, 99];
 
     for &key_num in &sample_keys {
@@ -221,7 +221,7 @@ async fn test_basic_raft_kv_cluster() {
 
     println!("✓ Pipeline commands executed and verified successfully");
 
-    // 集群会在 drop 时自动清理
+    // Cluster will be automatically cleaned up when dropped
 }
 
 // Helper function to wait for leader election

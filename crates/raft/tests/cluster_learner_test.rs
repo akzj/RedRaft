@@ -80,7 +80,7 @@ async fn test_cluster_learner_operate() {
             Ok(()) => println!("✓ Successfully proposed command: {:?}", command),
             Err(e) => println!("✗ Failed to propose command {:?}: {}", command, e),
         }
-        tokio::time::sleep(Duration::from_millis(100)).await; // 给一些时间处理
+        tokio::time::sleep(Duration::from_millis(100)).await; // Give some time to process
     }
 
     // Wait for data replication to all nodes
@@ -101,7 +101,7 @@ async fn test_cluster_learner_operate() {
     for i in 1..=10 {
         println!("\n--- Testing learner {} ---", i);
 
-        // 添加 learner
+        // Add learner
         let learner_id = RaftId::new("test_group".to_string(), format!("learner{}", i));
 
         println!("Adding learner: {:?}", learner_id);
@@ -109,11 +109,11 @@ async fn test_cluster_learner_operate() {
             Ok(()) => println!("✓ Successfully added learner: {:?}", learner_id),
             Err(e) => {
                 println!("✗ Failed to add learner {:?}: {}", learner_id, e);
-                continue; // 跳过这个 learner 的后续测试
+                continue; // skip subsequent tests for this learner
             }
         }
 
-        // 等待 learner 同步数据
+        // Wait for learner to sync data
         println!("Waiting for learner {:?} to catch up...", learner_id);
         match cluster
             .wait_for_learner_sync(&learner_id, Duration::from_secs(5))
@@ -123,17 +123,17 @@ async fn test_cluster_learner_operate() {
             Err(e) => println!("⚠️ Learner {:?} sync issue: {}", learner_id, e),
         }
 
-        // 验证 learner 的数据一致性
+        // Verify learner data consistency
         println!("Checking data consistency including learner...");
         if let Some(learner_data) = cluster.get_node_data(&learner_id) {
             println!("Learner {:?} data: {:?}", learner_id, learner_data);
 
-            // 验证 learner 是否为 Follower 角色（learner 应该是 Follower）
+            // Verify if learner is Follower role (learner should be Follower)
             if let Some(learner_node) = cluster.get_node(&learner_id) {
                 let role = learner_node.get_role();
                 println!("Learner {:?} role: {:?}", learner_id, role);
 
-                // Learner 应该是 Follower，但不参与选举
+                // Learner should be Follower, but doesn't participate in elections
                 if role != raft::Role::Follower {
                     println!(
                         "⚠️ Learner {:?} has unexpected role: {:?}",
@@ -145,14 +145,14 @@ async fn test_cluster_learner_operate() {
             println!("⚠️ Could not get data from learner {:?}", learner_id);
         }
 
-        // 移除 learner
+        // Remove learner
         println!("Removing learner: {:?}", learner_id);
         match cluster.remove_learner(&learner_id).await {
             Ok(()) => println!("✓ Successfully removed learner: {:?}", learner_id),
             Err(e) => println!("✗ Failed to remove learner {:?}: {}", learner_id, e),
         }
 
-        // 验证 learner 已被移除
+        // Verify learner has been removed
         tokio::time::sleep(Duration::from_millis(200)).await;
         if cluster.get_node(&learner_id).is_none() {
             println!(
@@ -166,7 +166,7 @@ async fn test_cluster_learner_operate() {
             );
         }
 
-        // 验证核心集群的数据一致性未受影响
+        // Verify core cluster data consistency is not affected
         match cluster.verify_data_consistency().await {
             Ok(()) => println!("✓ Core cluster data consistency maintained"),
             Err(e) => println!("⚠️ Core cluster consistency issue: {}", e),
@@ -177,13 +177,13 @@ async fn test_cluster_learner_operate() {
 
     println!("\n✓ Learner management test completed");
 
-    // ===== 3. 最终验证 =====
+    // ===== 3. Final Verification =====
     println!("\n=== Final verification ===");
 
-    // 确保原始集群仍然正常工作
+    // Ensure original cluster still works properly
     println!("Verifying original cluster is still functional...");
 
-    // 发送一些最终的业务命令
+    // Send some final business commands
     for i in 21..=25 {
         let command = KvCommand::Set {
             key: format!("final_key{}", i),
@@ -197,7 +197,7 @@ async fn test_cluster_learner_operate() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // 最终数据一致性检查
+    // Final data consistency check
     match cluster
         .wait_for_data_replication(Duration::from_secs(3))
         .await
@@ -206,11 +206,11 @@ async fn test_cluster_learner_operate() {
         Err(e) => println!("⚠️ Final data consistency issue: {}", e),
     }
 
-    // 检查集群状态
+    // Check cluster status
     let cluster_status = cluster.get_cluster_status();
     println!("Final cluster status: {:?}", cluster_status);
 
-    // 验证只有原始的3个节点
+    // Verify only the original 3 nodes exist
     assert_eq!(
         cluster_status.len(),
         3,
