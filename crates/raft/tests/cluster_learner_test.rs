@@ -15,7 +15,7 @@ use common::test_statemachine::KvCommand;
 async fn test_cluster_learner_operate() {
     tracing_subscriber::fmt().init();
 
-    // 创建 3 节点集群
+    // Create 3-node cluster
     let node1 = RaftId::new("test_group".to_string(), "node1".to_string());
     let node2 = RaftId::new("test_group".to_string(), "node2".to_string());
     let node3 = RaftId::new("test_group".to_string(), "node3".to_string());
@@ -26,14 +26,14 @@ async fn test_cluster_learner_operate() {
     };
     let cluster = TestCluster::new(config).await;
 
-    // 3. 启动集群在后台
+    // 3. Start cluster in background
     let cluster_clone = cluster.clone();
     tokio::spawn(async move { cluster_clone.start().await });
 
-    // 等待 Leader 选举
+    // Wait for leader election
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // 检查是否有 Leader
+    // Check if leader exists
     let mut leader_found = false;
     for node_id in &[&node1, &node2, &node3] {
         if let Some(node) = cluster.get_node(node_id) {
@@ -49,9 +49,9 @@ async fn test_cluster_learner_operate() {
     assert!(leader_found, "No leader found after election");
     println!("✓ Leader election successful");
 
-    // 模拟网络丢包，测试网络恢复后 Leader 是否仍然存在
+    // Simulate network packet loss, test if leader still exists after network recovery
 
-    // 1. 记录当前的 Leader
+    // 1. Record current leader
     let mut current_leader = None;
     for node_id in &[&node1, &node2, &node3] {
         if let Some(node) = cluster.get_node(node_id) {
@@ -66,10 +66,10 @@ async fn test_cluster_learner_operate() {
     let leader_id = current_leader.expect("Should have found a leader");
     println!("Current leader before network partition: {:?}", leader_id);
 
-    // ===== 1. 发送业务消息测试 =====
+    // ===== 1. Business message sending test =====
     println!("\n=== Testing business message handling ===");
 
-    // 发送一些业务命令到leader
+    // Send some business commands to the leader
     for i in 1..=20 {
         let command = KvCommand::Set {
             key: format!("key{}", i),
@@ -83,7 +83,7 @@ async fn test_cluster_learner_operate() {
         tokio::time::sleep(Duration::from_millis(100)).await; // 给一些时间处理
     }
 
-    // 等待数据复制到所有节点
+    // Wait for data replication to all nodes
     println!("Waiting for data replication...");
     match cluster
         .wait_for_data_replication(Duration::from_secs(5))
@@ -95,7 +95,7 @@ async fn test_cluster_learner_operate() {
 
     println!("✓ Business message handling test completed");
 
-    // ===== 2. Learner 管理测试 =====
+    // ===== 2. Learner management test =====
     println!("\n=== Testing learner management ===");
 
     for i in 1..=10 {
