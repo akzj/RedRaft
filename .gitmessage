@@ -1,0 +1,28 @@
+# <type>: <subject>
+
+# <body>
+
+# <footer>
+
+# Types:
+#   feat:     A new feature
+#   fix:      A bug fix
+#   docs:     Documentation only changes
+#   style:    Changes that do not affect the meaning of the code
+#   refactor: A code change that neither fixes a bug nor adds a feature
+#   perf:     A code change that improves performance
+#   test:     Adding missing tests or correcting existing tests
+#   chore:    Changes to the build process or auxiliary tools
+
+# Rules:
+# - All commit messages MUST be in English
+# - Subject line should be concise (50 chars or less)
+# - Body should explain what and why, not how
+# - Use imperative mood: "Add feature" not "Added feature"
+
+# Example:
+# feat: add routing table watch mechanism
+#
+# Implement watch manager for routing table updates.
+# Support version-based watch registration and notify
+# all waiting clients when routing table updates.

@@ -1,6 +1,6 @@
-//! Pilot 控制面客户端
+//! Pilot control plane client
 //!
-//! 负责与 Pilot 服务通信：注册、心跳、获取路由表
+//! Responsible for communicating with Pilot service: registration, heartbeat, fetching routing table
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use tracing::{debug, error, info, warn};
 
 use raft::NodeId;
 
-/// Pilot 客户端错误
+/// Pilot client error
 #[derive(Debug, thiserror::Error)]
 pub enum PilotError {
     #[error("HTTP error: {0}")]
@@ -24,18 +24,18 @@ pub enum PilotError {
     NotConnected,
 }
 
-/// 路由表（从 Pilot 获取）
+/// Routing table (fetched from Pilot)
 /// 
-/// 注意：使用 ShardId（业务层概念），而不是 GroupId（Raft 层概念）
-/// 在创建 Raft 组时，ShardId 会作为 GroupId 传递
+/// Note: Uses ShardId (business layer concept), not GroupId (Raft layer concept)
+/// When creating Raft groups, ShardId is passed as GroupId
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingTable {
-    /// 版本号
+    /// Version number
     pub version: u64,
-    /// 槽位到分片的映射（使用 ShardId，业务层概念）
+    /// Slot to shard mapping (uses ShardId, business layer concept)
     pub slots: Vec<Option<String>>,
-    /// 分片到节点的映射（第一个为 leader）
-    /// 使用 ShardId 作为 key（业务层概念）
+    /// Shard to nodes mapping (first is leader)
+    /// Uses ShardId as key (business layer concept)
     pub shard_nodes: HashMap<String, Vec<NodeId>>,
     /// 节点地址映射
     pub node_addrs: HashMap<NodeId, String>,
@@ -68,12 +68,12 @@ impl Default for RoutingTable {
 }
 
 impl RoutingTable {
-    /// 计算 key 的槽位
+    /// Calculate slot for key
     pub fn slot_for_key(key: &[u8]) -> u32 {
         crc16(key) as u32 % 16384
     }
 
-    /// 根据 key 获取目标节点地址
+    /// Get target node address for key
     pub fn get_node_addr_for_key(&self, key: &[u8]) -> Option<&String> {
         let slot = Self::slot_for_key(key);
         let shard_id = self.slots.get(slot as usize)?.as_ref()?;
@@ -82,32 +82,32 @@ impl RoutingTable {
         self.node_addrs.get(leader)
     }
 
-    /// 获取分片 ID（业务层 ShardId）
+    /// Get shard ID (business layer ShardId)
     pub fn get_shard_for_key(&self, key: &[u8]) -> Option<&String> {
         let slot = Self::slot_for_key(key);
         self.slots.get(slot as usize)?.as_ref()
     }
 
-    /// 检查分片是否正在分裂
+    /// Check if shard is splitting
     pub fn is_shard_splitting(&self, shard_id: &str) -> bool {
         self.splitting_shards.contains_key(shard_id)
     }
 
-    /// 获取分片的分裂信息
+    /// Get shard split information
     pub fn get_split_info(&self, shard_id: &str) -> Option<&ShardSplitInfo> {
         self.splitting_shards.get(shard_id)
     }
 
-    /// 检查 key 是否在分裂的目标范围内（应该 MOVED 到新分片）
+    /// Check if key is in split target range (should MOVED to new shard)
     /// 
-    /// 返回 (target_shard_id, target_leader_addr)
+    /// Returns (target_shard_id, target_leader_addr)
     pub fn should_move_key(&self, key: &[u8], shard_id: &str) -> Option<(&String, &String)> {
         let split_info = self.splitting_shards.get(shard_id)?;
         let slot = Self::slot_for_key(key);
         
-        // 如果槽位 >= split_slot，应该转移到目标分片
+        // If slot >= split_slot, should move to target shard
         if slot >= split_info.split_slot {
-            // 获取目标分片的 leader 地址
+            // Get target shard's leader address
             let target_nodes = self.shard_nodes.get(&split_info.target_shard)?;
             let target_leader = target_nodes.first()?;
             let target_addr = self.node_addrs.get(target_leader)?;
@@ -118,7 +118,7 @@ impl RoutingTable {
     }
 }
 
-/// CRC16 实现（与 Redis Cluster 兼容）
+/// CRC16 implementation (compatible with Redis Cluster)
 fn crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0;
     for byte in data {
@@ -134,16 +134,16 @@ fn crc16(data: &[u8]) -> u16 {
     crc
 }
 
-/// Pilot 客户端配置
+/// Pilot client configuration
 #[derive(Debug, Clone)]
 pub struct PilotClientConfig {
-    /// Pilot 服务地址
+    /// Pilot service address
     pub pilot_addr: String,
-    /// 心跳间隔（秒）
+    /// Heartbeat interval (seconds)
     pub heartbeat_interval_secs: u64,
-    /// 路由表刷新间隔（秒）
+    /// Routing table refresh interval (seconds)
     pub routing_refresh_interval_secs: u64,
-    /// 请求超时（秒）
+    /// Request timeout (seconds)
     pub request_timeout_secs: u64,
 }
 
@@ -158,7 +158,7 @@ impl Default for PilotClientConfig {
     }
 }
 
-/// Pilot 客户端
+/// Pilot client
 pub struct PilotClient {
     config: PilotClientConfig,
     node_id: String,
@@ -170,7 +170,7 @@ pub struct PilotClient {
 }
 
 impl PilotClient {
-    /// 创建 Pilot 客户端
+    /// Create Pilot client
     pub fn new(
         config: PilotClientConfig,
         node_id: String,
@@ -193,17 +193,17 @@ impl PilotClient {
         }
     }
 
-    /// 获取路由表引用
+    /// Get routing table reference
     pub fn routing_table(&self) -> Arc<RwLock<RoutingTable>> {
         self.routing_table.clone()
     }
 
-    /// 检查是否已连接
+    /// Check if connected
     pub fn is_connected(&self) -> bool {
         *self.connected.read()
     }
 
-    /// 向 Pilot 注册节点
+    /// Register node with Pilot
     pub async fn register(&self) -> Result<bool, PilotError> {
         #[derive(Serialize)]
         struct RegisterRequest {
@@ -254,7 +254,7 @@ impl PilotClient {
         }
     }
 
-    /// 发送心跳
+    /// Send heartbeat
     pub async fn heartbeat(&self) -> Result<(), PilotError> {
         #[derive(Deserialize)]
         struct ApiResponse<T> {
@@ -286,8 +286,16 @@ impl PilotClient {
         }
     }
 
-    /// 获取路由表
-    pub async fn fetch_routing_table(&self) -> Result<RoutingTable, PilotError> {
+    /// Fetch routing table
+    /// 
+    /// # Arguments
+    /// - `current_version`: Current routing table version number (optional)
+    ///   If provided and matches server version, register watch and wait for updates
+    /// 
+    /// # Returns
+    /// - `Ok(RoutingTable)`: Latest routing table
+    /// - `Err(PilotError)`: Fetch failed
+    pub async fn fetch_routing_table(&self, current_version: Option<u64>) -> Result<RoutingTable, PilotError> {
         #[derive(Deserialize)]
         struct ApiResponse<T> {
             success: bool,
@@ -295,7 +303,12 @@ impl PilotClient {
             error: Option<String>,
         }
 
-        let url = format!("{}/api/v1/routing", self.config.pilot_addr);
+        let mut url = format!("{}/api/v1/routing", self.config.pilot_addr);
+        
+        // If version provided, add to query parameters
+        if let Some(version) = current_version {
+            url = format!("{}?version={}", url, version);
+        }
 
         let resp: ApiResponse<RoutingTable> = self
             .http_client
@@ -316,7 +329,11 @@ impl PilotClient {
 
     /// 刷新本地路由表
     pub async fn refresh_routing(&self) -> Result<bool, PilotError> {
-        let new_table = self.fetch_routing_table().await?;
+        // Get current version number
+        let current_version = self.routing_table.read().version;
+        
+        // Fetch latest routing table (if version matches, will wait for updates)
+        let new_table = self.fetch_routing_table(Some(current_version)).await?;
         let mut current = self.routing_table.write();
         
         if new_table.version > current.version {
@@ -335,7 +352,7 @@ impl PilotClient {
     pub fn start_background_tasks(self: Arc<Self>) -> Vec<tokio::task::JoinHandle<()>> {
         let mut handles = Vec::new();
 
-        // 心跳任务
+        // Heartbeat task
         let client = self.clone();
         let heartbeat_handle = tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(
@@ -347,7 +364,7 @@ impl PilotClient {
                 
                 if let Err(e) = client.heartbeat().await {
                     warn!("Heartbeat failed: {}, attempting to re-register", e);
-                    // 尝试重新注册
+                    // Try to re-register
                     if let Err(e) = client.register().await {
                         error!("Re-registration failed: {}", e);
                     }
@@ -356,7 +373,7 @@ impl PilotClient {
         });
         handles.push(heartbeat_handle);
 
-        // 路由刷新任务
+        // Routing refresh task
         let client = self.clone();
         let routing_handle = tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(
@@ -376,12 +393,12 @@ impl PilotClient {
         handles
     }
 
-    /// 连接并初始化
+    /// Connect and initialize
     pub async fn connect(&self) -> Result<(), PilotError> {
-        // 注册节点
+        // Register node
         self.register().await?;
         
-        // 获取初始路由表
+        // Fetch initial routing table
         self.refresh_routing().await?;
         
         info!(

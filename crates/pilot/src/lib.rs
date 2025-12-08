@@ -22,6 +22,7 @@ pub mod storage;
 pub mod node_manager;
 pub mod scheduler;
 pub mod api;
+pub mod watch;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -31,6 +32,7 @@ use metadata::ClusterMetadata;
 use node_manager::{NodeManager, NodeManagerConfig};
 use scheduler::Scheduler;
 use storage::{FileStorage, StorageError};
+use watch::RoutingTableWatcher;
 
 /// Pilot 配置
 #[derive(Debug, Clone)]
@@ -63,6 +65,7 @@ pub struct Pilot {
     metadata: Arc<RwLock<ClusterMetadata>>,
     node_manager: Arc<NodeManager>,
     scheduler: Scheduler,
+    routing_watcher: RoutingTableWatcher,
 }
 
 impl Pilot {
@@ -78,6 +81,7 @@ impl Pilot {
         ));
 
         let scheduler = Scheduler::new(metadata.clone());
+        let routing_watcher = RoutingTableWatcher::new();
 
         info!(
             "Pilot initialized: cluster={}, data_dir={}",
@@ -90,6 +94,7 @@ impl Pilot {
             metadata,
             node_manager,
             scheduler,
+            routing_watcher,
         })
     }
 
@@ -104,8 +109,16 @@ impl Pilot {
     }
 
     /// 获取元数据（可写）
+    /// 
+    /// 注意：更新路由表后，会自动通知等待的 watch
     pub async fn metadata_mut(&self) -> tokio::sync::RwLockWriteGuard<'_, ClusterMetadata> {
         self.metadata.write().await
+    }
+
+    /// 通知路由表 watch（在路由表更新后调用）
+    pub async fn notify_routing_watchers(&self) {
+        let version = self.metadata.read().await.routing_table.version;
+        self.routing_watcher.notify_version(version).await;
     }
 
     /// 获取路由表
@@ -121,6 +134,11 @@ impl Pilot {
     /// 获取调度器
     pub fn scheduler(&self) -> &Scheduler {
         &self.scheduler
+    }
+
+    /// 获取路由表 Watch 管理器
+    pub fn routing_watcher(&self) -> &RoutingTableWatcher {
+        &self.routing_watcher
     }
 
     /// 保存元数据

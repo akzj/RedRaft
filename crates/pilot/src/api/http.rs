@@ -3,7 +3,7 @@
 //! 提供集群管理的 RESTful API
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -254,9 +254,17 @@ async fn create_shard(
     );
 
     let mut metadata = pilot.metadata_mut().await;
+    let old_version = metadata.routing_table.version;
     match metadata.create_shard(req.shard_id, req.replica_nodes) {
         Ok(shard) => {
+            let new_version = metadata.routing_table.version;
             drop(metadata);
+            
+            // If routing table version updated, notify watches
+            if new_version > old_version {
+                pilot.notify_routing_watchers().await;
+            }
+            
             let _ = pilot.save().await;
             (StatusCode::CREATED, ApiResponse::ok(shard))
         }
@@ -293,10 +301,50 @@ async fn migrate_shard(
     }
 }
 
-// 路由表
-async fn get_routing_table(State(pilot): State<Arc<Pilot>>) -> impl IntoResponse {
+// Routing table
+#[derive(Deserialize)]
+struct RoutingTableQuery {
+    /// Client's current version number (optional)
+    /// If provided and matches server version, register watch and wait for updates
+    version: Option<u64>,
+}
+
+async fn get_routing_table(
+    State(pilot): State<Arc<Pilot>>,
+    Query(query): Query<RoutingTableQuery>,
+) -> impl IntoResponse {
     let metadata = pilot.metadata().await;
-    ApiResponse::ok(metadata.routing_table.clone())
+    let current_version = metadata.routing_table.version;
+    
+    // If client provided version number
+    if let Some(client_version) = query.version {
+        // Versions match, register watch and wait for updates
+        if client_version == current_version {
+            use tokio::time::{timeout, Duration};
+            
+            let watcher = pilot.routing_watcher();
+            let notify = watcher.watch(client_version).await;
+            
+            // Wait up to 30 seconds
+            match timeout(Duration::from_secs(30), notify.notified()).await {
+                Ok(_) => {
+                    // Received notification, return latest routing table
+                    let metadata = pilot.metadata().await;
+                    ApiResponse::ok(metadata.routing_table.clone())
+                }
+                Err(_) => {
+                    // Timeout, return current routing table (even if version is same)
+                    ApiResponse::ok(metadata.routing_table.clone())
+                }
+            }
+        } else {
+            // Versions don't match, return latest routing table directly
+            ApiResponse::ok(metadata.routing_table.clone())
+        }
+    } else {
+        // No version provided, return latest routing table directly
+        ApiResponse::ok(metadata.routing_table.clone())
+    }
 }
 
 // 迁移任务
