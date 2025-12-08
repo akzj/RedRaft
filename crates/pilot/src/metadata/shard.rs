@@ -1,26 +1,26 @@
-//! 分片信息定义
+//! Shard information definitions
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::NodeId;
 
-/// 分片 ID
+/// Shard ID
 /// 
-/// 业务层概念：一个分片可以分裂成多个分片。
-/// 在 Raft 层，每个分片对应一个 Raft Group（GroupId），
-/// 但 ShardId 和 GroupId 是不同层次的概念。
+/// Business layer concept: A shard can split into multiple shards.
+/// At the Raft layer, each shard corresponds to one Raft Group (GroupId),
+/// but ShardId and GroupId are concepts at different layers.
 pub type ShardId = String;
 
-/// 哈希槽总数（类似 Redis Cluster 的 16384）
+/// Total number of hash slots (similar to Redis Cluster's 16384)
 pub const TOTAL_SLOTS: u32 = 16384;
 
-/// 键范围 [start, end)
+/// Key range [start, end)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyRange {
-    /// 起始槽位（包含）
+    /// Start slot (inclusive)
     pub start: u32,
-    /// 结束槽位（不包含）
+    /// End slot (exclusive)
     pub end: u32,
 }
 
@@ -31,22 +31,22 @@ impl KeyRange {
         Self { start, end }
     }
 
-    /// 创建空的范围（用于表示未分配 slot 的分片）
+    /// Create empty range (for representing shards with no assigned slots)
     pub fn empty() -> Self {
         Self { start: 0, end: 0 }
     }
 
-    /// 检查范围是否为空（未分配 slot）
+    /// Check if range is empty (no assigned slots)
     pub fn is_empty(&self) -> bool {
         self.start == 0 && self.end == 0
     }
 
-    /// 槽位数量
+    /// Number of slots
     pub fn slot_count(&self) -> u32 {
         self.end - self.start
     }
 
-    /// 检查槽位是否在范围内
+    /// Check if slot is within range
     pub fn contains(&self, slot: u32) -> bool {
         if self.is_empty() {
             false
@@ -62,20 +62,20 @@ impl std::fmt::Display for KeyRange {
     }
 }
 
-/// 分片状态
+/// Shard status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShardStatus {
-    /// 正常服务
+    /// Normal service
     Normal,
-    /// 创建中
+    /// Creating
     Creating,
-    /// 迁移中
+    /// Migrating
     Migrating,
-    /// 分裂中
+    /// Splitting
     Splitting,
-    /// 删除中
+    /// Deleting
     Deleting,
-    /// 错误状态
+    /// Error status
     Error,
 }
 
@@ -98,28 +98,28 @@ impl std::fmt::Display for ShardStatus {
     }
 }
 
-// ==================== 分裂相关定义 ====================
+// ==================== Split-related definitions ====================
 
-/// 分裂任务状态
+/// Split task status
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SplitStatus {
-    /// 准备阶段 - 创建目标分片
+    /// Preparation phase - create target shard
     Preparing,
-    /// 快照传输阶段
+    /// Snapshot transfer phase
     SnapshotTransfer,
-    /// 增量追赶阶段
+    /// Incremental catch-up phase
     CatchingUp,
-    /// 缓存请求阶段
+    /// Buffer requests phase
     Buffering,
-    /// 路由切换阶段
+    /// Route switching phase
     Switching,
-    /// 清理阶段
+    /// Cleanup phase
     Cleanup,
-    /// 已完成
+    /// Completed
     Completed,
-    /// 失败
+    /// Failed
     Failed(String),
-    /// 已取消
+    /// Cancelled
     Cancelled,
 }
 
@@ -139,51 +139,51 @@ impl std::fmt::Display for SplitStatus {
     }
 }
 
-/// 分裂任务进度
+/// Split task progress
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SplitProgress {
-    /// 快照传输是否完成
+    /// Whether snapshot transfer is complete
     pub snapshot_done: bool,
-    /// 快照截止的日志索引
+    /// Log index at snapshot cutoff
     pub snapshot_index: u64,
-    /// 源分片最新日志索引
+    /// Source shard's latest log index
     pub source_last_index: u64,
-    /// 目标分片已应用的日志索引
+    /// Target shard's applied log index
     pub target_applied_index: u64,
-    /// 当前缓存的请求数
+    /// Current number of buffered requests
     pub buffered_requests: usize,
 }
 
 impl SplitProgress {
-    /// 计算延迟（日志条数）
+    /// Calculate delay (number of log entries)
     pub fn delay(&self) -> u64 {
         self.source_last_index.saturating_sub(self.target_applied_index)
     }
 }
 
-/// 分裂任务
+/// Split task
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SplitTask {
-    /// 任务 ID
+    /// Task ID
     pub id: String,
-    /// 源分片 ID
+    /// Source shard ID
     pub source_shard: ShardId,
-    /// 目标分片 ID
+    /// Target shard ID
     pub target_shard: ShardId,
-    /// 分裂点槽位（目标分片负责 [split_slot, source.end)）
+    /// Split point slot (target shard responsible for [split_slot, source.end))
     pub split_slot: u32,
-    /// 任务状态
+    /// Task status
     pub status: SplitStatus,
-    /// 进度信息
+    /// Progress information
     pub progress: SplitProgress,
-    /// 创建时间
+    /// Creation time
     pub created_at: DateTime<Utc>,
-    /// 更新时间
+    /// Update time
     pub updated_at: DateTime<Utc>,
 }
 
 impl SplitTask {
-    /// 创建新的分裂任务
+    /// Create new split task
     pub fn new(
         source_shard: ShardId,
         target_shard: ShardId,
@@ -209,19 +209,19 @@ impl SplitTask {
         }
     }
 
-    /// 更新状态
+    /// Update status
     pub fn set_status(&mut self, status: SplitStatus) {
         self.status = status;
         self.updated_at = Utc::now();
     }
 
-    /// 更新进度
+    /// Update progress
     pub fn update_progress(&mut self, progress: SplitProgress) {
         self.progress = progress;
         self.updated_at = Utc::now();
     }
 
-    /// 是否已完成（成功或失败）
+    /// Whether completed (success or failure)
     pub fn is_finished(&self) -> bool {
         matches!(
             self.status,
@@ -229,54 +229,54 @@ impl SplitTask {
         )
     }
 
-    /// 是否成功完成
+    /// Whether successfully completed
     pub fn is_successful(&self) -> bool {
         matches!(self.status, SplitStatus::Completed)
     }
 }
 
-/// 分片在分裂中的角色
+/// Shard's role in split
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SplitRole {
-    /// 源分片（被分裂的分片）
+    /// Source shard (shard being split)
     Source,
-    /// 目标分片（新创建的分片）
+    /// Target shard (newly created shard)
     Target,
 }
 
-/// 分片的分裂状态信息
+/// Shard's split state information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardSplitState {
-    /// 关联的分裂任务 ID
+    /// Associated split task ID
     pub split_task_id: String,
-    /// 分裂点槽位
+    /// Split point slot
     pub split_slot: u32,
-    /// 在分裂中的角色
+    /// Role in split
     pub role: SplitRole,
 }
 
-/// 分片信息
+/// Shard information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardInfo {
-    /// 分片 ID
+    /// Shard ID
     pub id: ShardId,
-    /// 负责的键范围
+    /// Responsible key range
     pub key_range: KeyRange,
-    /// 副本节点列表（第一个为 preferred leader）
+    /// Replica node list (first is preferred leader)
     pub replicas: Vec<NodeId>,
-    /// 当前 Raft leader
+    /// Current Raft leader
     pub leader: Option<NodeId>,
-    /// 分片状态
+    /// Shard status
     pub status: ShardStatus,
-    /// 副本因子
+    /// Replica factor
     pub replica_factor: u32,
-    /// 分裂状态（如果正在分裂）
+    /// Split state (if splitting)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub split_state: Option<ShardSplitState>,
 }
 
 impl ShardInfo {
-    /// 创建新分片
+    /// Create new shard
     pub fn new(id: ShardId, key_range: KeyRange, replica_factor: u32) -> Self {
         Self {
             id,
@@ -289,31 +289,31 @@ impl ShardInfo {
         }
     }
 
-    /// 检查是否正在分裂
+    /// Check if splitting
     pub fn is_splitting(&self) -> bool {
         self.split_state.is_some()
     }
 
-    /// 设置分裂状态
+    /// Set split state
     pub fn set_split_state(&mut self, state: ShardSplitState) {
         self.split_state = Some(state);
         self.status = ShardStatus::Splitting;
     }
 
-    /// 清除分裂状态
+    /// Clear split state
     pub fn clear_split_state(&mut self) {
         self.split_state = None;
         self.status = ShardStatus::Normal;
     }
 
-    /// 添加副本节点
+    /// Add replica node
     pub fn add_replica(&mut self, node_id: NodeId) {
         if !self.replicas.contains(&node_id) {
             self.replicas.push(node_id);
         }
     }
 
-    /// 移除副本节点
+    /// Remove replica node
     pub fn remove_replica(&mut self, node_id: &NodeId) {
         self.replicas.retain(|n| n != node_id);
         if self.leader.as_ref() == Some(node_id) {
@@ -321,19 +321,19 @@ impl ShardInfo {
         }
     }
 
-    /// 设置 leader
+    /// Set leader
     pub fn set_leader(&mut self, node_id: NodeId) {
         if self.replicas.contains(&node_id) {
             self.leader = Some(node_id);
         }
     }
 
-    /// 检查副本数是否满足要求
+    /// Check if replica count satisfies requirement
     pub fn is_replica_satisfied(&self) -> bool {
         self.replicas.len() >= self.replica_factor as usize
     }
 
-    /// 检查是否健康（有 leader 且副本数满足）
+    /// Check if healthy (has leader and replica count satisfied)
     pub fn is_healthy(&self) -> bool {
         self.status == ShardStatus::Normal 
             && self.leader.is_some() 

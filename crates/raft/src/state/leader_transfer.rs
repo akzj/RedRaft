@@ -11,7 +11,7 @@ use crate::message::{AppendEntriesRequest, AppendEntriesResponse, RequestVoteReq
 use crate::types::{RaftId, RequestId};
 
 impl RaftState {
-    /// 处理领导权转移请求
+    /// Handle leader transfer request
     pub async fn handle_leader_transfer(&mut self, target: RaftId, request_id: RequestId) {
         if self.role != Role::Leader {
             self.error_handler
@@ -102,7 +102,7 @@ impl RaftState {
         );
     }
 
-    /// 发送心跳到特定节点
+    /// Send heartbeat to specific node
     pub(crate) async fn send_heartbeat_to(&mut self, target: RaftId) {
         let prev_log_index = self.next_index[&target] - 1;
         let prev_log_term = if prev_log_index == 0 {
@@ -138,7 +138,7 @@ impl RaftState {
             .await;
     }
 
-    /// 处理目标节点的日志响应
+    /// Process log response from target node
     pub(crate) async fn process_leader_transfer_target_response(
         &mut self,
         peer: RaftId,
@@ -157,7 +157,7 @@ impl RaftState {
         self.send_heartbeat_to(peer).await;
     }
 
-    /// 转移领导权给目标节点
+    /// Transfer leadership to target node
     pub(crate) async fn transfer_leadership_to(&mut self, target: RaftId) {
         let req = RequestVoteRequest {
             term: self.current_term + 1,
@@ -196,7 +196,7 @@ impl RaftState {
         self.leader_transfer_start_time = None;
     }
 
-    /// 处理领导权转移超时
+    /// Handle leader transfer timeout
     pub(crate) async fn handle_leader_transfer_timeout(&mut self) {
         if let (Some(_target), Some(request_id)) = (
             self.leader_transfer_target.take(),

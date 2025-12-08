@@ -1,6 +1,6 @@
-//! 节点管理模块
+//! Node management module
 //!
-//! 负责节点注册、心跳检测、故障检测
+//! Responsible for node registration, heartbeat detection, and failure detection
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,12 +10,12 @@ use tracing::{debug, info, warn};
 
 use crate::metadata::{ClusterMetadata, NodeId, NodeInfo, NodeStatus};
 
-/// 节点管理器配置
+/// Node manager configuration
 #[derive(Debug, Clone)]
 pub struct NodeManagerConfig {
-    /// 心跳超时时间（秒）
+    /// Heartbeat timeout (seconds)
     pub heartbeat_timeout_secs: i64,
-    /// 心跳检查间隔（秒）
+    /// Heartbeat check interval (seconds)
     pub check_interval_secs: u64,
 }
 
@@ -28,19 +28,19 @@ impl Default for NodeManagerConfig {
     }
 }
 
-/// 节点管理器
+/// Node manager
 pub struct NodeManager {
     config: NodeManagerConfig,
     metadata: Arc<RwLock<ClusterMetadata>>,
 }
 
 impl NodeManager {
-    /// 创建节点管理器
+    /// Create node manager
     pub fn new(config: NodeManagerConfig, metadata: Arc<RwLock<ClusterMetadata>>) -> Self {
         Self { config, metadata }
     }
 
-    /// 注册节点
+    /// Register node
     pub async fn register(&self, node: NodeInfo) -> RegisterResult {
         let mut metadata = self.metadata.write().await;
         let node_id = node.id.clone();
@@ -55,7 +55,7 @@ impl NodeManager {
         }
     }
 
-    /// 处理心跳
+    /// Handle heartbeat
     pub async fn heartbeat(&self, node_id: &NodeId) -> bool {
         let mut metadata = self.metadata.write().await;
         let result = metadata.node_heartbeat(node_id);
@@ -67,7 +67,7 @@ impl NodeManager {
         result
     }
 
-    /// 主动下线节点
+    /// Actively drain node
     pub async fn drain_node(&self, node_id: &NodeId) -> bool {
         let mut metadata = self.metadata.write().await;
         if let Some(node) = metadata.nodes.get_mut(node_id) {
@@ -79,7 +79,7 @@ impl NodeManager {
         }
     }
 
-    /// 移除节点
+    /// Remove node
     pub async fn remove_node(&self, node_id: &NodeId) -> Option<NodeInfo> {
         let mut metadata = self.metadata.write().await;
         let node = metadata.remove_node(node_id);
@@ -89,19 +89,19 @@ impl NodeManager {
         node
     }
 
-    /// 获取节点信息
+    /// Get node information
     pub async fn get_node(&self, node_id: &NodeId) -> Option<NodeInfo> {
         let metadata = self.metadata.read().await;
         metadata.nodes.get(node_id).cloned()
     }
 
-    /// 获取所有节点
+    /// Get all nodes
     pub async fn list_nodes(&self) -> Vec<NodeInfo> {
         let metadata = self.metadata.read().await;
         metadata.nodes.values().cloned().collect()
     }
 
-    /// 获取在线节点
+    /// Get online nodes
     pub async fn online_nodes(&self) -> Vec<NodeInfo> {
         let metadata = self.metadata.read().await;
         metadata
@@ -112,7 +112,7 @@ impl NodeManager {
             .collect()
     }
 
-    /// 启动心跳检查任务
+    /// Start heartbeat checker task
     pub fn start_heartbeat_checker(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
         let check_interval = Duration::from_secs(self.config.check_interval_secs);
         
@@ -125,7 +125,7 @@ impl NodeManager {
         })
     }
 
-    /// 检查所有节点的心跳
+    /// Check heartbeats for all nodes
     async fn check_heartbeats(&self) {
         let mut metadata = self.metadata.write().await;
         let timeout_secs = self.config.heartbeat_timeout_secs;
@@ -145,16 +145,16 @@ impl NodeManager {
 
         if !offline_nodes.is_empty() {
             info!("{} nodes marked as offline", offline_nodes.len());
-            // TODO: 触发分片重新分配
+            // TODO: Trigger shard reassignment
         }
     }
 }
 
-/// 注册结果
+/// Registration result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterResult {
-    /// 新节点
+    /// New node
     NewNode,
-    /// 重新连接的节点
+    /// Reconnected node
     Reconnected,
 }

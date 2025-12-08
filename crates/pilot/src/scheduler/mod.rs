@@ -1,6 +1,6 @@
-//! 调度器模块
+//! Scheduler module
 //!
-//! 负责分片放置策略、迁移任务管理和分片分裂
+//! Responsible for shard placement strategy, migration task management, and shard splitting
 
 mod placement;
 mod migration;
@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::metadata::{ClusterMetadata, NodeId, NodeStatus, ShardId, ShardStatus, SplitTask};
 
-/// 调度器
+/// Scheduler
 pub struct Scheduler {
     metadata: Arc<RwLock<ClusterMetadata>>,
     placement: PlacementStrategy,
@@ -25,7 +25,7 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    /// 创建调度器
+    /// Create scheduler
     pub fn new(metadata: Arc<RwLock<ClusterMetadata>>) -> Self {
         let split_manager = SplitManager::new(
             SplitManagerConfig::default(),
@@ -40,14 +40,14 @@ impl Scheduler {
         }
     }
 
-    /// 执行分片分配
+    /// Execute shard placement
     /// 
-    /// 为所有需要副本的分片分配节点
+    /// Assign nodes to all shards that need replicas
     pub async fn schedule_shard_placement(&self) -> Vec<(ShardId, NodeId)> {
         let mut metadata = self.metadata.write().await;
         let mut assignments = Vec::new();
 
-        // 获取在线节点
+        // Get online nodes
         let online_nodes: Vec<_> = metadata
             .nodes
             .values()
@@ -60,7 +60,7 @@ impl Scheduler {
             return assignments;
         }
 
-        // 获取需要副本的分片
+        // Get shards needing replicas
         let shards_needing_replicas: Vec<_> = metadata
             .shards
             .values()
@@ -71,7 +71,7 @@ impl Scheduler {
         for shard in shards_needing_replicas {
             let needed = shard.replica_factor as usize - shard.replicas.len();
             
-            // 选择节点
+            // Select nodes
             let candidates = self.placement.select_nodes(
                 &shard,
                 &online_nodes,
@@ -86,7 +86,7 @@ impl Scheduler {
             }
         }
 
-        // 为没有 leader 的分片选举 leader
+        // Elect leader for shards without leader
         let shards_without_leader: Vec<_> = metadata
             .shards
             .values()
@@ -101,7 +101,7 @@ impl Scheduler {
             }
         }
 
-        // 更新分片状态
+        // Update shard status
         for shard in metadata.shards.values_mut() {
             if shard.status == ShardStatus::Creating && shard.is_replica_satisfied() {
                 shard.status = ShardStatus::Normal;
@@ -112,7 +112,7 @@ impl Scheduler {
         assignments
     }
 
-    /// 触发分片迁移
+    /// Trigger shard migration
     pub async fn migrate_shard(
         &self,
         shard_id: &ShardId,
@@ -121,7 +121,7 @@ impl Scheduler {
     ) -> Result<MigrationTask, String> {
         let mut metadata = self.metadata.write().await;
 
-        // 验证
+        // Validate
         let shard = metadata.shards.get(shard_id)
             .ok_or_else(|| format!("Shard {} not found", shard_id))?;
         
@@ -137,14 +137,14 @@ impl Scheduler {
             return Err(format!("Target node {} is not online", to_node));
         }
 
-        // 创建迁移任务
+        // Create migration task
         let task = self.migration_manager.create_task(
             shard_id.clone(),
             from_node.clone(),
             to_node.clone(),
         );
 
-        // 更新分片状态
+        // Update shard status
         metadata.set_shard_status(shard_id, ShardStatus::Migrating);
 
         info!(
@@ -162,10 +162,10 @@ impl Scheduler {
 
         let mut metadata = self.metadata.write().await;
 
-        // 添加新副本
+        // Add new replica
         metadata.assign_shard_to_node(&task.shard_id, &task.to_node);
-
-        // 移除旧副本
+        
+        // Remove old replica
         if let Some(shard) = metadata.shards.get_mut(&task.shard_id) {
             shard.remove_replica(&task.from_node);
         }
@@ -173,16 +173,16 @@ impl Scheduler {
             node.remove_shard(&task.shard_id);
         }
 
-        // 更新路由表
+        // Update routing table
         let replicas = metadata.shards.get(&task.shard_id).map(|s| s.replicas.clone());
         if let Some(replicas) = replicas {
             metadata.routing_table.set_shard_nodes(task.shard_id.clone(), replicas);
         }
 
-        // 恢复分片状态
+        // Restore shard status
         metadata.set_shard_status(&task.shard_id, ShardStatus::Normal);
 
-        // 完成任务
+        // Complete task
         self.migration_manager.complete_task(task_id);
 
         info!(
@@ -193,25 +193,25 @@ impl Scheduler {
         Ok(())
     }
 
-    /// 获取迁移管理器
+    /// Get migration manager
     pub fn migration_manager(&self) -> &MigrationManager {
         &self.migration_manager
     }
 
-    /// 获取分裂管理器
+    /// Get split manager
     pub fn split_manager(&self) -> &SplitManager {
         &self.split_manager
     }
 
-    /// 触发分片分裂
-    ///
-    /// # 参数
-    /// - `source_shard_id`: 源分片 ID
-    /// - `split_slot`: 分裂点槽位
-    /// - `target_shard_id`: 目标分片 ID（必须提供，且目标分片必须已存在且健康）
-    ///
-    /// # 要求
-    /// - 目标分片必须已创建且状态为 Normal（健康状态）
+    /// Trigger shard split
+    /// 
+    /// # Arguments
+    /// - `source_shard_id`: Source shard ID
+    /// - `split_slot`: Split point slot
+    /// - `target_shard_id`: Target shard ID (must be provided, and target shard must exist and be healthy)
+    /// 
+    /// # Requirements
+    /// - Target shard must be created and in Normal status (healthy status)
     pub async fn split_shard(
         &self,
         source_shard_id: &ShardId,
@@ -223,12 +223,12 @@ impl Scheduler {
             .await
     }
 
-    /// Rebalance：均衡分片分布
+    /// Rebalance: balance shard distribution
     pub async fn rebalance(&self) -> Vec<MigrationTask> {
         let metadata = self.metadata.read().await;
         let tasks = Vec::new();
 
-        // 计算每个节点的负载
+        // Calculate load for each node
         let mut node_loads: Vec<_> = metadata
             .nodes
             .values()
@@ -246,8 +246,8 @@ impl Scheduler {
         let _max_load = avg_load + 1;
         let _min_load = avg_load.saturating_sub(1);
 
-        // TODO: 实现 rebalance 逻辑
-        // 从负载高的节点迁移分片到负载低的节点
+        // TODO: Implement rebalance logic
+        // Migrate shards from high-load nodes to low-load nodes
 
         tasks
     }

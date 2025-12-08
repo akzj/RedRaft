@@ -1,13 +1,13 @@
-//! 分片放置策略
+//! Shard placement strategy
 
 use crate::metadata::{NodeInfo, ShardInfo, NodeId};
 
-/// 放置策略
+/// Placement strategy
 #[derive(Debug, Clone)]
 pub struct PlacementStrategy {
-    /// 是否考虑机架感知
+    /// Whether to consider rack awareness
     pub rack_aware: bool,
-    /// 是否考虑负载均衡
+    /// Whether to consider load balancing
     pub load_balance: bool,
 }
 
@@ -21,9 +21,9 @@ impl Default for PlacementStrategy {
 }
 
 impl PlacementStrategy {
-    /// 为分片选择节点
+    /// Select nodes for shard
     ///
-    /// 返回最多 `count` 个适合托管该分片的节点
+    /// Returns up to `count` nodes suitable for hosting this shard
     pub fn select_nodes(
         &self,
         shard: &ShardInfo,
@@ -34,7 +34,7 @@ impl PlacementStrategy {
             return Vec::new();
         }
 
-        // 过滤掉已经托管该分片的节点
+        // Filter out nodes that already host this shard
         let mut candidates: Vec<_> = available_nodes
             .iter()
             .filter(|n| !shard.replicas.contains(&n.id))
@@ -46,7 +46,7 @@ impl PlacementStrategy {
             return Vec::new();
         }
 
-        // 按负载排序（负载低的优先）
+        // Sort by load (lower load first)
         if self.load_balance {
             candidates.sort_by(|a, b| {
                 let load_a = a.load();
@@ -55,12 +55,12 @@ impl PlacementStrategy {
             });
         }
 
-        // 如果启用机架感知，尽量分散到不同机架
+        // If rack awareness enabled, try to distribute across different racks
         if self.rack_aware {
             let mut selected = Vec::new();
             let mut used_racks = std::collections::HashSet::new();
 
-            // 先选择不同机架的节点
+            // First select nodes from different racks
             for node in &candidates {
                 if selected.len() >= count {
                     break;
@@ -72,7 +72,7 @@ impl PlacementStrategy {
                 }
             }
 
-            // 如果不够，再从剩余节点中选择
+            // If not enough, select from remaining nodes
             for node in &candidates {
                 if selected.len() >= count {
                     break;
@@ -84,7 +84,7 @@ impl PlacementStrategy {
 
             selected
         } else {
-            // 简单选择前 N 个
+            // Simply select first N
             candidates
                 .into_iter()
                 .take(count)
@@ -132,7 +132,7 @@ mod tests {
         let selected = strategy.select_nodes(&shard, &nodes, 2);
         
         assert_eq!(selected.len(), 2);
-        // 应该选择负载低的 node2 和 node1
+        // Should select node2 and node1 with lower load
         assert_eq!(selected[0], "node2");
         assert_eq!(selected[1], "node1");
     }

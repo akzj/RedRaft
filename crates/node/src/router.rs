@@ -1,9 +1,9 @@
-//! Shard Router - 键值路由模块
+//! Shard Router - Key-value routing module
 //!
-//! 负责将键值对路由到对应的 Raft 组（Shard）
-//! 支持两种模式：
-//! 1. 本地模式：使用固定 shard 数量的哈希
-//! 2. Pilot 模式：使用从 Pilot 获取的路由表
+//! Responsible for routing key-value pairs to corresponding Raft groups (Shards)
+//! Supports two modes:
+//! 1. Local mode: Uses fixed shard count hashing
+//! 2. Pilot mode: Uses routing table fetched from Pilot
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -14,33 +14,33 @@ use tracing::{debug, info};
 use raft::RaftId;
 use crate::pilot_client::{RoutingTable, ShardSplitInfo};
 
-/// 槽位总数（与 Pilot 一致）
+/// Total number of slots (consistent with Pilot)
 pub const TOTAL_SLOTS: u32 = 16384;
 
 /// Shard Router
-/// 负责键值到 Raft 组的映射
+/// Responsible for mapping keys to Raft groups
 #[derive(Clone)]
 pub struct ShardRouter {
-    /// Shard 数量（本地模式使用）
+    /// Shard count (for local mode)
     shard_count: usize,
-    /// 活跃的 Shard 列表
+    /// Active shard list
     active_shards: Arc<RwLock<HashSet<String>>>,
-    /// Shard ID 到节点列表的映射
+    /// Shard ID to node list mapping
     shard_locations: Arc<RwLock<HashMap<String, Vec<String>>>>,
-    /// 节点地址映射
+    /// Node address mapping
     node_addrs: Arc<RwLock<HashMap<String, String>>>,
-    /// 槽位到分片的映射（Pilot 模式使用）
+    /// Slot to shard mapping (for Pilot mode)
     slots: Arc<RwLock<Vec<Option<String>>>>,
-    /// 路由表版本
+    /// Routing table version
     routing_version: Arc<RwLock<u64>>,
-    /// 是否使用 Pilot 路由
+    /// Whether to use Pilot routing
     use_pilot_routing: Arc<RwLock<bool>>,
-    /// 正在分裂的分片 (source_shard_id -> SplitInfo)
+    /// Splitting shards (source_shard_id -> SplitInfo)
     splitting_shards: Arc<RwLock<HashMap<String, ShardSplitInfo>>>,
 }
 
 impl ShardRouter {
-    /// 创建本地模式路由器
+    /// Create local mode router
     pub fn new(shard_count: usize) -> Self {
         let mut active_shards = HashSet::new();
         for i in 0..shard_count {
@@ -59,14 +59,14 @@ impl ShardRouter {
         }
     }
 
-    /// 计算 key 的槽位（CRC16，与 Redis Cluster 兼容）
+    /// Calculate slot for key (CRC16, compatible with Redis Cluster)
     pub fn slot_for_key(key: &[u8]) -> u32 {
         crc16(key) as u32 % TOTAL_SLOTS
     }
 
-    /// 根据键计算 Shard ID
+    /// Calculate Shard ID from key
     pub fn route_key(&self, key: &[u8]) -> String {
-        // 如果使用 Pilot 路由，优先使用槽位映射
+        // If using Pilot routing, prefer slot mapping
         if *self.use_pilot_routing.read() {
             let slot = Self::slot_for_key(key);
             let slots = self.slots.read();
@@ -75,7 +75,7 @@ impl ShardRouter {
             }
         }
         
-        // 回退到本地哈希路由
+        // Fallback to local hash routing
         let mut hasher = Sha256::new();
         hasher.update(key);
         let hash = hasher.finalize();
@@ -89,13 +89,13 @@ impl ShardRouter {
         format!("shard_{}", shard_id)
     }
 
-    /// 获取键对应的 Raft 组 ID
+    /// Get Raft group ID for key
     pub fn get_raft_group_id(&self, key: &[u8], node_id: &str) -> RaftId {
         let shard_id = self.route_key(key);
         RaftId::new(shard_id, node_id.to_string())
     }
 
-    /// 获取键对应的 leader 节点地址
+    /// Get leader node address for key
     pub fn get_leader_addr_for_key(&self, key: &[u8]) -> Option<String> {
         let shard_id = self.route_key(key);
         let shard_locations = self.shard_locations.read();
@@ -106,7 +106,7 @@ impl ShardRouter {
         node_addrs.get(leader).cloned()
     }
 
-    /// 检查当前节点是否是某个 key 的 leader
+    /// Check if current node is the leader for a key
     pub fn is_leader_for_key(&self, key: &[u8], node_id: &str) -> bool {
         let shard_id = self.route_key(key);
         let shard_locations = self.shard_locations.read();
@@ -114,12 +114,12 @@ impl ShardRouter {
         if let Some(nodes) = shard_locations.get(&shard_id) {
             nodes.first().map(|s| s == node_id).unwrap_or(false)
         } else {
-            // 没有配置时，默认当前节点处理
+            // When no configuration, default to current node handling
             true
         }
     }
 
-    /// 从 Pilot 路由表更新
+    /// Update from Pilot routing table
     pub fn update_from_pilot(&self, routing_table: &RoutingTable) {
         let new_version = routing_table.version;
         let current_version = *self.routing_version.read();
@@ -128,13 +128,13 @@ impl ShardRouter {
             return;
         }
 
-        // 更新槽位映射
+        // Update slot mapping
         {
             let mut slots = self.slots.write();
             *slots = routing_table.slots.clone();
         }
 
-        // 更新分片位置
+        // Update shard locations
         {
             let mut shard_locations = self.shard_locations.write();
             let mut active_shards = self.active_shards.write();
@@ -148,13 +148,13 @@ impl ShardRouter {
             }
         }
 
-        // 更新节点地址
+        // Update node addresses
         {
             let mut node_addrs = self.node_addrs.write();
             *node_addrs = routing_table.node_addrs.clone();
         }
 
-        // 更新分裂状态
+        // Update split status
         {
             let mut splitting = self.splitting_shards.write();
             *splitting = routing_table.splitting_shards.clone();
@@ -167,7 +167,7 @@ impl ShardRouter {
             }
         }
 
-        // 更新版本并启用 Pilot 路由
+        // Update version and enable Pilot routing
         *self.routing_version.write() = new_version;
         *self.use_pilot_routing.write() = true;
 
@@ -179,17 +179,17 @@ impl ShardRouter {
         );
     }
 
-    /// 获取路由表版本
+    /// Get routing table version
     pub fn routing_version(&self) -> u64 {
         *self.routing_version.read()
     }
 
-    /// 是否使用 Pilot 路由
+    /// Whether using Pilot routing
     pub fn is_pilot_routing(&self) -> bool {
         *self.use_pilot_routing.read()
     }
 
-    /// 添加 Shard 配置（本地模式）
+    /// Add shard configuration (local mode)
     pub fn add_shard(&self, shard_id: String, nodes: Vec<String>) {
         let node_count = nodes.len();
         self.active_shards.write().insert(shard_id.clone());
@@ -197,40 +197,40 @@ impl ShardRouter {
         debug!("Added shard with {} nodes", node_count);
     }
 
-    /// 删除 Shard
+    /// Remove shard
     pub fn remove_shard(&self, shard_id: &str) {
         self.active_shards.write().remove(shard_id);
         self.shard_locations.write().remove(shard_id);
         debug!("Removed shard: {}", shard_id);
     }
 
-    /// 获取所有活跃的 Shard
+    /// Get all active shards
     pub fn get_active_shards(&self) -> Vec<String> {
         self.active_shards.read().iter().cloned().collect()
     }
 
-    /// 获取 Shard 的节点列表
+    /// Get node list for shard
     pub fn get_shard_nodes(&self, shard_id: &str) -> Option<Vec<String>> {
         self.shard_locations.read().get(shard_id).cloned()
     }
 
-    /// 更新 Shard 配置
+    /// Update shard configuration
     pub fn update_shard(&self, shard_id: String, nodes: Vec<String>) {
         self.shard_locations.write().insert(shard_id.clone(), nodes);
         debug!("Updated shard: {}", shard_id);
     }
 
-    /// 设置节点地址
+    /// Set node address
     pub fn set_node_addr(&self, node_id: String, addr: String) {
         self.node_addrs.write().insert(node_id, addr);
     }
 
-    /// 检查 Shard 是否存在
+    /// Check if shard exists
     pub fn has_shard(&self, shard_id: &str) -> bool {
         self.active_shards.read().contains(shard_id)
     }
 
-    /// 获取 Shard 数量
+    /// Get shard count
     pub fn shard_count(&self) -> usize {
         if *self.use_pilot_routing.read() {
             self.active_shards.read().len()
@@ -239,32 +239,32 @@ impl ShardRouter {
         }
     }
 
-    /// 获取所有节点地址
+    /// Get all node addresses
     pub fn get_all_node_addrs(&self) -> HashMap<String, String> {
         self.node_addrs.read().clone()
     }
 
-    /// 检查分片是否正在分裂
+    /// Check if shard is splitting
     pub fn is_shard_splitting(&self, shard_id: &str) -> bool {
         self.splitting_shards.read().contains_key(shard_id)
     }
 
-    /// 获取分片的分裂信息
+    /// Get shard split information
     pub fn get_split_info(&self, shard_id: &str) -> Option<ShardSplitInfo> {
         self.splitting_shards.read().get(shard_id).cloned()
     }
 
-    /// 检查 key 是否应该 MOVED 到新分片（在分裂完成后）
+    /// Check if key should be MOVED to new shard (after split completes)
     /// 
-    /// 返回 Some((target_shard, target_addr)) 如果应该重定向
+    /// Returns Some((target_shard, target_addr)) if should redirect
     pub fn should_move_for_split(&self, key: &[u8], shard_id: &str) -> Option<(String, String)> {
         let splitting = self.splitting_shards.read();
         let split_info = splitting.get(shard_id)?;
         
         let slot = Self::slot_for_key(key);
         
-        // 如果槽位 >= split_slot，且分裂状态是 switching 或 completed
-        // 则应该转移到目标分片
+        // If slot >= split_slot, and split status is switching or completed
+        // then should move to target shard
         if slot >= split_info.split_slot 
             && (split_info.status == "switching" || split_info.status == "completed") 
         {
@@ -281,12 +281,12 @@ impl ShardRouter {
         }
     }
 
-    /// 检查 key 是否在分裂的缓冲范围内（应该缓存请求）
+    /// Check if key is in split buffer range (should buffer request)
     pub fn should_buffer_for_split(&self, key: &[u8], shard_id: &str) -> bool {
         let splitting = self.splitting_shards.read();
         if let Some(split_info) = splitting.get(shard_id) {
             let slot = Self::slot_for_key(key);
-            // 在缓冲阶段，且 key 在分裂范围内
+            // In buffering phase, and key is in split range
             slot >= split_info.split_slot && split_info.status == "buffering"
         } else {
             false
@@ -294,7 +294,7 @@ impl ShardRouter {
     }
 }
 
-/// CRC16 实现（XMODEM 变种，与 Redis Cluster 兼容）
+/// CRC16 implementation (XMODEM variant, compatible with Redis Cluster)
 fn crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0;
     for byte in data {
@@ -324,10 +324,10 @@ mod tests {
         let shard1 = router.route_key(key1);
         let shard2 = router.route_key(key2);
         
-        // 相同键应该路由到相同 Shard
+        // Same key should route to same shard
         assert_eq!(router.route_key(key1), shard1);
         
-        // 不同键可能路由到不同 Shard（取决于哈希）
+        // Different keys may route to different shards (depends on hash)
         println!("key1 -> {}, key2 -> {}", shard1, shard2);
     }
 
@@ -347,12 +347,12 @@ mod tests {
 
     #[test]
     fn test_slot_calculation() {
-        // 测试槽位计算一致性
+        // Test slot calculation consistency
         let slot1 = ShardRouter::slot_for_key(b"hello");
         let slot2 = ShardRouter::slot_for_key(b"hello");
         assert_eq!(slot1, slot2);
         
-        // 确保在范围内
+        // Ensure within range
         assert!(slot1 < TOTAL_SLOTS);
     }
 
@@ -360,11 +360,11 @@ mod tests {
     fn test_pilot_routing() {
         let router = ShardRouter::new(3);
         
-        // 创建模拟路由表
+        // Create mock routing table
         let mut routing_table = RoutingTable::default();
         routing_table.version = 1;
         
-        // 分配槽位
+        // Assign slots
         for i in 0..8192 {
             routing_table.slots[i] = Some("shard_0000".to_string());
         }
@@ -384,7 +384,7 @@ mod tests {
         routing_table.node_addrs.insert("node1".to_string(), "127.0.0.1:6379".to_string());
         routing_table.node_addrs.insert("node2".to_string(), "127.0.0.1:6380".to_string());
         
-        // 更新路由
+        // Update routing
         router.update_from_pilot(&routing_table);
         
         assert!(router.is_pilot_routing());

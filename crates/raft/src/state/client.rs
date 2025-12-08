@@ -12,11 +12,11 @@ use crate::event::Role;
 use crate::message::LogEntry;
 use crate::types::{Command, RaftId, RequestId};
 
-/// 客户端请求的默认超时时间（30秒）
+/// Default timeout for client requests (30 seconds)
 const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl RaftState {
-    /// 处理客户端提议
+    /// Handle client proposals
     pub(crate) async fn handle_client_propose(&mut self, cmd: Command, request_id: RequestId) {
         info!(
             "Node {} handling ClientPropose with request_id={:?}, role={:?}",
@@ -44,10 +44,10 @@ impl RaftState {
             return;
         }
 
-        // 如果请求已存在，检查状态
+        // If request already exists, check status
         if let Some(&index) = self.client_requests.get(&request_id) {
             if index <= self.commit_index {
-                // 已提交，直接返回成功
+                // Already committed, return success directly
                 self.error_handler
                     .handle_void(
                         self.callbacks
@@ -59,7 +59,7 @@ impl RaftState {
                     .await;
                 return;
             }
-            // 未提交但正在处理中，返回处理中状态
+            // Not committed but in progress, return in-progress status
             debug!(
                 "Node {} request {} already in progress at index {}",
                 self.id, request_id, index
@@ -82,10 +82,10 @@ impl RaftState {
             return;
         }
         
-        // 清理过期的客户端请求
+        // Clean up expired client requests
         self.cleanup_expired_client_requests().await;
 
-        // 生成日志条目
+        // Generate log entry
         let index = self.get_last_log_index() + 1;
         let new_entry = LogEntry {
             term: self.current_term,
@@ -95,7 +95,7 @@ impl RaftState {
             client_request_id: Some(request_id),
         };
 
-        // 追加日志
+        // Append log
         info!(
             "Node {} (Leader) appending log entry at index {} for request_id={:?}",
             self.id, index, request_id
@@ -140,12 +140,12 @@ impl RaftState {
         self.last_log_index = index;
         self.last_log_term = self.current_term;
 
-        // 记录客户端请求与日志索引的映射
+        // Record mapping between client request and log index
         self.client_requests.insert(request_id, index);
         self.client_requests_revert.insert(index, request_id);
         self.client_request_timestamps.insert(request_id, Instant::now());
 
-        // 立即同步日志
+        // Immediately sync logs
         info!(
             "Node {} broadcasting append entries for log index {}",
             self.id, index
@@ -153,7 +153,7 @@ impl RaftState {
         self.broadcast_append_entries().await;
     }
 
-    /// 应用已提交的日志
+    /// Apply committed logs
     pub async fn apply_committed_logs(&mut self) {
         if self.last_applied >= self.commit_index {
             debug!(
@@ -186,7 +186,7 @@ impl RaftState {
         {
             Ok(entries) => entries,
             Err(e) => {
-                error!("读取日志失败: {}", e);
+                error!("Failed to read logs: {}", e);
                 return;
             }
         };
@@ -365,13 +365,13 @@ impl RaftState {
             }
         }
 
-        // 检查 ReadIndex 待处理的读请求
+        // Check pending ReadIndex requests
         self.check_pending_reads().await;
 
         self.adjust_apply_interval().await;
     }
 
-    /// 调整应用间隔
+    /// Adjust apply interval
     pub(crate) async fn adjust_apply_interval(&mut self) {
         let current_load = self.commit_index - self.last_applied;
 
@@ -391,9 +391,9 @@ impl RaftState {
         );
     }
 
-    /// 检查客户端响应（使用 O(1) 查找）
+    /// Check client response (using O(1) lookup)
     pub(crate) async fn check_client_response(&mut self, log_index: u64) {
-        // 使用 client_requests_revert 进行 O(1) 查找
+        // Use client_requests_revert for O(1) lookup
         if let Some(&req_id) = self.client_requests_revert.get(&log_index) {
             self.error_handler
                 .handle_void(
@@ -405,26 +405,26 @@ impl RaftState {
                 )
                 .await;
             
-            // 清理所有相关映射
+            // Clean up all related mappings
             self.client_requests.remove(&req_id);
             self.client_requests_revert.remove(&log_index);
             self.client_request_timestamps.remove(&req_id);
         }
     }
 
-    /// 清理过期的客户端请求
+    /// Clean up expired client requests
     pub(crate) async fn cleanup_expired_client_requests(&mut self) {
         let now = Instant::now();
         let mut expired_requests = Vec::new();
 
-        // 找出过期的请求
+        // Find expired requests
         for (req_id, timestamp) in &self.client_request_timestamps {
             if now.duration_since(*timestamp) > CLIENT_REQUEST_TIMEOUT {
                 expired_requests.push(*req_id);
             }
         }
 
-        // 清理过期请求并发送超时错误
+        // Clean up expired requests and send timeout errors
         for req_id in expired_requests {
             if let Some(index) = self.client_requests.remove(&req_id) {
                 self.client_requests_revert.remove(&index);

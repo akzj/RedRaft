@@ -1,6 +1,6 @@
-//! 文件持久化存储
+//! File persistent storage
 //!
-//! 将集群元数据持久化到文件
+//! Persists cluster metadata to files
 
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -8,7 +8,7 @@ use tracing::info;
 
 use crate::metadata::ClusterMetadata;
 
-/// 存储错误
+/// Storage error
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     #[error("IO error: {0}")]
@@ -19,16 +19,16 @@ pub enum StorageError {
     NotFound(PathBuf),
 }
 
-/// 文件存储
+/// File storage
 pub struct FileStorage {
-    /// 数据目录
+    /// Data directory
     data_dir: PathBuf,
-    /// 元数据文件路径
+    /// Metadata file path
     metadata_path: PathBuf,
 }
 
 impl FileStorage {
-    /// 创建文件存储
+    /// Create file storage
     pub fn new<P: AsRef<Path>>(data_dir: P) -> Self {
         let data_dir = data_dir.as_ref().to_path_buf();
         let metadata_path = data_dir.join("cluster_metadata.json");
@@ -38,7 +38,7 @@ impl FileStorage {
         }
     }
 
-    /// 确保数据目录存在
+    /// Ensure data directory exists
     pub async fn ensure_dir(&self) -> Result<(), StorageError> {
         if !self.data_dir.exists() {
             fs::create_dir_all(&self.data_dir).await?;
@@ -47,7 +47,7 @@ impl FileStorage {
         Ok(())
     }
 
-    /// 加载集群元数据
+    /// Load cluster metadata
     pub async fn load(&self) -> Result<Option<ClusterMetadata>, StorageError> {
         if !self.metadata_path.exists() {
             info!("Metadata file not found, will create new cluster");
@@ -68,11 +68,11 @@ impl FileStorage {
         Ok(Some(metadata))
     }
 
-    /// 保存集群元数据
+    /// Save cluster metadata
     pub async fn save(&self, metadata: &ClusterMetadata) -> Result<(), StorageError> {
         self.ensure_dir().await?;
 
-        // 先写入临时文件，再原子重命名
+        // Write to temp file first, then atomically rename
         let temp_path = self.metadata_path.with_extension("json.tmp");
         let content = serde_json::to_string_pretty(metadata)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
@@ -88,7 +88,7 @@ impl FileStorage {
         Ok(())
     }
 
-    /// 加载或创建集群元数据
+    /// Load or create cluster metadata
     pub async fn load_or_create(&self, cluster_name: &str) -> Result<ClusterMetadata, StorageError> {
         match self.load().await? {
             Some(metadata) => Ok(metadata),
@@ -102,7 +102,7 @@ impl FileStorage {
         }
     }
 
-    /// 备份当前元数据
+    /// Backup current metadata
     pub async fn backup(&self) -> Result<PathBuf, StorageError> {
         if !self.metadata_path.exists() {
             return Err(StorageError::NotFound(self.metadata_path.clone()));
@@ -131,12 +131,12 @@ mod tests {
         assert_eq!(metadata.name, "test-cluster");
         assert!(!metadata.shards.is_empty());
 
-        // 再次加载应该得到相同数据
+        // Reloading should get same data
         let loaded = storage.load().await.unwrap().unwrap();
         assert_eq!(loaded.name, metadata.name);
         assert_eq!(loaded.shards.len(), metadata.shards.len());
 
-        // 清理
+        // Cleanup
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

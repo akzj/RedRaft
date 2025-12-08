@@ -1,6 +1,6 @@
-//! RedRaft 节点实现
+//! RedRaft node implementation
 //!
-//! 集成 Multi-Raft、KV 状态机、路由和存储
+//! Integrates Multi-Raft, KV state machine, routing, and storage
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -23,7 +23,7 @@ use crate::state_machine::KVStateMachine;
 use redisstore::{ApplyResult as StoreApplyResult, MemoryStore};
 use resp::{Command, CommandType, RespValue};
 
-/// 等待中的请求追踪器
+/// Pending request tracker
 #[derive(Clone)]
 pub struct PendingRequests {
     /// request_id -> (command, result_sender)
@@ -37,14 +37,14 @@ impl PendingRequests {
         }
     }
 
-    /// 注册一个等待中的请求
+    /// Register a pending request
     pub fn register(&self, request_id: RequestId, cmd: Command) -> oneshot::Receiver<StoreApplyResult> {
         let (tx, rx) = oneshot::channel();
         self.requests.lock().insert(request_id.into(), (cmd, tx));
         rx
     }
 
-    /// 完成请求并发送结果
+    /// Complete request and send result
     pub fn complete(&self, request_id: RequestId, result: StoreApplyResult) -> bool {
         if let Some((_, tx)) = self.requests.lock().remove(&request_id.into()) {
             let _ = tx.send(result);
@@ -54,12 +54,12 @@ impl PendingRequests {
         }
     }
 
-    /// 获取等待中的命令（用于 apply 时执行）
+    /// Get pending command (for execution during apply)
     pub fn get_command(&self, request_id: RequestId) -> Option<Command> {
         self.requests.lock().get(&request_id.into()).map(|(cmd, _)| cmd.clone())
     }
 
-    /// 移除超时的请求
+    /// Remove timed out request
     pub fn remove(&self, request_id: RequestId) {
         self.requests.lock().remove(&request_id.into());
     }
@@ -71,21 +71,21 @@ impl Default for PendingRequests {
     }
 }
 
-/// RedRaft 节点
+/// RedRaft node
 pub struct RedRaftNode {
-    /// 节点 ID
+    /// Node ID
     node_id: String,
-    /// Multi-Raft 驱动器
+    /// Multi-Raft driver
     driver: raft::multi_raft_driver::MultiRaftDriver,
-    /// 存储后端
+    /// Storage backend
     storage: Arc<dyn Storage>,
-    /// 网络层
+    /// Network layer
     network: Arc<dyn Network>,
     /// Shard Router
     router: Arc<ShardRouter>,
-    /// Raft 组状态机映射 (shard_id -> state_machine)
+    /// Raft group state machine mapping (shard_id -> state_machine)
     state_machines: Arc<Mutex<HashMap<String, Arc<KVStateMachine>>>>,
-    /// 等待中的请求追踪器
+    /// Pending request tracker
     pending_requests: PendingRequests,
 }
 
@@ -107,70 +107,70 @@ impl RedRaftNode {
         }
     }
     
-    /// 获取等待请求追踪器
+    /// Get pending request tracker
     pub fn pending_requests(&self) -> &PendingRequests {
         &self.pending_requests
     }
 
-    /// 获取节点 ID
+    /// Get node ID
     pub fn node_id(&self) -> &str {
         &self.node_id
     }
 
-    /// 获取路由器引用
+    /// Get router reference
     pub fn router(&self) -> Arc<ShardRouter> {
         self.router.clone()
     }
 
-    /// 获取已存在的 Raft 组
+    /// Get existing Raft group
     /// 
-    /// 用于业务请求路由，不会创建新的 Raft 组。
-    /// 如果 shard 不存在，返回 None。
+    /// Used for business request routing, will not create new Raft groups.
+    /// Returns None if shard does not exist.
     /// 
-    /// # 类型转换
-    /// - 输入：`shard_id` (业务层 ShardId)
-    /// - 输出：`RaftId` 中的 `group` 字段（Raft 层 GroupId）
-    /// - 语义：一个 Shard 对应一个 Raft Group，ShardId 作为 GroupId 使用
+    /// # Type Conversion
+    /// - Input: `shard_id` (business layer ShardId)
+    /// - Output: `group` field in `RaftId` (Raft layer GroupId)
+    /// - Semantics: One Shard corresponds to one Raft Group, ShardId is used as GroupId
     pub fn get_raft_group(&self, shard_id: &str) -> Option<RaftId> {
         if self.state_machines.lock().contains_key(shard_id) {
-            // ShardId (业务层) -> GroupId (Raft 层)
-            // 类型相同（都是 String），但语义不同
+            // ShardId (business layer) -> GroupId (Raft layer)
+            // Same type (both String), but different semantics
             Some(RaftId::new(shard_id.to_string(), self.node_id.clone()))
         } else {
             None
         }
     }
 
-    /// 创建 Raft 组（仅供 Pilot 控制面调用）
+    /// Create Raft group (for Pilot control plane only)
     /// 
-    /// # 重要
-    /// 此函数只应由 Pilot 控制面调用，不应在业务请求处理中调用。
-    /// 业务请求应使用 `get_raft_group` 获取已存在的组。
+    /// # Important
+    /// This function should only be called by Pilot control plane, not in business request handling.
+    /// Business requests should use `get_raft_group` to get existing groups.
     /// 
-    /// # 参数
-    /// - `shard_id`: 分片 ID（业务层 ShardId）
-    /// - `nodes`: 该分片的所有节点 ID 列表
+    /// # Arguments
+    /// - `shard_id`: Shard ID (business layer ShardId)
+    /// - `nodes`: List of all node IDs for this shard
     /// 
-    /// # 类型转换
-    /// - 输入：`shard_id` (业务层 ShardId)
-    /// - 内部：将 `shard_id` 作为 `group` 传递给 `RaftId`（Raft 层 GroupId）
-    /// - 语义：一个 Shard 对应一个 Raft Group，ShardId 作为 GroupId 使用
+    /// # Type Conversion
+    /// - Input: `shard_id` (business layer ShardId)
+    /// - Internal: Pass `shard_id` as `group` to `RaftId` (Raft layer GroupId)
+    /// - Semantics: One Shard corresponds to one Raft Group, ShardId is used as GroupId
     pub async fn create_raft_group(
         &self,
         shard_id: String,
         nodes: Vec<String>,
     ) -> Result<RaftId, String> {
-        // ShardId (业务层) -> GroupId (Raft 层)
-        // 类型相同（都是 String），但语义不同：Shard 可以分裂，Raft Group 不会分裂
+        // ShardId (business layer) -> GroupId (Raft layer)
+        // Same type (both String), but different semantics: Shard can split, Raft Group cannot split
         let raft_id = RaftId::new(shard_id.clone(), self.node_id.clone());
         
-        // 检查是否已存在
+        // Check if already exists
         if self.state_machines.lock().contains_key(&shard_id) {
             debug!("Raft group already exists: {}", raft_id);
             return Ok(raft_id);
         }
 
-        // 创建状态机（使用内存存储，后续可替换为 RocksDB）
+        // Create state machine (using memory store, can be replaced with RocksDB later)
         let store = Arc::new(MemoryStore::new());
         let state_machine = Arc::new(KVStateMachine::with_pending_requests(
             store,
@@ -180,14 +180,14 @@ impl RedRaftNode {
             .lock()
             .insert(shard_id.clone(), state_machine.clone());
 
-        // 创建集群配置
+        // Create cluster configuration
         let voters: HashSet<RaftId> = nodes
             .iter()
             .map(|node| RaftId::new(shard_id.clone(), node.clone()))
             .collect();
         let config = ClusterConfig::simple(voters, 0);
 
-        // 创建 Raft 状态
+        // Create Raft state
         let mut options = RaftStateOptions::default();
         options.id = raft_id.clone();
         let timers = self.driver.get_timer_service();
@@ -202,7 +202,7 @@ impl RedRaftNode {
         let mut raft_state = RaftState::new(options, callbacks.clone()).await
             .map_err(|e| e.to_string())?;
 
-        // 加载持久化状态
+        // Load persisted state
         if let Ok(Some(hard_state)) = self
             .storage
             .load_hard_state(&raft_id)
@@ -212,7 +212,7 @@ impl RedRaftNode {
             raft_state.voted_for = hard_state.voted_for;
         }
 
-        // 加载集群配置
+        // Load cluster configuration
         if let Ok(loaded_config) = self.storage.load_cluster_config(&raft_id).await {
             raft_state.config = loaded_config;
         } else {
@@ -223,7 +223,7 @@ impl RedRaftNode {
                 .map_err(|e| format!("Failed to save cluster config: {}", e))?;
         }
 
-        // 注册到 MultiRaftDriver
+        // Register to MultiRaftDriver
         let raft_state_arc = Arc::new(tokio::sync::Mutex::new(raft_state));
         let handle_event = Box::new(RaftGroupHandler {
             raft_state: raft_state_arc.clone(),
@@ -231,35 +231,35 @@ impl RedRaftNode {
 
         self.driver.add_raft_group(raft_id.clone(), handle_event);
 
-        // 更新路由表
+        // Update routing table
         self.router.add_shard(shard_id, nodes);
 
         info!("Created Raft group: {}", raft_id);
         Ok(raft_id)
     }
 
-    /// 从路由表同步 Raft 组
+    /// Sync Raft groups from routing table
     /// 
-    /// 检查路由表中本节点负责的分片，自动创建缺失的 Raft 组。
-    /// 此方法应在路由表更新后调用。
+    /// Check shards this node is responsible for in routing table, automatically create missing Raft groups.
+    /// This method should be called after routing table updates.
     /// 
-    /// # 返回
-    /// 返回新创建的 Raft 组数量
+    /// # Returns
+    /// Returns the number of newly created Raft groups
     pub async fn sync_raft_groups_from_routing(&self, routing_table: &crate::pilot_client::RoutingTable) -> usize {
         let mut created_count = 0;
 
         for (shard_id, nodes) in &routing_table.shard_nodes {
-            // 检查本节点是否是该分片的副本
+            // Check if this node is a replica for this shard
             if !nodes.contains(&self.node_id) {
                 continue;
             }
 
-            // 检查 Raft 组是否已存在
+            // Check if Raft group already exists
             if self.get_raft_group(shard_id).is_some() {
                 continue;
             }
 
-            // 创建 Raft 组
+            // Create Raft group
             info!(
                 "Creating Raft group for shard {} (nodes: {:?})",
                 shard_id, nodes
@@ -286,7 +286,7 @@ impl RedRaftNode {
         created_count
     }
 
-    /// 处理客户端命令
+    /// Handle client command
     pub async fn handle_command(&self, cmd: Command) -> Result<RespValue, String> {
         debug!("Handling command: {:?}", cmd.name());
         
@@ -296,31 +296,31 @@ impl RedRaftNode {
         }
     }
 
-    /// 处理读命令 - 直接从状态机读取
+    /// Handle read command - read directly from state machine
     async fn handle_read(&self, cmd: Command) -> Result<RespValue, String> {
-        // 获取路由 key
+        // Get routing key
         let key = cmd.get_key();
         
-        // 确定 shard
+        // Determine shard
         let (shard_id, key_bytes) = match key {
             Some(k) => (self.router.route_key(k), k),
             None => {
-                // 无 key 命令（如 PING, DBSIZE）在本地执行
+                // Commands without key (e.g., PING, DBSIZE) execute locally
                 return self.handle_global_read(cmd);
             }
         };
         
-        // 检查分裂状态 - 如果需要 MOVED 则返回重定向
+        // Check split status - return redirect if MOVED needed
         if let Some((_target_shard, target_addr)) = self.router.should_move_for_split(key_bytes, &shard_id) {
             let slot = crate::router::ShardRouter::slot_for_key(key_bytes);
             return Err(format!("MOVED {} {}", slot, target_addr));
         }
         
-        // 获取 Raft 组（必须已存在，由 Pilot 创建）
+        // Get Raft group (must exist, created by Pilot)
         let raft_id = self.get_raft_group(&shard_id)
             .ok_or_else(|| format!("CLUSTERDOWN Shard {} not ready", shard_id))?;
         
-        // 从状态机读取
+        // Read from state machine
         let state_machines = self.state_machines.lock();
         if let Some(sm) = state_machines.get(&raft_id.group) {
             let result = sm.store().apply(&cmd);
@@ -330,7 +330,7 @@ impl RedRaftNode {
         }
     }
 
-    /// 处理全局读命令（无特定 key）
+    /// Handle global read commands (no specific key)
     fn handle_global_read(&self, cmd: Command) -> Result<RespValue, String> {
         match cmd {
             Command::Ping { message } => {
@@ -350,14 +350,14 @@ impl RedRaftNode {
                 Ok(RespValue::Integer(total))
             }
             Command::CommandInfo => {
-                // 简化实现
+                // Simplified implementation
                 Ok(RespValue::Array(vec![]))
             }
             Command::Info { .. } => {
                 Ok(RespValue::BulkString(Some(b"# Server\nredraft_version:0.1.0\n".to_vec())))
             }
             Command::Keys { pattern } => {
-                // 收集所有 shard 的 keys
+                // Collect keys from all shards
                 let state_machines = self.state_machines.lock();
                 let mut all_keys = Vec::new();
                 for sm in state_machines.values() {
@@ -369,7 +369,7 @@ impl RedRaftNode {
                 Ok(RespValue::Array(all_keys))
             }
             Command::Scan { cursor, pattern, count } => {
-                // 简化实现：只在 cursor=0 时返回所有 keys
+                // Simplified implementation: only return all keys when cursor=0
                 if cursor != 0 {
                     return Ok(RespValue::Array(vec![
                         RespValue::BulkString(Some(b"0".to_vec())),
@@ -401,45 +401,45 @@ impl RedRaftNode {
         }
     }
 
-    /// 处理写命令 - 通过 Raft 共识
+    /// Handle write command - through Raft consensus
     async fn handle_write(&self, cmd: Command) -> Result<RespValue, String> {
-        // 获取路由 key
+        // Get routing key
         let key = match cmd.get_key() {
             Some(k) => k,
             None => {
-                // FlushDb 等全局写命令需要特殊处理
+                // Global write commands like FlushDb need special handling
                 return self.handle_global_write(cmd).await;
             }
         };
         
-        // 确定 shard
+        // Determine shard
         let shard_id = self.router.route_key(key);
         
-        // 检查分裂状态 - 如果需要 MOVED 则返回重定向
+        // Check split status - return redirect if MOVED needed
         if let Some((_target_shard, target_addr)) = self.router.should_move_for_split(key, &shard_id) {
             let slot = crate::router::ShardRouter::slot_for_key(key);
-            // 返回 MOVED 错误，格式：MOVED <slot> <target_addr>
+            // Return MOVED error, format: MOVED <slot> <target_addr>
             return Err(format!("MOVED {} {}", slot, target_addr));
         }
         
-        // 检查是否在缓冲阶段 - 如果是则返回 TRYAGAIN
+        // Check if in buffering phase - return TRYAGAIN if so
         if self.router.should_buffer_for_split(key, &shard_id) {
             return Err("TRYAGAIN Split in progress, please retry".to_string());
         }
         
-        // 获取 Raft 组（必须已存在，由 Pilot 创建）
+        // Get Raft group (must exist, created by Pilot)
         let raft_id = self.get_raft_group(&shard_id)
             .ok_or_else(|| format!("CLUSTERDOWN Shard {} not ready", shard_id))?;
         
-        // 序列化命令
+        // Serialize command
         let serialized = bincode::serde::encode_to_vec(&cmd.clone(), bincode::config::standard())
             .map_err(|e| format!("Failed to serialize command: {}", e))?;
 
-        // 生成请求 ID 并注册等待
+        // Generate request ID and register wait
         let request_id = RequestId::new();
         let result_rx = self.pending_requests.register(request_id, cmd);
 
-        // 发送事件到 Raft 组
+        // Send event to Raft group
         let event = Event::ClientPropose {
             cmd: serialized,
             request_id,
@@ -453,26 +453,26 @@ impl RedRaftNode {
             }
         }
 
-        // 等待 Raft 提交并返回结果
+        // Wait for Raft commit and return result
         match tokio::time::timeout(Duration::from_secs(5), result_rx).await {
             Ok(Ok(result)) => Ok(apply_result_to_resp(result)),
             Ok(Err(_)) => {
-                // Channel closed - 可能是节点关闭
+                // Channel closed - node may be shutting down
                 Err("Request cancelled".to_string())
             }
             Err(_) => {
-                // 超时
+                // Timeout
                 self.pending_requests.remove(request_id);
                 Err("Request timeout".to_string())
             }
         }
     }
 
-    /// 处理全局写命令
+    /// Handle global write commands
     async fn handle_global_write(&self, cmd: Command) -> Result<RespValue, String> {
         match cmd {
             Command::FlushDb => {
-                // 清空所有 shard
+                // Clear all shards
                 let state_machines = self.state_machines.lock();
                 for sm in state_machines.values() {
                     sm.store().flushdb();
@@ -483,11 +483,11 @@ impl RedRaftNode {
         }
     }
 
-    /// 启动节点
+    /// Start node
     pub async fn start(&self) -> Result<(), String> {
         info!("Starting RedRaft node: {}", self.node_id);
         
-        // 启动 MultiRaftDriver
+        // Start MultiRaftDriver
         let driver = self.driver.clone();
         tokio::spawn(async move {
             driver.main_loop().await;
@@ -497,14 +497,14 @@ impl RedRaftNode {
         Ok(())
     }
 
-    /// 停止节点
+    /// Stop node
     pub fn stop(&self) {
         info!("Stopping RedRaft node: {}", self.node_id);
         self.driver.stop();
     }
 }
 
-/// Raft 组事件处理器
+/// Raft group event handler
 struct RaftGroupHandler {
     raft_state: Arc<tokio::sync::Mutex<RaftState>>,
 }
@@ -517,7 +517,7 @@ impl raft::multi_raft_driver::HandleEventTrait for RaftGroupHandler {
     }
 }
 
-/// 节点回调实现
+/// Node callback implementation
 struct NodeCallbacks {
     #[allow(dead_code)]
     node_id: String,
@@ -767,7 +767,7 @@ impl TimerService for NodeCallbacks {
 
 impl RaftCallbacks for NodeCallbacks {}
 
-/// 将 StoreApplyResult 转换为 RespValue
+/// Convert StoreApplyResult to RespValue
 fn apply_result_to_resp(result: StoreApplyResult) -> RespValue {
     match result {
         StoreApplyResult::Ok => RespValue::SimpleString("OK".to_string()),

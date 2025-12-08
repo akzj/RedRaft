@@ -1,6 +1,6 @@
-//! 集群元数据定义
+//! Cluster metadata definitions
 //!
-//! 包含节点、分片、路由表等核心数据结构
+//! Contains core data structures such as nodes, shards, and routing tables
 
 mod node;
 mod shard;

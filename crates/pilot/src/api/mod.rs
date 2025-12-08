@@ -1,6 +1,6 @@
-//! API 模块
+//! API module
 //!
-//! 提供 HTTP 管理 API 和 gRPC 节点通信 API
+//! Provides HTTP management API and gRPC node communication API
 
 mod http;
 

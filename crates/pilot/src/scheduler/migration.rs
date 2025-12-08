@@ -1,4 +1,4 @@
-//! 迁移任务管理
+//! Migration task management
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
@@ -7,20 +7,20 @@ use std::collections::HashMap;
 
 use crate::metadata::{NodeId, ShardId};
 
-/// 迁移状态
+/// Migration status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MigrationStatus {
-    /// 等待执行
+    /// Pending execution
     Pending,
-    /// 准备中（目标节点准备接收）
+    /// Preparing (target node preparing to receive)
     Preparing,
-    /// 迁移中（数据传输）
+    /// In progress (data transfer)
     InProgress,
-    /// 完成
+    /// Completed
     Completed,
-    /// 失败
+    /// Failed
     Failed,
-    /// 已取消
+    /// Cancelled
     Cancelled,
 }
 
@@ -37,33 +37,33 @@ impl std::fmt::Display for MigrationStatus {
     }
 }
 
-/// 迁移任务
+/// Migration task
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigrationTask {
-    /// 任务 ID
+    /// Task ID
     pub id: String,
-    /// 分片 ID
+    /// Shard ID
     pub shard_id: ShardId,
-    /// 源节点
+    /// Source node
     pub from_node: NodeId,
-    /// 目标节点
+    /// Target node
     pub to_node: NodeId,
-    /// 任务状态
+    /// Task status
     pub status: MigrationStatus,
-    /// 创建时间
+    /// Creation time
     pub created_at: DateTime<Utc>,
-    /// 开始时间
+    /// Start time
     pub started_at: Option<DateTime<Utc>>,
-    /// 完成时间
+    /// Completion time
     pub completed_at: Option<DateTime<Utc>>,
-    /// 进度 (0-100)
+    /// Progress (0-100)
     pub progress: u8,
-    /// 错误信息
+    /// Error message
     pub error: Option<String>,
 }
 
 impl MigrationTask {
-    /// 创建新任务
+    /// Create new task
     pub fn new(shard_id: ShardId, from_node: NodeId, to_node: NodeId) -> Self {
         let id = format!(
             "migration_{}_{}_{}",
@@ -86,38 +86,38 @@ impl MigrationTask {
         }
     }
 
-    /// 开始迁移
+    /// Start migration
     pub fn start(&mut self) {
         self.status = MigrationStatus::InProgress;
         self.started_at = Some(Utc::now());
     }
 
-    /// 更新进度
+    /// Update progress
     pub fn update_progress(&mut self, progress: u8) {
         self.progress = progress.min(100);
     }
 
-    /// 完成迁移
+    /// Complete migration
     pub fn complete(&mut self) {
         self.status = MigrationStatus::Completed;
         self.completed_at = Some(Utc::now());
         self.progress = 100;
     }
 
-    /// 迁移失败
+    /// Migration failed
     pub fn fail(&mut self, error: String) {
         self.status = MigrationStatus::Failed;
         self.completed_at = Some(Utc::now());
         self.error = Some(error);
     }
 
-    /// 取消迁移
+    /// Cancel migration
     pub fn cancel(&mut self) {
         self.status = MigrationStatus::Cancelled;
         self.completed_at = Some(Utc::now());
     }
 
-    /// 检查是否已完成（包括失败和取消）
+    /// Check if completed (including failed and cancelled)
     pub fn is_finished(&self) -> bool {
         matches!(
             self.status,
@@ -126,21 +126,21 @@ impl MigrationTask {
     }
 }
 
-/// 迁移管理器
+/// Migration manager
 pub struct MigrationManager {
-    /// 所有迁移任务
+    /// All migration tasks
     tasks: RwLock<HashMap<String, MigrationTask>>,
 }
 
 impl MigrationManager {
-    /// 创建迁移管理器
+    /// Create migration manager
     pub fn new() -> Self {
         Self {
             tasks: RwLock::new(HashMap::new()),
         }
     }
 
-    /// 创建迁移任务
+    /// Create migration task
     pub fn create_task(&self, shard_id: ShardId, from_node: NodeId, to_node: NodeId) -> MigrationTask {
         let task = MigrationTask::new(shard_id, from_node, to_node);
         let task_clone = task.clone();
@@ -148,12 +148,12 @@ impl MigrationManager {
         task_clone
     }
 
-    /// 获取任务
+    /// Get task
     pub fn get_task(&self, task_id: &str) -> Option<MigrationTask> {
         self.tasks.read().get(task_id).cloned()
     }
 
-    /// 获取分片的活动迁移任务
+    /// Get active migration task for shard
     pub fn get_active_task_for_shard(&self, shard_id: &ShardId) -> Option<MigrationTask> {
         self.tasks
             .read()
@@ -162,7 +162,7 @@ impl MigrationManager {
             .cloned()
     }
 
-    /// 获取所有活动任务
+    /// Get all active tasks
     pub fn active_tasks(&self) -> Vec<MigrationTask> {
         self.tasks
             .read()
@@ -172,12 +172,12 @@ impl MigrationManager {
             .collect()
     }
 
-    /// 获取所有任务
+    /// Get all tasks
     pub fn all_tasks(&self) -> Vec<MigrationTask> {
         self.tasks.read().values().cloned().collect()
     }
 
-    /// 开始任务
+    /// Start task
     pub fn start_task(&self, task_id: &str) -> bool {
         if let Some(task) = self.tasks.write().get_mut(task_id) {
             task.start();
@@ -187,7 +187,7 @@ impl MigrationManager {
         }
     }
 
-    /// 更新任务进度
+    /// Update task progress
     pub fn update_progress(&self, task_id: &str, progress: u8) -> bool {
         if let Some(task) = self.tasks.write().get_mut(task_id) {
             task.update_progress(progress);
@@ -197,7 +197,7 @@ impl MigrationManager {
         }
     }
 
-    /// 完成任务
+    /// Complete task
     pub fn complete_task(&self, task_id: &str) -> bool {
         if let Some(task) = self.tasks.write().get_mut(task_id) {
             task.complete();
@@ -207,7 +207,7 @@ impl MigrationManager {
         }
     }
 
-    /// 任务失败
+    /// Task failed
     pub fn fail_task(&self, task_id: &str, error: String) -> bool {
         if let Some(task) = self.tasks.write().get_mut(task_id) {
             task.fail(error);
@@ -217,7 +217,7 @@ impl MigrationManager {
         }
     }
 
-    /// 取消任务
+    /// Cancel task
     pub fn cancel_task(&self, task_id: &str) -> bool {
         if let Some(task) = self.tasks.write().get_mut(task_id) {
             task.cancel();
@@ -227,11 +227,11 @@ impl MigrationManager {
         }
     }
 
-    /// 清理已完成的任务（保留最近 N 个）
+    /// Clean up completed tasks (keep most recent N)
     pub fn cleanup(&self, keep_count: usize) {
         let mut tasks = self.tasks.write();
         
-        // 获取已完成任务并按完成时间排序
+        // Get completed tasks and sort by completion time
         let mut finished: Vec<_> = tasks
             .values()
             .filter(|t| t.is_finished())
@@ -242,7 +242,7 @@ impl MigrationManager {
             b.completed_at.cmp(&a.completed_at)
         });
 
-        // 删除超出保留数量的任务
+        // Remove tasks beyond keep count
         for task in finished.into_iter().skip(keep_count) {
             tasks.remove(&task.id);
         }
@@ -255,7 +255,7 @@ impl Default for MigrationManager {
     }
 }
 
-/// 生成随机后缀
+/// Generate random suffix
 fn rand_suffix() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()

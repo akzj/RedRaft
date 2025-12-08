@@ -1,6 +1,6 @@
-//! Redis 协议服务器
+//! Redis protocol server
 //!
-//! 处理 Redis 客户端连接和命令
+//! Handles Redis client connections and commands
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use tracing::{error, info, warn};
 use crate::node::RedRaftNode;
 use resp::{AsyncRespEncoder, AsyncRespParser, Command, RespValue};
 
-/// Redis 协议服务器
+/// Redis protocol server
 pub struct RedisServer {
     node: Arc<RedRaftNode>,
     addr: SocketAddr,
@@ -22,7 +22,7 @@ impl RedisServer {
         Self { node, addr }
     }
 
-    /// 启动服务器
+    /// Start server
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind(self.addr).await?;
         info!("Redis server listening on {}", self.addr);
@@ -46,7 +46,7 @@ impl RedisServer {
     }
 }
 
-/// 处理客户端连接
+/// Handle client connection
 async fn handle_client(
     stream: TcpStream,
     node: Arc<RedRaftNode>,
@@ -56,18 +56,18 @@ async fn handle_client(
     let mut encoder = AsyncRespEncoder::new(writer);
 
     loop {
-        // 解析 RESP 命令
+        // Parse RESP command
         let resp_value = match parser.parse().await {
             Ok(v) => v,
             Err(e) => {
-                // 发送错误响应
+                // Send error response
                 let error = RespValue::Error(format!("ERR {}", e));
                 encoder.encode(&error).await?;
                 break;
             }
         };
 
-        // 转换为类型安全的 Command
+        // Convert to type-safe Command
         let command = match Command::try_from(&resp_value) {
             Ok(cmd) => cmd,
             Err(e) => {
@@ -77,7 +77,7 @@ async fn handle_client(
             }
         };
 
-        // 处理命令
+        // Handle command
         let response = match node.handle_command(command).await {
             Ok(resp) => resp,
             Err(e) => RespValue::Error(format!("ERR {}", e)),

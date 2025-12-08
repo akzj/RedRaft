@@ -1,6 +1,6 @@
-//! HTTP 管理 API
+//! HTTP management API
 //!
-//! 提供集群管理的 RESTful API
+//! Provides RESTful API for cluster management
 
 use axum::{
     extract::{Path, Query, State},
@@ -17,43 +17,43 @@ use crate::metadata::{NodeInfo, ShardInfo, SplitTask};
 use crate::node_manager::RegisterResult;
 use crate::Pilot;
 
-/// HTTP API 服务
+/// HTTP API service
 pub struct HttpApi {
     pilot: Arc<Pilot>,
 }
 
 impl HttpApi {
-    /// 创建 HTTP API
+    /// Create HTTP API
     pub fn new(pilot: Arc<Pilot>) -> Self {
         Self { pilot }
     }
 
-    /// 创建路由
+    /// Create router
     pub fn router(self) -> Router {
         let pilot = self.pilot;
 
         Router::new()
-            // 集群
+            // Cluster
             .route("/api/v1/cluster", get(get_cluster))
             .route("/api/v1/cluster/stats", get(get_cluster_stats))
-            // 节点
+            // Nodes
             .route("/api/v1/nodes", get(list_nodes))
             .route("/api/v1/nodes", post(register_node))
             .route("/api/v1/nodes/:node_id", get(get_node))
             .route("/api/v1/nodes/:node_id/heartbeat", post(node_heartbeat))
             .route("/api/v1/nodes/:node_id/drain", post(drain_node))
             .route("/api/v1/nodes/:node_id", axum::routing::delete(remove_node))
-            // 分片
+            // Shards
             .route("/api/v1/shards", get(list_shards))
             .route("/api/v1/shards", post(create_shard))
             .route("/api/v1/shards/:shard_id", get(get_shard))
             .route("/api/v1/shards/:shard_id/migrate", post(migrate_shard))
-            // 路由表
+            // Routing table
             .route("/api/v1/routing", get(get_routing_table))
-            // 迁移任务
+            // Migration tasks
             .route("/api/v1/migrations", get(list_migrations))
             .route("/api/v1/migrations/:task_id", get(get_migration))
-            // 分裂任务
+            // Split tasks
             .route("/api/v1/shards/:shard_id/split", post(split_shard))
             .route("/api/v1/splits", get(list_splits))
             .route("/api/v1/splits/:task_id", get(get_split))
@@ -61,14 +61,14 @@ impl HttpApi {
                 "/api/v1/splits/:task_id",
                 axum::routing::delete(cancel_split),
             )
-            // 调度
+            // Scheduling
             .route("/api/v1/schedule", post(trigger_schedule))
             .route("/api/v1/rebalance", post(trigger_rebalance))
             .with_state(pilot)
     }
 }
 
-// ==================== 响应类型 ====================
+// ==================== Response Types ====================
 
 #[derive(Serialize)]
 struct ApiResponse<T> {
@@ -95,7 +95,7 @@ impl<T: Serialize> ApiResponse<T> {
     }
 }
 
-// ==================== 请求类型 ====================
+// ==================== Request Types ====================
 
 #[derive(Deserialize)]
 struct RegisterNodeRequest {
@@ -112,9 +112,9 @@ struct MigrateShardRequest {
 
 #[derive(Deserialize)]
 struct CreateShardRequest {
-    /// 分片 ID（可选，不提供则自动生成）
+    /// Shard ID (optional, auto-generated if not provided)
     shard_id: Option<String>,
-    /// 副本节点列表
+    /// Replica node list
     replica_nodes: Vec<String>,
 }
 
@@ -125,15 +125,15 @@ struct RegisterResponse {
 
 #[derive(Deserialize)]
 struct SplitShardRequest {
-    /// 分裂点槽位（目标分片将负责 [split_slot, source.end)）
+    /// Split point slot (target shard will be responsible for [split_slot, source.end))
     split_slot: u32,
-    /// 目标分片 ID（必须提供，且目标分片必须已存在且健康）
+    /// Target shard ID (must be provided, and target shard must exist and be healthy)
     target_shard_id: String,
 }
 
-// ==================== 处理函数 ====================
+// ==================== Handler Functions ====================
 
-// 集群
+// Cluster
 async fn get_cluster(State(pilot): State<Arc<Pilot>>) -> impl IntoResponse {
     let metadata = pilot.metadata().await;
     ApiResponse::ok(ClusterOverview {
@@ -159,7 +159,7 @@ async fn get_cluster_stats(State(pilot): State<Arc<Pilot>>) -> impl IntoResponse
     ApiResponse::ok(metadata.stats())
 }
 
-// 节点
+// Nodes
 async fn list_nodes(State(pilot): State<Arc<Pilot>>) -> impl IntoResponse {
     let nodes = pilot.node_manager().list_nodes().await;
     ApiResponse::ok(nodes)
@@ -182,10 +182,10 @@ async fn register_node(
     let node = NodeInfo::new(req.node_id.clone(), req.grpc_addr, req.redis_addr);
     let result = pilot.node_manager().register(node).await;
 
-    // 触发调度
+    // Trigger scheduling
     let _ = pilot.scheduler().schedule_shard_placement().await;
 
-    // 保存元数据
+    // Save metadata
     if let Err(e) = pilot.save().await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -237,7 +237,7 @@ async fn remove_node(
     }
 }
 
-// 分片
+// Shards
 async fn list_shards(State(pilot): State<Arc<Pilot>>) -> impl IntoResponse {
     let metadata = pilot.metadata().await;
     let shards: Vec<_> = metadata.shards.values().cloned().collect();
@@ -347,7 +347,7 @@ async fn get_routing_table(
     }
 }
 
-// 迁移任务
+// Migration tasks
 async fn list_migrations(State(pilot): State<Arc<Pilot>>) -> impl IntoResponse {
     let tasks = pilot.scheduler().migration_manager().all_tasks();
     ApiResponse::ok(tasks)
@@ -363,7 +363,7 @@ async fn get_migration(
     }
 }
 
-// 调度
+// Scheduling
 async fn trigger_schedule(State(pilot): State<Arc<Pilot>>) -> impl IntoResponse {
     let assignments = pilot.scheduler().schedule_shard_placement().await;
     let _ = pilot.save().await;
@@ -390,7 +390,7 @@ struct RebalanceResult {
     migrations: usize,
 }
 
-// 分裂任务
+// Split tasks
 async fn split_shard(
     State(pilot): State<Arc<Pilot>>,
     Path(shard_id): Path<String>,

@@ -1,4 +1,4 @@
-//! 集群元数据
+//! Cluster metadata
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -6,31 +6,31 @@ use std::collections::HashMap;
 
 use super::{KeyRange, NodeId, NodeInfo, RoutingTable, ShardId, ShardInfo, TOTAL_SLOTS};
 
-/// 集群元数据
+/// Cluster metadata
 ///
-/// 包含集群的完整状态信息
+/// Contains complete cluster state information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterMetadata {
-    /// 集群名称
+    /// Cluster name
     pub name: String,
-    /// 创建时间
+    /// Creation time
     pub created_at: DateTime<Utc>,
-    /// 最后更新时间
+    /// Last update time
     pub updated_at: DateTime<Utc>,
-    /// 节点信息
+    /// Node information
     pub nodes: HashMap<NodeId, NodeInfo>,
-    /// 分片信息
+    /// Shard information
     pub shards: HashMap<ShardId, ShardInfo>,
-    /// 路由表
+    /// Routing table
     pub routing_table: RoutingTable,
-    /// 默认副本因子
+    /// Default replica factor
     pub default_replica_factor: u32,
-    /// 预创建分片数
+    /// Pre-created shard count
     pub initial_shard_count: u32,
 }
 
 impl ClusterMetadata {
-    /// 创建新集群
+    /// Create new cluster
     pub fn new(name: String) -> Self {
         let now = Utc::now();
         Self {
@@ -45,7 +45,7 @@ impl ClusterMetadata {
         }
     }
 
-    /// 初始化分片（预创建）
+    /// Initialize shards (pre-create)
     pub fn init_shards(&mut self) {
         let shard_count = self.initial_shard_count;
         let slots_per_shard = TOTAL_SLOTS / shard_count;
@@ -54,7 +54,7 @@ impl ClusterMetadata {
             let shard_id = format!("shard_{:04}", i);
             let start = i * slots_per_shard;
             let end = if i == shard_count - 1 {
-                TOTAL_SLOTS // 最后一个分片包含剩余槽位
+                TOTAL_SLOTS // Last shard includes remaining slots
             } else {
                 (i + 1) * slots_per_shard
             };
@@ -69,31 +69,31 @@ impl ClusterMetadata {
         self.touch();
     }
 
-    /// 创建新分片
+    /// Create new shard
     ///
-    /// # 参数
-    /// - `shard_id`: 分片 ID（如果为 None，自动生成）
-    /// - `replica_nodes`: 初始副本节点列表
+    /// # Arguments
+    /// - `shard_id`: Shard ID (auto-generated if None)
+    /// - `replica_nodes`: Initial replica node list
     ///
-    /// # 返回
-    /// - Ok(ShardInfo): 创建成功
-    /// - Err(String): 创建失败原因
+    /// # Returns
+    /// - Ok(ShardInfo): Creation successful
+    /// - Err(String): Creation failure reason
     ///
-    /// # 说明
-    /// 新创建的分片是空的，没有分配任何 slot。后续需要通过数据迁移来分配 slot。
+    /// # Note
+    /// Newly created shards are empty with no assigned slots. Slots need to be assigned via data migration later.
     pub fn create_shard(
         &mut self,
         shard_id: Option<String>,
         replica_nodes: Vec<NodeId>,
     ) -> Result<ShardInfo, String> {
-        // 验证节点存在
+        // Validate nodes exist
         for node_id in &replica_nodes {
             if !self.nodes.contains_key(node_id) {
                 return Err(format!("Node {} does not exist", node_id));
             }
         }
 
-        // 生成分片 ID
+        // Generate shard ID
         let shard_id = shard_id.unwrap_or_else(|| {
             let max_id = self
                 .shards
@@ -104,16 +104,16 @@ impl ClusterMetadata {
             format!("shard_{:04}", max_id + 1)
         });
 
-        // 检查分片 ID 是否已存在
+        // Check if shard ID already exists
         if self.shards.contains_key(&shard_id) {
             return Err(format!("Shard {} already exists", shard_id));
         }
 
-        // 创建空分片（未分配 slot）
+        // Create empty shard (no assigned slots)
         let key_range = KeyRange::empty();
         let mut shard = ShardInfo::new(shard_id.clone(), key_range, self.default_replica_factor);
 
-        // 添加副本节点
+        // Add replica nodes
         for node_id in &replica_nodes {
             shard.add_replica(node_id.clone());
             if let Some(node) = self.nodes.get_mut(node_id) {
@@ -121,17 +121,17 @@ impl ClusterMetadata {
             }
         }
 
-        // 设置第一个节点为 leader（如果有）
+        // Set first node as leader (if any)
         if let Some(leader) = replica_nodes.first() {
             shard.set_leader(leader.clone());
             shard.status = super::ShardStatus::Normal;
         }
 
-        // 更新路由表（只设置节点映射，不分配 slot）
+        // Update routing table (only set node mapping, don't assign slots)
         self.routing_table
             .set_shard_nodes(shard_id.clone(), replica_nodes);
 
-        // 存储分片
+        // Store shard
         let result = shard.clone();
         self.shards.insert(shard_id, shard);
 
@@ -139,13 +139,13 @@ impl ClusterMetadata {
         Ok(result)
     }
 
-    /// 更新时间戳
+    /// Update timestamp
     fn touch(&mut self) {
         self.updated_at = Utc::now();
         self.routing_table.bump_version();
     }
 
-    /// 注册节点
+    /// Register node
     pub fn register_node(&mut self, node: NodeInfo) -> bool {
         let node_id = node.id.clone();
         let grpc_addr = node.grpc_addr.clone();
@@ -158,12 +158,12 @@ impl ClusterMetadata {
         is_new
     }
 
-    /// 移除节点
+    /// Remove node
     pub fn remove_node(&mut self, node_id: &NodeId) -> Option<NodeInfo> {
         let node = self.nodes.remove(node_id)?;
         self.routing_table.remove_node(node_id);
 
-        // 从所有分片中移除该节点
+        // Remove node from all shards
         for shard in self.shards.values_mut() {
             shard.remove_replica(node_id);
         }
@@ -172,7 +172,7 @@ impl ClusterMetadata {
         Some(node)
     }
 
-    /// 更新节点心跳
+    /// Update node heartbeat
     pub fn node_heartbeat(&mut self, node_id: &NodeId) -> bool {
         if let Some(node) = self.nodes.get_mut(node_id) {
             node.touch();
@@ -182,7 +182,7 @@ impl ClusterMetadata {
         }
     }
 
-    /// 获取在线节点
+    /// Get online nodes
     pub fn online_nodes(&self) -> Vec<&NodeInfo> {
         use super::NodeStatus;
         self.nodes
@@ -191,24 +191,24 @@ impl ClusterMetadata {
             .collect()
     }
 
-    /// 分配分片到节点
+    /// Assign shard to node
     pub fn assign_shard_to_node(&mut self, shard_id: &ShardId, node_id: &NodeId) -> bool {
-        // 检查节点和分片是否存在
+        // Check if node and shard exist
         if !self.nodes.contains_key(node_id) || !self.shards.contains_key(shard_id) {
             return false;
         }
 
-        // 更新分片
+        // Update shard
         if let Some(shard) = self.shards.get_mut(shard_id) {
             shard.add_replica(node_id.clone());
         }
 
-        // 更新节点
+        // Update node
         if let Some(node) = self.nodes.get_mut(node_id) {
             node.add_shard(shard_id.clone());
         }
 
-        // 更新路由表
+        // Update routing table
         if let Some(shard) = self.shards.get(shard_id) {
             self.routing_table
                 .set_shard_nodes(shard_id.clone(), shard.replicas.clone());
@@ -218,13 +218,13 @@ impl ClusterMetadata {
         true
     }
 
-    /// 设置分片 leader
+    /// Set shard leader
     pub fn set_shard_leader(&mut self, shard_id: &ShardId, leader_id: &NodeId) -> bool {
         if let Some(shard) = self.shards.get_mut(shard_id) {
             if shard.replicas.contains(leader_id) {
                 shard.set_leader(leader_id.clone());
 
-                // 更新路由表，将 leader 放在第一位
+                // Update routing table, put leader first
                 let mut nodes = shard.replicas.clone();
                 if let Some(pos) = nodes.iter().position(|n| n == leader_id) {
                     nodes.remove(pos);
@@ -239,7 +239,7 @@ impl ClusterMetadata {
         false
     }
 
-    /// 更新分片状态
+    /// Update shard status
     pub fn set_shard_status(&mut self, shard_id: &ShardId, status: super::ShardStatus) -> bool {
         if let Some(shard) = self.shards.get_mut(shard_id) {
             shard.status = status;
@@ -250,7 +250,7 @@ impl ClusterMetadata {
         }
     }
 
-    /// 获取需要副本的分片（副本数不足）
+    /// Get shards needing replicas (insufficient replica count)
     pub fn shards_needing_replicas(&self) -> Vec<&ShardInfo> {
         self.shards
             .values()
@@ -258,7 +258,7 @@ impl ClusterMetadata {
             .collect()
     }
 
-    /// 获取没有 leader 的分片
+    /// Get shards without leader
     pub fn shards_without_leader(&self) -> Vec<&ShardInfo> {
         self.shards
             .values()
@@ -266,7 +266,7 @@ impl ClusterMetadata {
             .collect()
     }
 
-    /// 获取集群统计信息
+    /// Get cluster statistics
     pub fn stats(&self) -> ClusterStats {
         use super::{NodeStatus, ShardStatus};
 
@@ -290,7 +290,7 @@ impl ClusterMetadata {
     }
 }
 
-/// 集群统计信息
+/// Cluster statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterStats {
     pub total_nodes: usize,

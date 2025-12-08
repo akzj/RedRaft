@@ -1,6 +1,6 @@
-//! KV 状态机实现
+//! KV state machine implementation
 //!
-//! 将 Raft 日志应用到键值存储，使用 RedisStore trait 进行存储
+//! Applies Raft logs to key-value storage, using RedisStore trait for storage
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -12,21 +12,21 @@ use resp::Command;
 
 use crate::node::PendingRequests;
 
-/// KV 状态机
+/// KV state machine
 #[derive(Clone)]
 pub struct KVStateMachine {
-    /// 存储后端（支持内存或持久化存储）
+    /// Storage backend (supports memory or persistent storage)
     store: Arc<dyn RedisStore>,
-    /// 版本号（单调递增）
+    /// Version number (monotonically increasing)
     version: Arc<std::sync::atomic::AtomicU64>,
-    /// 等待中的请求追踪器
+    /// Pending request tracker
     pending_requests: Option<PendingRequests>,
-    /// 应用结果缓存 (index -> result)，用于在 client_response 中返回真实结果
+    /// Apply result cache (index -> result), used to return actual results in client_response
     apply_results: Arc<parking_lot::Mutex<std::collections::HashMap<u64, StoreApplyResult>>>,
 }
 
 impl KVStateMachine {
-    /// 创建新的 KV 状态机，使用指定的存储后端
+    /// Create new KV state machine with specified storage backend
     pub fn new(store: Arc<dyn RedisStore>) -> Self {
         Self {
             store,
@@ -36,7 +36,7 @@ impl KVStateMachine {
         }
     }
 
-    /// 创建带有请求追踪的 KV 状态机
+    /// Create KV state machine with request tracking
     pub fn with_pending_requests(store: Arc<dyn RedisStore>, pending_requests: PendingRequests) -> Self {
         Self {
             store,
@@ -46,12 +46,12 @@ impl KVStateMachine {
         }
     }
 
-    /// 获取存储后端引用（用于读操作）
+    /// Get storage backend reference (for read operations)
     pub fn store(&self) -> &Arc<dyn RedisStore> {
         &self.store
     }
 
-    /// 获取键值对数量
+    /// Get key-value pair count
     pub fn size(&self) -> usize {
         self.store.dbsize()
     }
@@ -71,7 +71,7 @@ impl StateMachine for KVStateMachine {
         term: u64,
         cmd: raft::Command,
     ) -> ApplyResult<()> {
-        // 反序列化为 Command
+        // Deserialize to Command
         let command: Command = match bincode::serde::decode_from_slice(&cmd, bincode::config::standard()) {
             Ok((cmd, _)) => cmd,
             Err(e) => {
@@ -88,10 +88,10 @@ impl StateMachine for KVStateMachine {
             index, term, command
         );
 
-        // 执行命令并保存结果
+        // Execute command and save result
         let result = self.store.apply(&command);
         
-        // 缓存结果，供 client_response 使用
+        // Cache result for use in client_response
         self.apply_results.lock().insert(index, result);
         self.inc_version();
 
@@ -113,7 +113,7 @@ impl StateMachine for KVStateMachine {
         let apply_results = self.apply_results.clone();
         let from = from.clone();
 
-        // 使用 spawn_blocking 避免阻塞异步运行时
+        // Use spawn_blocking to avoid blocking async runtime
         tokio::task::spawn_blocking(move || {
             info!(
                 "Installing snapshot for {} at index {}, term {}, request_id: {:?}, data_size: {} bytes",
@@ -122,10 +122,10 @@ impl StateMachine for KVStateMachine {
 
             match store.restore_from_snapshot(&data) {
                 Ok(()) => {
-                    // 更新版本号为快照索引
+                    // Update version number to snapshot index
                     version.store(index, std::sync::atomic::Ordering::SeqCst);
                     
-                    // 清理旧的 apply 结果缓存（快照之前的结果已经无意义）
+                    // Clear old apply result cache (results before snapshot are meaningless)
                     apply_results.lock().clear();
                     
                     info!(
@@ -158,14 +158,14 @@ impl StateMachine for KVStateMachine {
             raft::StorageError::SnapshotCreationFailed(format!("Failed to create snapshot: {}", e))
         })?;
 
-        // 获取当前版本作为快照索引
+        // Get current version as snapshot index
         let version = self.version.load(std::sync::atomic::Ordering::SeqCst);
-        let last_index = version; // 使用版本号作为索引
+        let last_index = version; // Use version number as index
 
-        // 创建快照
+        // Create snapshot
         let snapshot = raft::Snapshot {
             index: last_index,
-            term: 0, // 快照不包含 term 信息
+            term: 0, // Snapshot does not contain term information
             data: snapshot_data,
             config,
         };
@@ -188,11 +188,11 @@ impl StateMachine for KVStateMachine {
         request_id: RequestId,
         result: ClientResult<u64>,
     ) -> ClientResult<()> {
-        // 当 Raft 提交完成时通知等待的客户端
+        // Notify waiting clients when Raft commit completes
         if let Some(ref pending) = self.pending_requests {
             let store_result = match result {
                 Ok(index) => {
-                    // 从缓存中获取 apply 结果
+                    // Get apply result from cache
                     self.apply_results
                         .lock()
                         .remove(&index)
@@ -251,7 +251,7 @@ mod tests {
         let sm = KVStateMachine::new(store);
         let raft_id = RaftId::new("test".to_string(), "node1".to_string());
 
-        // 先插入
+        // Insert first
         let cmd = Command::Set {
             key: b"key1".to_vec(),
             value: b"value1".to_vec(),
@@ -263,7 +263,7 @@ mod tests {
         let command = bincode::serde::encode_to_vec(&cmd, bincode::config::standard()).unwrap();
         sm.apply_command(&raft_id, 1, 1, command).await.unwrap();
 
-        // 删除
+        // Delete
         let cmd = Command::Del {
             keys: vec![b"key1".to_vec()],
         };

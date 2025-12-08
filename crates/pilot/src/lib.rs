@@ -1,12 +1,12 @@
-//! Pilot - 分布式控制面
+//! Pilot - Distributed control plane
 //!
-//! 负责集群的分片管理、路由管理和数据迁移
+//! Responsible for cluster shard management, routing management, and data migration
 //!
-//! # 功能
-//! - 节点注册与心跳管理
-//! - 分片创建与放置
-//! - 路由表维护与分发
-//! - 数据迁移协调
+//! # Features
+//! - Node registration and heartbeat management
+//! - Shard creation and placement
+//! - Routing table maintenance and distribution
+//! - Data migration coordination
 //!
 //! # 使用示例
 //! ```ignore
@@ -34,16 +34,16 @@ use scheduler::Scheduler;
 use storage::{FileStorage, StorageError};
 use watch::RoutingTableWatcher;
 
-/// Pilot 配置
+/// Pilot configuration
 #[derive(Debug, Clone)]
 pub struct PilotConfig {
-    /// 集群名称
+    /// Cluster name
     pub cluster_name: String,
-    /// 数据目录
+    /// Data directory
     pub data_dir: String,
-    /// HTTP API 监听地址
+    /// HTTP API listen address
     pub http_addr: String,
-    /// 节点管理器配置
+    /// Node manager configuration
     pub node_manager: NodeManagerConfig,
 }
 
@@ -58,7 +58,7 @@ impl Default for PilotConfig {
     }
 }
 
-/// Pilot 控制面
+/// Pilot control plane
 pub struct Pilot {
     config: PilotConfig,
     storage: FileStorage,
@@ -69,7 +69,7 @@ pub struct Pilot {
 }
 
 impl Pilot {
-    /// 创建 Pilot 实例
+    /// Create Pilot instance
     pub async fn new(config: PilotConfig) -> Result<Self, StorageError> {
         let storage = FileStorage::new(&config.data_dir);
         let metadata = storage.load_or_create(&config.cluster_name).await?;
@@ -98,61 +98,61 @@ impl Pilot {
         })
     }
 
-    /// 获取配置
+    /// Get configuration
     pub fn config(&self) -> &PilotConfig {
         &self.config
     }
 
-    /// 获取元数据（只读）
+    /// Get metadata (read-only)
     pub async fn metadata(&self) -> ClusterMetadata {
         self.metadata.read().await.clone()
     }
 
-    /// 获取元数据（可写）
+    /// Get metadata (writable)
     /// 
-    /// 注意：更新路由表后，会自动通知等待的 watch
+    /// Note: After updating routing table, will automatically notify waiting watches
     pub async fn metadata_mut(&self) -> tokio::sync::RwLockWriteGuard<'_, ClusterMetadata> {
         self.metadata.write().await
     }
 
-    /// 通知路由表 watch（在路由表更新后调用）
+    /// Notify routing table watches (call after routing table updates)
     pub async fn notify_routing_watchers(&self) {
         let version = self.metadata.read().await.routing_table.version;
         self.routing_watcher.notify_version(version).await;
     }
 
-    /// 获取路由表
+    /// Get routing table
     pub async fn routing_table(&self) -> metadata::RoutingTable {
         self.metadata.read().await.routing_table.clone()
     }
 
-    /// 获取节点管理器
+    /// Get node manager
     pub fn node_manager(&self) -> &Arc<NodeManager> {
         &self.node_manager
     }
 
-    /// 获取调度器
+    /// Get scheduler
     pub fn scheduler(&self) -> &Scheduler {
         &self.scheduler
     }
 
-    /// 获取路由表 Watch 管理器
+    /// Get routing table watch manager
     pub fn routing_watcher(&self) -> &RoutingTableWatcher {
         &self.routing_watcher
     }
 
-    /// 保存元数据
+    /// Save metadata
     pub async fn save(&self) -> Result<(), StorageError> {
         let metadata = self.metadata.read().await;
         self.storage.save(&metadata).await
     }
 
-    /// 启动心跳检查
+    /// Start heartbeat checker
     pub fn start_heartbeat_checker(&self) -> tokio::task::JoinHandle<()> {
         self.node_manager.clone().start_heartbeat_checker()
     }
 
-    /// 启动定期保存任务
+    /// Start periodic save task
     pub fn start_periodic_save(self: Arc<Self>, interval_secs: u64) -> tokio::task::JoinHandle<()> {
         use tokio::time::{interval, Duration};
         

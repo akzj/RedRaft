@@ -10,27 +10,27 @@ use crate::message::{AppendEntriesRequest, AppendEntriesResponse};
 use crate::types::{RaftId, RequestId};
 
 impl RaftState {
-    /// 处理心跳超时
+    /// Handle heartbeat timeout
     pub(crate) async fn handle_heartbeat_timeout(&mut self) {
         if self.role != Role::Leader {
             return;
         }
 
-        // 执行高效的超时检查
+        // Perform efficient timeout check
         self.pipeline.periodic_timeout_check();
 
         self.broadcast_append_entries().await;
 
-        // 定期检查联合配置状态
+        // Periodically check joint configuration status
         if self.config.is_joint() {
             self.check_joint_exit_condition().await;
         }
 
-        // 定期清理超时的 ReadIndex 请求
+        // Periodically clean up timeout ReadIndex requests
         self.cleanup_timeout_read_indices().await;
     }
 
-    /// 广播 AppendEntries 请求
+    /// Broadcast AppendEntries requests
     pub(crate) async fn broadcast_append_entries(&mut self) {
         let current_term = self.current_term;
         let leader_id = self.id.clone();
@@ -39,17 +39,17 @@ impl RaftState {
         let now = Instant::now();
 
         self.reset_heartbeat_timer().await;
-        // 检查并执行到期的快照探测计划
+        // Check and execute expired snapshot probe plans
         self.process_pending_probes(now).await;
 
-        // 向所有节点发送日志或探测消息
+        // Send log or probe messages to all nodes
         let peers = self.get_effective_peers();
         for peer in peers {
             if peer == self.id {
                 continue;
             }
 
-            // 检查Follower是否正在安装快照
+            // Check if Follower is installing snapshot
             if let Some(state) = self.follower_snapshot_states.get(&peer) {
                 match state {
                     crate::message::InstallSnapshotState::Installing => {
@@ -63,20 +63,20 @@ impl RaftState {
                 }
             }
 
-            // 检查InFlight请求限制
+            // Check InFlight request limit
             if !self.pipeline.can_send_to_peer(&peer) {
                 debug!("Peer {} has too many inflight requests, skipping", peer);
                 continue;
             }
 
-            // 检查是否需要发送快照
+            // Check if snapshot needs to be sent
             let next_idx = *self.next_index.get(&peer).unwrap_or(&1);
             if next_idx <= self.last_snapshot_index {
                 self.send_snapshot_to(peer.clone()).await;
                 continue;
             }
 
-            // 构造AppendEntries请求
+            // Construct AppendEntries request
             let prev_log_index = next_idx - 1;
             let prev_log_term = if prev_log_index == 0 {
                 0
@@ -97,7 +97,7 @@ impl RaftState {
                 }
             };
 
-            // 使用反馈控制的批次大小
+            // Use feedback-controlled batch size
             let batch_size = self.pipeline.get_adaptive_batch_size(&peer);
             let high = std::cmp::min(next_idx + batch_size, last_log_index + 1);
             let entries = match self
@@ -168,7 +168,7 @@ impl RaftState {
         }
     }
 
-    /// 处理 AppendEntries 请求
+    /// Handle AppendEntries request
     pub(crate) async fn handle_append_entries_request(
         &mut self,
         sender: RaftId,
@@ -198,7 +198,7 @@ impl RaftState {
         let mut conflict_term = None;
         let mut matched_index = self.get_last_log_index();
 
-        // 处理更低任期的请求
+        // Handle request with lower term
         if request.term < self.current_term {
             warn!(
                 "Node {} rejecting AppendEntries from {} (term {}) - local term is {}",
@@ -247,7 +247,7 @@ impl RaftState {
             return;
         }
 
-        // 切换为Follower并重置状态
+        // Switch to Follower and reset state
         if self.role != Role::Follower || self.leader_id.as_ref() != Some(&request.leader_id) {
             info!(
                 "Node {} recognizing {} as leader for term {}",
@@ -274,9 +274,9 @@ impl RaftState {
         self.last_heartbeat = Instant::now();
         self.reset_election().await;
 
-        // 日志连续性检查 - 缓存本地日志 term 避免重复查询
+        // Log continuity check - cache local log term to avoid repeated queries
         let local_prev_log_term: Option<u64> = if request.prev_log_index == 0 {
-            Some(0) // index 0 的 term 是 0
+            Some(0) // index 0's term is 0
         } else if request.prev_log_index <= self.last_snapshot_index {
             Some(self.last_snapshot_term)
         } else {
@@ -292,8 +292,8 @@ impl RaftState {
         };
 
         let prev_log_ok = match local_prev_log_term {
-            // 对于 index 0，local_prev_log_term 是 Some(0)，
-            // 需要验证 request.prev_log_term 也是 0（Raft 协议要求）
+            // For index 0, local_prev_log_term is Some(0),
+            // need to verify request.prev_log_term is also 0 (Raft protocol requirement)
             Some(local_term) => local_term == request.prev_log_term,
             None => {
                 warn!(
@@ -321,7 +321,7 @@ impl RaftState {
                 Some(request.prev_log_index)
             };
 
-            // 复用已查询的 local_prev_log_term
+            // Reuse already queried local_prev_log_term
             conflict_term = local_prev_log_term;
 
             let resp = AppendEntriesResponse {
@@ -347,7 +347,7 @@ impl RaftState {
 
         success = true;
 
-        // 截断冲突日志并追加新日志
+        // Truncate conflicting logs and append new logs
         if request.prev_log_index < self.get_last_log_index() {
             let truncate_from_index = request.prev_log_index + 1;
 
@@ -403,7 +403,7 @@ impl RaftState {
             }
         }
 
-        // 验证并追加新日志
+        // Verify and append new logs
         if success && !request.entries.is_empty() {
             if let Some(first_entry) = request.entries.first() {
                 if first_entry.index != request.prev_log_index + 1 {
@@ -469,7 +469,7 @@ impl RaftState {
             }
         }
 
-        // 更新提交索引
+        // Update commit index
         if success && request.leader_commit > self.commit_index {
             let new_commit_index = std::cmp::min(request.leader_commit, self.get_last_log_index());
             if new_commit_index > self.commit_index {
@@ -481,7 +481,7 @@ impl RaftState {
             }
         }
 
-        // 发送响应
+        // Send response
         let resp = AppendEntriesResponse {
             term: self.current_term,
             success,
@@ -501,7 +501,7 @@ impl RaftState {
             )
             .await;
 
-        // 应用已提交的日志
+        // Apply committed logs
         if success && self.commit_index > self.last_applied {
             debug!(
                 "Node {} applying committed logs up to index {}",
@@ -511,7 +511,7 @@ impl RaftState {
         }
     }
 
-    /// 处理 AppendEntries 响应
+    /// Handle AppendEntries response
     pub(crate) async fn handle_append_entries_response(
         &mut self,
         peer: RaftId,
@@ -532,7 +532,7 @@ impl RaftState {
             self.id, peer, response.term, response.success, self.current_term
         );
 
-        // 处理更高任期
+        // Handle higher term
         if response.term > self.current_term {
             warn!(
                 "Node {} stepping down to Follower, found higher term {} from {} (current term {})",

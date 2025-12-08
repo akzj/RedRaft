@@ -1,11 +1,11 @@
-//! 分片分裂管理器
+//! Shard split manager
 //!
-//! 负责协调分片分裂的完整流程：
-//! 1. 准备阶段 - 创建目标分片
-//! 2. 快照传输 - 传输历史数据
-//! 3. 增量追赶 - 重放增量日志
-//! 4. 缓存切换 - 缓存请求并切换路由
-//! 5. 清理阶段 - 清理旧数据
+//! Responsible for coordinating the complete shard split process:
+//! 1. Preparation phase - Create target shard
+//! 2. Snapshot transfer - Transfer historical data
+//! 3. Incremental catch-up - Replay incremental logs
+//! 4. Buffer switch - Buffer requests and switch routing
+//! 5. Cleanup phase - Clean up old data
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,16 +19,16 @@ use crate::metadata::{
     SplitPhase, SplitProgress, SplitRole, SplitStatus, SplitTask, SplittingShardInfo,
 };
 
-/// 分裂管理器配置
+/// Split manager configuration
 #[derive(Debug, Clone)]
 pub struct SplitManagerConfig {
-    /// 追赶阈值 - 延迟低于此值进入缓存模式
+    /// Catch-up threshold - enter buffer mode when delay is below this value
     pub catch_up_threshold: u64,
-    /// 缓存超时（秒）
+    /// Buffer timeout (seconds)
     pub buffer_timeout_secs: u64,
-    /// 最大缓存请求数
+    /// Maximum buffer request count
     pub buffer_max_size: usize,
-    /// 进度上报间隔（秒）
+    /// Progress report interval (seconds)
     pub progress_interval_secs: u64,
 }
 
@@ -43,18 +43,18 @@ impl Default for SplitManagerConfig {
     }
 }
 
-/// 分裂管理器
+/// Split manager
 pub struct SplitManager {
-    /// 配置
+    /// Configuration
     config: SplitManagerConfig,
-    /// 活动的分裂任务 (task_id -> task)
+    /// Active split tasks (task_id -> task)
     tasks: RwLock<HashMap<String, SplitTask>>,
-    /// 集群元数据
+    /// Cluster metadata
     metadata: Arc<AsyncRwLock<ClusterMetadata>>,
 }
 
 impl SplitManager {
-    /// 创建分裂管理器
+    /// Create split manager
     pub fn new(config: SplitManagerConfig, metadata: Arc<AsyncRwLock<ClusterMetadata>>) -> Self {
         Self {
             config,
@@ -63,18 +63,18 @@ impl SplitManager {
         }
     }
 
-    /// 触发分片分裂
-    ///
-    /// # 参数
-    /// - `source_shard_id`: 源分片 ID
-    /// - `split_slot`: 分裂点槽位
-    /// - `target_shard_id`: 目标分片 ID（必须提供，且目标分片必须已存在且健康）
-    ///
-    /// # 要求
-    /// - 源分片必须存在且状态为 Normal
-    /// - 目标分片必须已存在且状态为 Normal（健康状态：有 leader 且副本数满足）
-    /// - 分裂点必须在源分片范围内
-    /// - 目标分片的 key_range 必须与分裂点匹配：[split_slot, source_shard.end)
+    /// Trigger shard split
+    /// 
+    /// # Arguments
+    /// - `source_shard_id`: Source shard ID
+    /// - `split_slot`: Split point slot
+    /// - `target_shard_id`: Target shard ID (must be provided, and target shard must exist and be healthy)
+    /// 
+    /// # Requirements
+    /// - Source shard must exist and be in Normal status
+    /// - Target shard must exist and be in Normal status (healthy: has leader and satisfies replica factor)
+    /// - Split point must be within source shard range
+    /// - Target shard's key_range must match split point: [split_slot, source_shard.end)
     pub async fn trigger_split(
         &self,
         source_shard_id: &ShardId,
@@ -83,7 +83,7 @@ impl SplitManager {
     ) -> Result<SplitTask, String> {
         let mut metadata = self.metadata.write().await;
 
-        // 1. 验证源分片存在且状态正常
+        // 1. Verify source shard exists and is in normal status
         let source_shard = metadata
             .shards
             .get(source_shard_id)
@@ -103,7 +103,7 @@ impl SplitManager {
             ));
         }
 
-        // 2. 验证分裂点在源分片范围内
+        // 2. Verify split point is within source shard range
         let key_range = source_shard.key_range;
         if split_slot <= key_range.start || split_slot >= key_range.end {
             return Err(format!(
@@ -112,13 +112,13 @@ impl SplitManager {
             ));
         }
 
-        // 3. 验证目标分片存在
+        // 3. Verify target shard exists
         let target_shard = metadata
             .shards
             .get(&target_shard_id)
             .ok_or_else(|| format!("Target shard {} not found. Target shard must be created and healthy before split", target_shard_id))?;
 
-        // 4. 验证目标分片状态为 Normal（健康状态）
+        // 4. Verify target shard status is Normal (healthy status)
         if target_shard.status != ShardStatus::Normal {
             return Err(format!(
                 "Target shard {} is not in normal status: {}. Target shard must be healthy before split",
@@ -126,7 +126,7 @@ impl SplitManager {
             ));
         }
 
-        // 5. 验证目标分片健康（有 leader 且副本数满足）
+        // 5. Verify target shard is healthy (has leader and satisfies replica factor)
         if !target_shard.is_healthy() {
             return Err(format!(
                 "Target shard {} is not healthy. It must have a leader and satisfy replica factor before split",
@@ -134,7 +134,7 @@ impl SplitManager {
             ));
         }
 
-        // 6. 验证目标分片不在分裂中
+        // 6. Verify target shard is not splitting
         if target_shard.is_splitting() {
             return Err(format!(
                 "Target shard {} is already splitting",
@@ -142,7 +142,7 @@ impl SplitManager {
             ));
         }
 
-        // 7. 验证目标分片的 key_range 与分裂点匹配
+        // 7. Verify target shard's key_range matches split point
         let expected_target_range = KeyRange::new(split_slot, key_range.end);
         if target_shard.key_range != expected_target_range {
             return Err(format!(
@@ -151,7 +151,7 @@ impl SplitManager {
             ));
         }
 
-        // 8. 创建分裂任务
+        // 8. Create split task
         let task = SplitTask::new(
             source_shard_id.clone(),
             target_shard_id.clone(),
@@ -163,7 +163,7 @@ impl SplitManager {
             task.id, source_shard_id, target_shard_id, split_slot
         );
 
-        // 9. 更新目标分片的分裂状态
+        // 9. Update target shard's split state
         let target_shard = metadata.shards.get_mut(&target_shard_id).unwrap();
         target_shard.set_split_state(ShardSplitState {
             split_task_id: task.id.clone(),
@@ -172,7 +172,7 @@ impl SplitManager {
         });
         let target_nodes = target_shard.replicas.clone();
 
-        // 10. 更新源分片状态
+        // 10. Update source shard state
         let source_shard = metadata.shards.get_mut(source_shard_id).unwrap();
         source_shard.set_split_state(ShardSplitState {
             split_task_id: task.id.clone(),
@@ -180,7 +180,7 @@ impl SplitManager {
             role: SplitRole::Source,
         });
 
-        // 11. 添加分裂信息到路由表（用于 Node 感知分裂状态）
+        // 11. Add split information to routing table (for Node to detect split status)
         let splitting_info = SplittingShardInfo {
             source_shard: source_shard_id.clone(),
             target_shard: target_shard_id.clone(),
@@ -191,7 +191,7 @@ impl SplitManager {
         };
         metadata.routing_table.add_splitting_shard(splitting_info);
 
-        // 12. 存储任务
+        // 12. Store task
         let task_clone = task.clone();
         self.tasks.write().insert(task.id.clone(), task);
 
@@ -203,17 +203,17 @@ impl SplitManager {
         Ok(task_clone)
     }
 
-    /// 获取分裂任务
+    /// Get split task
     pub fn get_task(&self, task_id: &str) -> Option<SplitTask> {
         self.tasks.read().get(task_id).cloned()
     }
 
-    /// 获取所有分裂任务
+    /// Get all split tasks
     pub fn all_tasks(&self) -> Vec<SplitTask> {
         self.tasks.read().values().cloned().collect()
     }
 
-    /// 获取活动的分裂任务
+    /// Get active split tasks
     pub fn active_tasks(&self) -> Vec<SplitTask> {
         self.tasks
             .read()
@@ -223,7 +223,7 @@ impl SplitManager {
             .collect()
     }
 
-    /// 更新任务状态
+    /// Update task status
     pub fn update_task_status(&self, task_id: &str, status: SplitStatus) -> bool {
         if let Some(task) = self.tasks.write().get_mut(task_id) {
             info!("Split task {} status: {} -> {}", task_id, task.status, status);
@@ -235,7 +235,7 @@ impl SplitManager {
         }
     }
 
-    /// 更新任务进度
+    /// Update task progress
     pub fn update_task_progress(&self, task_id: &str, progress: SplitProgress) -> bool {
         if let Some(task) = self.tasks.write().get_mut(task_id) {
             debug!(
@@ -251,7 +251,7 @@ impl SplitManager {
         }
     }
 
-    /// 完成分裂 - 更新路由表
+    /// Complete split - update routing table
     pub async fn complete_split(&self, task_id: &str) -> Result<(), String> {
         let task = self
             .get_task(task_id)
@@ -266,7 +266,7 @@ impl SplitManager {
 
         let mut metadata = self.metadata.write().await;
 
-        // 1. 更新源分片的键范围
+        // 1. Update source shard's key range
         let source_shard = metadata
             .shards
             .get_mut(&task.source_shard)
@@ -276,7 +276,7 @@ impl SplitManager {
         source_shard.key_range = KeyRange::new(old_range.start, task.split_slot);
         source_shard.clear_split_state();
 
-        // 2. 更新目标分片状态
+        // 2. Update target shard status
         let target_shard = metadata
             .shards
             .get_mut(&task.target_shard)
@@ -285,23 +285,23 @@ impl SplitManager {
         target_shard.status = ShardStatus::Normal;
         target_shard.clear_split_state();
 
-        // 设置第一个节点为 leader（临时）
+        // Set first node as leader (temporary)
         if let Some(first_node) = target_shard.replicas.first().cloned() {
             target_shard.set_leader(first_node);
         }
 
-        // 3. 更新路由表
-        // 源分片：[old_start, split_slot)
+        // 3. Update routing table
+        // Source shard: [old_start, split_slot)
         metadata
             .routing_table
             .assign_slots(&task.source_shard, old_range.start, task.split_slot);
 
-        // 目标分片：[split_slot, old_end)
+        // Target shard: [split_slot, old_end)
         metadata
             .routing_table
             .assign_slots(&task.target_shard, task.split_slot, old_range.end);
 
-        // 设置目标分片的节点
+        // Set target shard's nodes
         let target_nodes = metadata
             .shards
             .get(&task.target_shard)
@@ -311,10 +311,10 @@ impl SplitManager {
             .routing_table
             .set_shard_nodes(task.target_shard.clone(), target_nodes);
 
-        // 4. 移除分裂信息
+        // 4. Remove split information
         metadata.routing_table.remove_splitting_shard(&task.source_shard);
 
-        // 5. 更新任务状态
+        // 5. Update task status
         self.update_task_status(task_id, SplitStatus::Completed);
 
         info!(
@@ -331,7 +331,7 @@ impl SplitManager {
         Ok(())
     }
 
-    /// 取消分裂
+    /// Cancel split
     pub async fn cancel_split(&self, task_id: &str) -> Result<(), String> {
         let task = self
             .get_task(task_id)
@@ -345,14 +345,14 @@ impl SplitManager {
 
         let mut metadata = self.metadata.write().await;
 
-        // 1. 清除源分片的分裂状态
+        // 1. Clear source shard's split state
         if let Some(source_shard) = metadata.shards.get_mut(&task.source_shard) {
             source_shard.clear_split_state();
         }
 
-        // 2. 删除目标分片
+        // 2. Remove target shard
         if let Some(target_shard) = metadata.shards.remove(&task.target_shard) {
-            // 从节点中移除分片
+            // Remove shard from nodes
             for node_id in &target_shard.replicas {
                 if let Some(node) = metadata.nodes.get_mut(node_id) {
                     node.remove_shard(&task.target_shard);
@@ -360,10 +360,10 @@ impl SplitManager {
             }
         }
 
-        // 3. 从路由表移除分裂信息
+        // 3. Remove split information from routing table
         metadata.routing_table.remove_splitting_shard(&task.source_shard);
 
-        // 4. 更新任务状态
+        // 4. Update task status
         self.update_task_status(task_id, SplitStatus::Cancelled);
 
         info!("Split task {} cancelled", task_id);
@@ -371,7 +371,7 @@ impl SplitManager {
         Ok(())
     }
 
-    /// 标记任务失败
+    /// Mark task as failed
     pub async fn fail_split(&self, task_id: &str, reason: String) -> Result<(), String> {
         let task = self
             .get_task(task_id)
@@ -383,7 +383,7 @@ impl SplitManager {
 
         error!("Split task {} failed: {}", task_id, reason);
 
-        // 清理状态（类似取消）
+        // Clean up state (similar to cancel)
         let mut metadata = self.metadata.write().await;
 
         if let Some(source_shard) = metadata.shards.get_mut(&task.source_shard) {
@@ -398,7 +398,7 @@ impl SplitManager {
             }
         }
 
-        // 从路由表移除分裂信息
+        // Remove split information from routing table
         metadata.routing_table.remove_splitting_shard(&task.source_shard);
 
         self.update_task_status(task_id, SplitStatus::Failed(reason));
@@ -406,17 +406,17 @@ impl SplitManager {
         Ok(())
     }
 
-    /// 获取配置
+    /// Get configuration
     pub fn config(&self) -> &SplitManagerConfig {
         &self.config
     }
 
-    /// 检查是否应该进入缓存模式
+    /// Check if should enter buffer mode
     pub fn should_start_buffering(&self, delay: u64) -> bool {
         delay < self.config.catch_up_threshold
     }
 
-    /// 进入缓冲阶段
+    /// Enter buffering phase
     pub async fn start_buffering(&self, task_id: &str) -> Result<(), String> {
         let task = self
             .get_task(task_id)
@@ -433,19 +433,19 @@ impl SplitManager {
 
         let mut metadata = self.metadata.write().await;
 
-        // 更新路由表中的分裂阶段
+        // Update split phase in routing table
         metadata
             .routing_table
             .update_split_phase(&task.source_shard, SplitPhase::Buffering);
 
-        // 更新任务状态
+        // Update task status
         drop(metadata);
         self.update_task_status(task_id, SplitStatus::Buffering);
 
         Ok(())
     }
 
-    /// 进入切换阶段
+    /// Enter switching phase
     pub async fn start_switching(&self, task_id: &str) -> Result<(), String> {
         let task = self
             .get_task(task_id)
@@ -462,24 +462,24 @@ impl SplitManager {
 
         let mut metadata = self.metadata.write().await;
 
-        // 更新路由表中的分裂阶段
+        // Update split phase in routing table
         metadata
             .routing_table
             .update_split_phase(&task.source_shard, SplitPhase::Switched);
 
-        // 更新任务状态
+        // Update task status
         drop(metadata);
         self.update_task_status(task_id, SplitStatus::Switching);
 
         Ok(())
     }
 
-    /// 进入快照传输阶段
+    /// Enter snapshot transfer phase
     pub fn start_snapshot_transfer(&self, task_id: &str) -> bool {
         self.update_task_status(task_id, SplitStatus::SnapshotTransfer)
     }
 
-    /// 进入增量追赶阶段
+    /// Enter incremental catch-up phase
     pub fn start_catching_up(&self, task_id: &str) -> bool {
         self.update_task_status(task_id, SplitStatus::CatchingUp)
     }

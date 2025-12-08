@@ -37,21 +37,21 @@ pub struct RoutingTable {
     /// Shard to nodes mapping (first is leader)
     /// Uses ShardId as key (business layer concept)
     pub shard_nodes: HashMap<String, Vec<NodeId>>,
-    /// 节点地址映射
+    /// Node address mapping
     pub node_addrs: HashMap<NodeId, String>,
-    /// 正在分裂的分片信息 (source_shard_id -> SplitInfo)
+    /// Splitting shard information (source_shard_id -> SplitInfo)
     #[serde(default)]
     pub splitting_shards: HashMap<String, ShardSplitInfo>,
 }
 
-/// 分片分裂信息
+/// Shard split information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardSplitInfo {
-    /// 分裂点槽位
+    /// Split point slot
     pub split_slot: u32,
-    /// 目标分片 ID（业务层 ShardId，创建 Raft 组时会作为 GroupId）
+    /// Target shard ID (business layer ShardId, will be used as GroupId when creating Raft group)
     pub target_shard: String,
-    /// 分裂状态
+    /// Split status
     pub status: String,
 }
 
@@ -327,7 +327,7 @@ impl PilotClient {
         }
     }
 
-    /// 刷新本地路由表
+    /// Refresh local routing table
     pub async fn refresh_routing(&self) -> Result<bool, PilotError> {
         // Get current version number
         let current_version = self.routing_table.read().version;
@@ -348,7 +348,7 @@ impl PilotClient {
         }
     }
 
-    /// 启动后台任务（心跳 + 路由刷新）
+    /// Start background tasks (heartbeat + routing refresh)
     pub fn start_background_tasks(self: Arc<Self>) -> Vec<tokio::task::JoinHandle<()>> {
         let mut handles = Vec::new();
 

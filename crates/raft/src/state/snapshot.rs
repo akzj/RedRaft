@@ -1,24 +1,24 @@
 //! Snapshot handling for Raft state machine
+//! 
+//! # Snapshot Module Overview
+//! 
+//! This module is responsible for Raft snapshot creation, sending, and installation. Snapshots are used for:
+//! - Compressing logs to prevent infinite growth
+//! - Allowing lagging Followers to quickly catch up with the Leader
+//! - Fast recovery after node restart
+//! 
+//! # Snapshot Installation Process
 //!
-//! # 快照模块概述
-//!
-//! 本模块负责 Raft 快照的创建、发送和安装。快照用于：
-//! - 压缩日志，防止无限增长
-//! - 让落后的 Follower 快速追赶 Leader
-//! - 节点重启后的快速恢复
-//!
-//! # 快照安装流程
-//!
-//! ## 流程图
+//! ## Flowchart
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────────────────┐
-//! │                              Follower 节点内部                               │
+//! │                              Follower Node Internal                          │
 //! ├─────────────────────────────────────────────────────────────────────────────┤
 //! │                                                                             │
 //! │  ┌─────────────┐    ①InstallSnapshotRequest     ┌────────────────────────┐ │
 //! │  │   Leader    │ ──────────────────────────────▶│  handle_install_       │ │
-//! │  │   (远程)    │                                │  snapshot()            │ │
+//! │  │   (Remote)   │                                │  snapshot()            │ │
 //! │  └─────────────┘                                └───────────┬────────────┘ │
 //! │        ▲                                                    │              │
 //! │        │                                                    │②             │
@@ -26,14 +26,14 @@
 //! │        │   (Success/Failed)                    ┌────────────────────────┐  │
 //! │        │                                       │ callbacks.process_     │  │
 //! │        │                                       │ snapshot(..., tx)      │  │
-//! │        │                                       │ (业务层/StateMachine)  │  │
+//! │        │                                       │ (business layer/StateMachine)  │  │
 //! │        │                                       └───────────┬────────────┘  │
 //! │        │                                                   │               │
 //! │        │                                                   │③ oneshot::tx  │
 //! │        │                                                   ▼               │
 //! │        │                                       ┌────────────────────────┐  │
-//! │        │                                       │ tokio::spawn 异步任务  │  │
-//! │        │                                       │ 等待 oneshot::rx       │  │
+//! │        │                                       │ tokio::spawn async task  │  │
+//! │        │                                       │ wait for oneshot::rx       │  │
 //! │        │                                       └───────────┬────────────┘  │
 //! │        │                                                   │               │
 //! │        │                                                   │④ Event::      │
@@ -45,64 +45,64 @@
 //! │                                                │ snapshot_installation()│  │
 //! │                                                └────────────────────────┘  │
 //! │                                                         ⑤                  │
-//! │                                                  - 日志截断                │
-//! │                                                  - 持久化 HardState        │
-//! │                                                  - 清理过期请求            │
-//! │                                                  - 应用配置                │
+//! │                                                  - Log truncation                │
+//! │                                                  - Persist HardState        │
+//! │                                                  - Clean expired requests            │
+//! │                                                  - Apply configuration                │
 //! └─────────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! ## 详细步骤
+//! ## Detailed Steps
 //!
-//! 1. **Leader 发送快照请求**
-//!    - Leader 检测到 Follower 落后太多（日志已被截断）
-//!    - 调用 [`RaftState::send_snapshot_to`] 发送 [`InstallSnapshotRequest`]
+//! 1. **Leader Sends Snapshot Request**
+//!    - Leader detects Follower is too far behind (logs have been truncated)
+//!    - Calls [`RaftState::send_snapshot_to`] to send [`InstallSnapshotRequest`]
 //!
-//! 2. **Follower 处理快照请求**
-//!    - [`RaftState::handle_install_snapshot`] 接收请求
-//!    - 先回复 `InstallSnapshotState::Installing` 告知 Leader 正在处理
-//!    - 调用 `callbacks.process_snapshot()` 让业务层处理快照数据
-//!    - 启动 `tokio::spawn` 异步任务等待处理结果
+//! 2. **Follower Processes Snapshot Request**
+//!    - [`RaftState::handle_install_snapshot`] receives the request
+//!    - First responds with `InstallSnapshotState::Installing` to inform Leader it's processing
+//!    - Calls `callbacks.process_snapshot()` to let business layer process snapshot data
+//!    - Starts `tokio::spawn` async task to wait for processing result
 //!
-//! 3. **业务层处理快照**
-//!    - [`StateMachine::process_snapshot`](crate::traits::StateMachine::process_snapshot) 被调用
-//!    - 反序列化并恢复状态机状态
-//!    - 完成后通过 `oneshot::Sender` 通知结果
+//! 3. **Business Layer Processes Snapshot**
+//!    - [`StateMachine::process_snapshot`](crate::traits::StateMachine::process_snapshot) is called
+//!    - Deserializes and restores state machine state
+//!    - Notifies result via `oneshot::Sender` when done
 //!
-//! 4. **自通知完成事件**
-//!    - 异步任务收到处理结果
-//!    - 发送 [`Event::CompleteSnapshotInstallation`] 给自己
-//!    - 这是 **Actor 模式自消息**，让耗时操作不阻塞 Raft 主循环
+//! 4. **Self-Notification of Completion Event**
+//!    - Async task receives processing result
+//!    - Sends [`Event::CompleteSnapshotInstallation`] to itself
+//!    - This is an **Actor pattern self-message** to prevent snapshot processing (which may be time-consuming) from blocking the Raft main loop
 //!
-//! 5. **完成快照安装**
-//!    - [`RaftState::handle_complete_snapshot_installation`] 处理完成事件
-//!    - 执行以下操作：
-//!      - 更新 `last_snapshot_index`, `last_snapshot_term`
-//!      - 更新 `commit_index`, `last_applied`
-//!      - **截断日志** - 删除快照之前的日志条目
-//!      - **持久化 HardState** - 保存 term 和 voted_for
-//!      - **清理过期客户端请求** - 移除已被快照覆盖的请求
-//!      - **应用集群配置** - 如果快照包含配置变更
+//! 5. **Complete Snapshot Installation**
+//!    - [`RaftState::handle_complete_snapshot_installation`] handles the completion event
+//!    - Performs the following operations:
+//!    - Updates `last_snapshot_index`, `last_snapshot_term`
+//!    - Updates `commit_index`, `last_applied`
+//!      - **Truncate logs** - Delete log entries before snapshot
+//!      - **Persist HardState** - Save term and voted_for
+//!      - **Clean expired client requests** - Remove requests covered by snapshot
+//!      - **Apply cluster configuration** - If snapshot contains configuration changes
 //!
-//! 6. **响应 Leader**
-//!    - Leader 通过探测消息 (`is_probe=true`) 查询安装状态
-//!    - Follower 返回最终的 `Success` 或 `Failed` 状态
+//! 6. **Respond to Leader**
+//!    - Leader queries installation status via probe messages (`is_probe=true`)
+//!    - Follower returns final `Success` or `Failed` state
 //!
-//! ## 关键数据结构
+//! ## Key Data Structures
 //!
-//! - [`CompleteSnapshotInstallation`] - 快照安装完成的事件数据
-//! - [`InstallSnapshotRequest`] - Leader 发送的快照安装请求
-//! - [`InstallSnapshotResponse`] - Follower 的响应
-//! - [`InstallSnapshotState`] - 安装状态枚举 (Installing/Success/Failed)
+//! - [`CompleteSnapshotInstallation`] - Event data for snapshot installation completion
+//! - [`InstallSnapshotRequest`] - Snapshot installation request sent by Leader
+//! - [`InstallSnapshotResponse`] - Follower's response
+//! - [`InstallSnapshotState`] - Installation state enum (Installing/Success/Failed)
 //!
-//! ## 设计要点
+//! ## Design Points
 //!
-//! | 要素 | 说明 |
+//! | Item | Description |
 //! |------|------|
-//! | **发送方** | Follower 自己（通过 `tokio::spawn` 异步任务） |
-//! | **处理方** | Follower 自己（`RaftState::tick`） |
-//! | **目的** | 异步解耦，让快照处理（可能耗时很长）不阻塞 Raft 主循环 |
-//! | **触发时机** | 业务层完成 `process_snapshot` 后，通过 oneshot channel 通知 |
+//! | **Sender** | Follower itself (via `tokio::spawn` async task) |
+//! | **Receiver** | Follower itself (`RaftState::tick`) |
+//! | **Purpose** | Asynchronous decoupling to prevent snapshot processing (which may be time-consuming) from blocking the Raft main loop |
+//! | **Trigger Timing** | After business layer completes `process_snapshot`, notified via oneshot channel |
 //!
 //! [`InstallSnapshotRequest`]: crate::message::InstallSnapshotRequest
 //! [`InstallSnapshotResponse`]: crate::message::InstallSnapshotResponse
@@ -126,22 +126,22 @@ use crate::types::{RaftId, RequestId};
 use crate::Event;
 
 impl RaftState {
-    /// 发送快照到目标节点
+    /// Send snapshot to target node
     pub(crate) async fn send_snapshot_to(&mut self, target: RaftId) {
         let snap = match self.callbacks.load_snapshot(&self.id).await {
             Ok(Some(s)) => s,
             Ok(None) => {
-                error!("没有可用的快照，无法发送");
+                error!("No snapshot available, cannot send");
                 return;
             }
             Err(e) => {
-                error!("加载快照失败: {}", e);
+                error!("Failed to load snapshot: {}", e);
                 return;
             }
         };
 
         if !self.verify_snapshot_consistency(&snap).await {
-            error!("快照与当前日志不一致，无法发送");
+            error!("Snapshot inconsistent with current logs, cannot send");
             return;
         }
 
@@ -184,7 +184,7 @@ impl RaftState {
         }
     }
 
-    /// 验证快照与当前日志的一致性
+    /// Verify snapshot consistency with current logs
     pub(crate) async fn verify_snapshot_consistency(&self, snap: &Snapshot) -> bool {
         if snap.index == 0 {
             return true;
@@ -207,7 +207,7 @@ impl RaftState {
         snap.term == log_term
     }
 
-    /// 发送探测消息检查快照安装状态
+    /// Send probe message to check snapshot installation status
     pub(crate) async fn probe_snapshot_status(
         &mut self,
         target: &RaftId,
@@ -250,7 +250,7 @@ impl RaftState {
             .await;
     }
 
-    /// 处理安装快照请求
+    /// Handle install snapshot request
     pub(crate) async fn handle_install_snapshot(
         &mut self,
         sender: RaftId,
@@ -300,7 +300,7 @@ impl RaftState {
         self.last_heartbeat = Instant::now();
         self.reset_election().await;
 
-        // 处理空探测消息
+        // Handle empty probe message
         if request.is_probe {
             let current_state = if let Some(current_snapshot_request_id) =
                 &self.current_snapshot_request_id
@@ -353,7 +353,7 @@ impl RaftState {
             return;
         }
 
-        // 仅处理比当前快照更新的快照
+        // Only process snapshots newer than current snapshot
         if request.last_included_index <= self.last_snapshot_index {
             let resp = InstallSnapshotResponse {
                 term: self.current_term,
@@ -471,7 +471,7 @@ impl RaftState {
         });
     }
 
-    /// 验证快照配置兼容性
+    /// Verify snapshot config compatibility
     pub(crate) async fn verify_snapshot_config_compatibility(
         &self,
         _req: &InstallSnapshotRequest,
@@ -479,7 +479,7 @@ impl RaftState {
         true
     }
 
-    /// 处理快照安装完成
+    /// Handle snapshot installation completion
     pub async fn handle_complete_snapshot_installation(
         &mut self,
         result: CompleteSnapshotInstallation,
@@ -503,7 +503,7 @@ impl RaftState {
             self.commit_index = self.commit_index.max(result.index);
             self.last_applied = self.last_applied.max(result.index);
 
-            // 1. 截断快照之前的日志条目
+            // 1. Truncate log entries before snapshot
             if result.index > 0 {
                 let _ = self
                     .error_handler
@@ -521,7 +521,7 @@ impl RaftState {
                 );
             }
 
-            // 2. 持久化硬状态
+            // 2. Persist hard state
             let hard_state = HardState {
                 raft_id: self.id.clone(),
                 term: self.current_term,
@@ -536,7 +536,7 @@ impl RaftState {
                 )
                 .await;
 
-            // 3. 清理过期的客户端请求（索引 <= snapshot_index 的请求已经无效）
+            // 3. Clean up expired client requests (requests with index <= snapshot_index are invalid)
             let snapshot_index = result.index;
             let expired_requests: Vec<_> = self
                 .client_requests
@@ -556,7 +556,7 @@ impl RaftState {
                 }
             }
 
-            // 4. 应用快照配置
+            // 4. Apply snapshot config
             if let Some(snapshot_config) = result.config {
                 info!(
                     "Node {} applying snapshot config: old_config={:?}, new_config={:?}",
@@ -651,7 +651,7 @@ impl RaftState {
         self.current_snapshot_request_id = None;
     }
 
-    /// 处理安装快照响应
+    /// Handle install snapshot response
     pub(crate) async fn handle_install_snapshot_response(
         &mut self,
         peer: RaftId,
@@ -698,7 +698,7 @@ impl RaftState {
         }
     }
 
-    /// 安排快照状态探测
+    /// Schedule snapshot status probe
     pub(crate) fn schedule_snapshot_probe(
         &mut self,
         peer: RaftId,
@@ -718,7 +718,7 @@ impl RaftState {
         });
     }
 
-    /// 延长快照探测计划
+    /// Extend snapshot probe schedule
     pub(crate) fn extend_snapshot_probe(&mut self, peer: &RaftId) {
         if let Some(schedule) = self
             .snapshot_probe_schedules
@@ -739,12 +739,12 @@ impl RaftState {
         }
     }
 
-    /// 移除快照探测计划
+    /// Remove snapshot probe schedule
     pub(crate) fn remove_snapshot_probe(&mut self, peer: &RaftId) {
         self.snapshot_probe_schedules.retain(|s| &s.peer != peer);
     }
 
-    /// 处理到期的探测计划
+    /// Process expired probe schedules
     pub(crate) async fn process_pending_probes(&mut self, now: Instant) {
         let pending_peers: Vec<(RaftId, RequestId)> = self
             .snapshot_probe_schedules
@@ -759,12 +759,12 @@ impl RaftState {
         }
     }
 
-    /// 安排快照重发
+    /// Schedule snapshot retry
     pub(crate) async fn schedule_snapshot_retry(&mut self, peer: RaftId) {
         self.send_snapshot_to(peer).await;
     }
 
-    /// 生成快照并持久化
+    /// Generate and persist snapshot
     pub(crate) async fn create_snapshot(&mut self) {
         let begin = Instant::now();
 

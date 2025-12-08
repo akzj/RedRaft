@@ -12,20 +12,20 @@ use crate::message::{PreVoteRequest, PreVoteResponse, RequestVoteRequest, Reques
 use crate::types::{RaftId, RequestId};
 
 impl RaftState {
-    /// 处理选举超时
+    /// Handle election timeout
     pub(crate) async fn handle_election_timeout(&mut self) {
         if self.role == Role::Leader {
             info!(target: "raft", "Node {} is the leader and will not start a new election", self.id);
             return;
         }
 
-        // Learner 不参与选举
+        // Learner does not participate in elections
         if !self.config.voters_contains(&self.id) {
             warn!("Node {} is a Learner and cannot start an election", self.id);
             return;
         }
 
-        // 检查是否启用 Pre-Vote
+        // Check if Pre-Vote is enabled
         if self.options.pre_vote_enabled {
             self.start_pre_vote().await;
         } else {
@@ -33,7 +33,7 @@ impl RaftState {
         }
     }
 
-    /// 开始 Pre-Vote 阶段（不增加 term）
+    /// Start Pre-Vote phase (does not increment term)
     pub(crate) async fn start_pre_vote(&mut self) {
         info!(
             "Node {} starting pre-vote for prospective term {}",
@@ -92,7 +92,7 @@ impl RaftState {
         self.check_pre_vote_result().await;
     }
 
-    /// 开始真实选举（递增 term）
+    /// Start real election (increment term)
     pub(crate) async fn start_real_election(&mut self) {
         info!(
             "Node {} starting real election for term {}",
@@ -176,7 +176,7 @@ impl RaftState {
         self.check_election_result().await;
     }
 
-    /// 处理 Pre-Vote 请求
+    /// Handle Pre-Vote request
     pub(crate) async fn handle_pre_vote_request(&mut self, sender: RaftId, request: PreVoteRequest) {
         if sender != request.candidate_id {
             warn!(
@@ -244,7 +244,7 @@ impl RaftState {
             .await;
     }
 
-    /// 处理 Pre-Vote 响应
+    /// Handle Pre-Vote response
     pub(crate) async fn handle_pre_vote_response(&mut self, peer: RaftId, response: PreVoteResponse) {
         // 检查是否是当前 Pre-Vote 轮次
         if self.current_pre_vote_id != Some(response.request_id) {
@@ -288,7 +288,7 @@ impl RaftState {
         self.check_pre_vote_result().await;
     }
 
-    /// 检查 Pre-Vote 结果
+    /// Check Pre-Vote result
     pub(crate) async fn check_pre_vote_result(&mut self) {
         if self.current_pre_vote_id.is_none() {
             return;
@@ -312,7 +312,7 @@ impl RaftState {
         }
     }
 
-    /// 处理投票请求
+    /// Handle vote request
     pub(crate) async fn handle_request_vote(
         &mut self,
         sender: crate::types::RaftId,
@@ -392,7 +392,7 @@ impl RaftState {
             .await;
     }
 
-    /// 检查日志是否足够新
+    /// Check if log is up to date
     pub(crate) async fn is_log_up_to_date(
         &mut self,
         candidate_last_index: u64,
@@ -405,7 +405,7 @@ impl RaftState {
             || (candidate_last_term == self_last_term && candidate_last_index >= self_last_index)
     }
 
-    /// 处理投票响应
+    /// Handle vote response
     pub(crate) async fn handle_request_vote_response(
         &mut self,
         peer: crate::types::RaftId,
@@ -446,7 +446,7 @@ impl RaftState {
         self.check_election_result().await;
     }
 
-    /// 检查选举结果
+    /// Check election result
     pub(crate) async fn check_election_result(&mut self) {
         info!(
             "Node {}: check_election_result, votes: {:?}, current_term: {}, role: {:?}, election_id: {:?}",
@@ -469,7 +469,7 @@ impl RaftState {
         }
     }
 
-    /// 重置心跳定时器
+    /// Reset heartbeat timer
     pub(crate) async fn reset_heartbeat_timer(&mut self) {
         if let Some(timer_id) = self.heartbeat_interval_timer_id {
             self.callbacks.del_timer(&self.id, timer_id);
@@ -481,7 +481,7 @@ impl RaftState {
         );
     }
 
-    /// 成为 Leader
+    /// Become Leader
     pub(crate) async fn become_leader(&mut self) {
         warn!(
             "Node {} becoming leader for term {} (previous role: {:?})",
@@ -534,7 +534,7 @@ impl RaftState {
         self.adjust_apply_interval().await;
     }
 
-    /// 重置选举定时器
+    /// Reset election timer
     pub(crate) async fn reset_election(&mut self) {
         self.current_election_id = None;
 

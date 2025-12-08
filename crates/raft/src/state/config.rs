@@ -13,7 +13,7 @@ use crate::message::LogEntry;
 use crate::types::{RaftId, RequestId};
 
 impl RaftState {
-    /// 处理配置变更请求
+    /// Handle configuration change request
     pub(crate) async fn handle_change_config(
         &mut self,
         new_voters: HashSet<RaftId>,
@@ -182,7 +182,7 @@ impl RaftState {
         self.broadcast_append_entries().await;
     }
 
-    /// 处理配置变更超时
+    /// Handle configuration change timeout
     pub(crate) async fn handle_config_change_timeout(&mut self) {
         if !self.is_leader_joint_config() {
             warn!("Not in joint config or not leader, cannot handle config change timeout");
@@ -208,7 +208,7 @@ impl RaftState {
         self.check_joint_exit_condition().await;
     }
 
-    /// 检查联合配置退出条件
+    /// Check joint configuration exit condition
     pub(crate) async fn check_joint_exit_condition(&mut self) {
         if !self.is_leader_joint_config() {
             return;
@@ -239,7 +239,7 @@ impl RaftState {
         }
     }
 
-    /// 尝试推进联合配置
+    /// Try to advance joint configuration
     pub(crate) async fn try_advance_joint_config(&mut self) {
         debug!(
             "Trying to advance joint config: joint_index={}, commit_index={}",
@@ -248,7 +248,7 @@ impl RaftState {
         self.broadcast_append_entries().await;
     }
 
-    /// 检查是否是 Leader 且处于联合配置
+    /// Check if it's Leader and in joint configuration
     pub(crate) fn is_leader_joint_config(&self) -> bool {
         self.role == Role::Leader
             && self.config.is_joint()
@@ -257,13 +257,13 @@ impl RaftState {
             && self.config_change_timeout > Duration::ZERO
     }
 
-    /// 检查联合配置超时
+    /// Check joint configuration timeout
     pub(crate) async fn check_joint_timeout(&mut self) {
         if !self.is_leader_joint_config() {
             return;
         }
 
-        // 防御性检查：虽然 is_leader_joint_config() 已检查，但仍需安全处理
+        // Defensive check: although is_leader_joint_config() has checked, still need safe handling
         let elapsed = match self.config_change_start_time {
             Some(start_time) => start_time.elapsed(),
             None => {
@@ -344,7 +344,7 @@ impl RaftState {
         self.exit_joint_config(rollback).await;
     }
 
-    /// 退出联合配置
+    /// Exit joint configuration
     pub(crate) async fn exit_joint_config(&mut self, rollback: bool) {
         if !self.is_leader_joint_config() {
             warn!("Not in joint config or not leader, cannot exit joint config");
@@ -433,19 +433,19 @@ impl RaftState {
         );
     }
 
-    /// 处理添加 Learner
+    /// Handle adding Learner
     pub(crate) async fn handle_add_learner(&mut self, learner: RaftId, request_id: RequestId) {
         self.handle_learner_operation(learner, request_id, true)
             .await;
     }
 
-    /// 处理移除 Learner
+    /// Handle removing Learner
     pub(crate) async fn handle_remove_learner(&mut self, learner: RaftId, request_id: RequestId) {
         self.handle_learner_operation(learner, request_id, false)
             .await;
     }
 
-    /// 处理 Learner 操作
+    /// Handle Learner operation
     async fn handle_learner_operation(
         &mut self,
         learner: RaftId,
@@ -504,7 +504,7 @@ impl RaftState {
         );
     }
 
-    /// 验证 Leader 配置变更
+    /// Validate Leader for configuration change
     pub(crate) async fn validate_leader_for_config_change(&mut self, request_id: RequestId) -> bool {
         if self.role != Role::Leader {
             self.send_client_error(request_id, ClientError::NotLeader(self.leader_id.clone()))
@@ -524,7 +524,7 @@ impl RaftState {
         true
     }
 
-    /// 发送客户端错误
+    /// Send client error
     pub(crate) async fn send_client_error(&mut self, request_id: RequestId, error: ClientError) {
         self.error_handler
             .handle_void(
@@ -537,7 +537,7 @@ impl RaftState {
             .await;
     }
 
-    /// 创建并追加配置日志
+    /// Create and append configuration log
     pub(crate) async fn create_and_append_config_log(
         &mut self,
         config: &ClusterConfig,
@@ -584,13 +584,13 @@ impl RaftState {
         true
     }
 
-    /// 初始化 Learner 复制状态
+    /// Initialize Learner replication state
     pub(crate) fn initialize_learner_replication_state(&mut self, learner: &RaftId, index: u64) {
         self.next_index.insert(learner.clone(), index + 1);
         self.match_index.insert(learner.clone(), 0);
     }
 
-    /// 清理 Learner 复制状态
+    /// Cleanup Learner replication state
     pub(crate) fn cleanup_learner_replication_state(&mut self, learner: &RaftId) {
         self.next_index.remove(learner);
         self.match_index.remove(learner);
@@ -598,7 +598,7 @@ impl RaftState {
         self.follower_last_snapshot_index.remove(learner);
     }
 
-    /// 验证配置变更的安全性
+    /// Validate configuration change safety
     pub fn validate_config_change_safety(
         &self,
         new_config: &ClusterConfig,
