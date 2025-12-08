@@ -42,10 +42,10 @@ impl TestCluster {
             nodes: Arc::new(Mutex::new(HashMap::new())),
         };
 
-        // 创建所有节点
+        // Create all nodes
         let all_node_ids: Vec<RaftId> = cluster.config.node_ids.clone();
         for node_id in &cluster.config.node_ids {
-            // 初始 peers 是集群中除自己外的所有节点
+            // Initial peers are all nodes in the cluster except itself
             let initial_peers: Vec<RaftId> = all_node_ids
                 .iter()
                 .filter(|&id| id != node_id)
@@ -85,13 +85,13 @@ impl TestCluster {
         cluster
     }
 
-    // 启动集群（例如，触发初始选举）
+    // Start the cluster (e.g., trigger initial election)
     pub async fn start(&self) {
         info!("Starting TestCluster...");
         self.driver.main_loop().await
     }
 
-    // isolate_node
+    // Isolate node
     pub async fn isolate_node(&self, id: &RaftId) {
         info!("Isolating node {:?}", id);
         if let Some(node) = self.get_node(id) {
@@ -101,7 +101,7 @@ impl TestCluster {
         }
     }
 
-    //restore_node
+    // Restore node
     pub async fn restore_node(&self, id: &RaftId) {
         info!("Restoring node {:?}", id);
         if let Some(node) = self.get_node(id) {
@@ -111,19 +111,19 @@ impl TestCluster {
         }
     }
 
-    // 获取节点
+    // Get node
     pub fn get_node(&self, id: &RaftId) -> Option<TestNode> {
         let nodes = self.nodes.lock().unwrap();
         nodes.get(id).cloned()
     }
 
-    // 获取节点（可变）
+    // Get node (mutable)
     pub fn get_node_mut(&self, id: &RaftId) -> Option<TestNode> {
         let mut nodes = self.nodes.lock().unwrap();
         nodes.get_mut(id).cloned()
     }
 
-    // 停止节点（模拟故障）
+    // Stop node (simulate failure)
     pub async fn stop_node(&mut self, id: &RaftId) -> bool {
         if self.nodes.lock().unwrap().remove(id).is_some() {
             info!("Stopped node {:?}", id);
@@ -136,7 +136,7 @@ impl TestCluster {
         }
     }
 
-    // 更新网络配置
+    // Update network configuration
     pub async fn update_network_config_for_node(
         &self,
         node_id: &RaftId,
@@ -145,7 +145,7 @@ impl TestCluster {
         self.hub.update_config(node_id.clone(), new_config).await;
     }
 
-    // 发送业务命令
+    // Send business command
     pub fn propose_command(&self, leader_id: &RaftId, command: &KvCommand) -> Result<(), String> {
         let request_id = raft::RequestId::new();
         let command_bytes = command.encode();
@@ -197,7 +197,7 @@ impl TestCluster {
         }
     }
 
-    // 获取当前leader
+    // Get current leader
     pub async fn get_current_leader(&self) -> Vec<RaftId> {
         let mut leaders = Vec::new();
         let nodes = self.nodes.lock().unwrap();
@@ -209,7 +209,7 @@ impl TestCluster {
         leaders
     }
 
-    // 添加新节点到集群 - 使用 Raft 配置变更
+    // Add new node to cluster - using Raft config change
     pub async fn add_node(&self, new_node_id: &RaftId) -> Result<(), String> {
         info!(
             "Adding new node {:?} to cluster via Raft config change",
@@ -311,7 +311,7 @@ impl TestCluster {
         Ok(())
     }
 
-    // 移除节点 - 使用 Raft 配置变更
+    // Remove node - using Raft config change
     pub async fn remove_node(&self, node_id: &RaftId) -> Result<(), String> {
         info!(
             "Removing node {:?} from cluster via Raft config change",
@@ -401,7 +401,7 @@ impl TestCluster {
         }
     }
 
-    // 获取所有节点的状态
+    // Get status of all nodes
     pub fn get_cluster_status(&self) -> HashMap<RaftId, raft::Role> {
         let nodes = self.nodes.lock().unwrap();
         nodes
@@ -410,7 +410,7 @@ impl TestCluster {
             .collect()
     }
 
-    // 等待集群稳定（有一个leader）
+    // Wait for cluster to stabilize (have one leader)
     pub async fn wait_for_leader(&self, timeout: Duration) -> Result<RaftId, String> {
         let start = std::time::Instant::now();
 
@@ -494,7 +494,7 @@ impl TestCluster {
         nodes.get(node_id).map(|node| node.get_all_data())
     }
 
-    /// 发送 ReadIndex 请求（用于线性一致性读测试）
+    /// Send ReadIndex request (for linear consistency read test)
     pub fn send_read_index(&self, leader_id: &RaftId) -> Result<raft::RequestId, String> {
         let request_id = raft::RequestId::new();
         let event = raft::Event::ReadIndex { request_id };
@@ -511,7 +511,7 @@ impl TestCluster {
         }
     }
 
-    /// 获取节点的当前 term
+    /// Get node's current term
     pub async fn get_node_term(&self, node_id: &RaftId) -> Option<u64> {
         if let Some(node) = self.get_node(node_id) {
             Some(node.get_term().await)
@@ -520,7 +520,7 @@ impl TestCluster {
         }
     }
 
-    /// 获取所有节点的 term（用于验证 Pre-Vote 不会导致 term 膨胀）
+    /// Get all nodes' terms (to verify Pre-Vote doesn't cause term inflation)
     pub async fn get_all_terms(&self) -> HashMap<RaftId, u64> {
         let nodes = self.nodes.lock().unwrap();
         let mut terms = HashMap::new();
@@ -530,7 +530,7 @@ impl TestCluster {
         terms
     }
 
-    // 添加 learner 到集群
+    // Add learner to cluster
     pub async fn add_learner(&self, learner_id: RaftId) -> Result<(), String> {
         info!("Adding learner {:?} to cluster", learner_id);
 
@@ -583,7 +583,7 @@ impl TestCluster {
         .await
         .map_err(|e| format!("Failed to create learner node: {}", e))?;
 
-        // 5. 将 learner 添加到本地集群管理
+        // 5. Add learner to local cluster management
         self.nodes
             .lock()
             .unwrap()
@@ -595,7 +595,7 @@ impl TestCluster {
         Ok(())
     }
 
-    // 从集群中移除 learner
+    // Remove learner from cluster
     pub async fn remove_learner(&self, learner_id: &RaftId) -> Result<(), String> {
         info!("Removing learner {:?} from cluster", learner_id);
 
@@ -660,7 +660,7 @@ impl TestCluster {
         }
     }
 
-    // 等待 learner 同步数据
+    // Wait for learner to synchronize data
     pub async fn wait_for_learner_sync(
         &self,
         learner_id: &RaftId,

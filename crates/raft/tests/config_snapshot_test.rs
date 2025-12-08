@@ -14,7 +14,7 @@ use common::test_statemachine::KvCommand;
 async fn test_snapshot_config_application() {
     tracing_subscriber::fmt().init();
 
-    // 创建 3 节点集群
+    // Create 3-node cluster
     let node1 = RaftId::new("test_group".to_string(), "node1".to_string());
     let node2 = RaftId::new("test_group".to_string(), "node2".to_string());
     let node3 = RaftId::new("test_group".to_string(), "node3".to_string());
@@ -25,14 +25,14 @@ async fn test_snapshot_config_application() {
     };
     let cluster = TestCluster::new(config).await;
 
-    // 启动集群在后台
+    // Start cluster in background
     let cluster_clone = cluster.clone();
     tokio::spawn(async move { cluster_clone.start().await });
 
-    // 等待 Leader 选举
+    // Wait for Leader election
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // 等待稳定的leader
+    // Wait for stable leader
     let leader_id = cluster
         .wait_for_leader(Duration::from_secs(5))
         .await
@@ -40,7 +40,7 @@ async fn test_snapshot_config_application() {
 
     println!("✓ Leader election successful, leader: {:?}", leader_id);
 
-    // 写入一些数据
+    // Write some data
     println!("\n=== Writing test data ===");
     for i in 1..=50 {
         let command = KvCommand::Set {
@@ -54,35 +54,35 @@ async fn test_snapshot_config_application() {
             .expect("Should be able to propose command");
     }
 
-    // 等待数据复制
+    // Wait for data replication
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // 验证数据一致性
+    // Verify data consistency
     cluster
         .verify_data_consistency()
         .await
         .expect("Data should be consistent before snapshot");
     println!("✓ Data consistency verified before snapshot");
 
-    // 触发快照
+    // Trigger snapshot
     println!("\n=== Triggering snapshot ===");
     cluster
         .trigger_snapshot(&leader_id)
         .expect("Should be able to trigger snapshot");
 
-    // 等待快照完成
+    // Wait for snapshot to complete
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     println!("✓ Snapshot creation completed");
 
-    // 验证快照后数据一致性
+    // Verify data consistency after snapshot
     cluster
         .verify_data_consistency()
         .await
         .expect("Data should be consistent after snapshot");
     println!("✓ Data consistency verified after snapshot");
 
-    // 添加一个新的learner节点来测试快照配置应用
+    // Add a new learner node to test snapshot config application
     println!("\n=== Testing snapshot config application with learner ===");
     let learner_id = RaftId::new("test_group".to_string(), "learner1".to_string());
 
@@ -92,10 +92,10 @@ async fn test_snapshot_config_application() {
         .expect("Should be able to add learner");
     println!("✓ Added learner: {:?}", learner_id);
 
-    // 等待learner通过快照同步数据
+    // Wait for learner to sync data via snapshot
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // 验证learner的数据与集群一致
+    // Verify learner's data matches cluster
     if let Some(learner_data) = cluster.get_node_data(&learner_id) {
         if let Some(reference_data) = cluster.get_node_data(&leader_id) {
             assert_eq!(

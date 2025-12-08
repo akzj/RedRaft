@@ -15,26 +15,26 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-// --- 模拟网络配置 ---
+// --- Mock Network Configuration ---
 
-/// 模拟网络行为的配置
+/// Configuration for mock network behavior
 #[derive(Debug, Clone)]
 pub struct MockRaftNetworkConfig {
-    /// 基础延迟 (毫秒)
+    /// Base latency (milliseconds)
     pub base_latency_ms: u64,
-    /// 额外随机延迟的最大值 (毫秒)
+    /// Maximum additional random latency (milliseconds)
     pub jitter_max_ms: u64,
-    /// 消息丢失的概率 (0.0 - 1.0)
+    /// Message loss probability (0.0 - 1.0)
     pub drop_rate: f64,
-    /// 消息处理失败的概率 (0.0 - 1.0) - 在实际发送时模拟
+    /// Message processing failure probability (0.0 - 1.0) - simulated during actual sending
     pub failure_rate: f64,
 }
 
 #[derive(Debug, Clone)]
 pub struct MockNetworkHubConfig {
-    /// 批量发送的最大批次大小
+    /// Maximum batch size for bulk sending
     pub batch_size: usize,
-    /// 批量发送的最大等待时间 (毫秒)
+    /// Maximum waiting time for bulk sending (milliseconds)
     pub batch_max_wait_ms: u64,
 }
 
@@ -60,10 +60,10 @@ impl Default for MockRaftNetworkConfig {
 
 // --- 内部用于延迟队列的消息 ---
 
-/// 在延迟队列中等待发送的消息
+/// Message waiting to be sent in the delay queue
 #[derive(Debug, Clone)] // Added Clone for moving between structures
 struct DelayedMessage {
-    scheduled_time: Instant, // 消息应该被发送的时间
+    scheduled_time: Instant, // Time when the message should be sent
     target: RaftId,
     event: NetworkEvent,
 }
@@ -72,7 +72,7 @@ struct DelayedMessage {
 
 // --- 模拟网络核心 ---
 
-/// 模拟网络的中心枢纽，管理所有节点的接收端和全局状态
+/// Mock network hub that manages all nodes' receivers and global state
 #[derive(Clone)]
 pub struct MockNetworkHub {
     inner: Arc<MockNetworkHubInner>,
@@ -85,20 +85,20 @@ pub struct NodeSender {
     sender: Option<mpsc::UnboundedSender<NetworkEvent>>,
 }
 
-/// 内部共享状态
+/// Internal shared state
 struct MockNetworkHubInner {
-    /// 存储每个节点的发送端，用于向其发送最终消息
+    /// Stores each node's sender, used to send final messages to it
     node_senders: RwLock<HashMap<RaftId, NodeSender>>,
-    /// 网络配置
+    /// Network configuration
     raft_config: RwLock<HashMap<RaftId, Arc<MockRaftNetworkConfig>>>,
     hub_config: Arc<MockNetworkHubConfig>,
-    /// 每个发送节点一个延迟队列，保证发送顺序
+    /// One delay queue per sending node, ensuring sending order
     delayed_queues: RwLock<HashMap<RaftId, VecDeque<DelayedMessage>>>, // Changed
-    /// 延迟队列的通知信号 (当有新消息入队或需要处理时通知)
+    /// Notification signal for delay queues (notifies when new messages are enqueued or need processing)
     delay_queue_notify: tokio::sync::Notify,
-    /// 实际发送消息的通道 (延迟到期后放入此通道)
+    /// Channel for actual message sending (messages are put here after delay expires)
     real_send_tx: mpsc::UnboundedSender<RealSendItem>,
-    /// 实际发送消息的接收端
+    /// Receiver for actual message sending
     real_send_rx: Mutex<mpsc::UnboundedReceiver<RealSendItem>>,
 }
 
@@ -427,7 +427,7 @@ pub enum NetworkEvent {
 }
 
 impl MockNodeNetwork {
-    // isolate
+    // Isolate node from network
     pub async fn isolate(&self) {
         info!("Isolating node {:?}", self.node_id);
         // 清空该节点的发送端，模拟网络隔离
@@ -439,7 +439,7 @@ impl MockNodeNetwork {
             .await;
     }
 
-    // restore
+    // Restore node network connection
     pub async fn restore(&self) {
         info!("Restoring node {:?}", self.node_id);
         // 恢复到默认配置
@@ -623,8 +623,8 @@ impl Network for MockNodeNetwork {
     }
 }
 
-// --- 辅助函数：将内部事件分发回 Raft 状态机 ---
-// (这部分与之前相同，根据您的 Event 枚举调整)
+// --- Helper function: Dispatch internal events back to Raft state machine ---
+// (This part is the same as before, adjust according to your Event enum)
 
 // use crate::Event; // 引入您实际的 Event 枚举
 
