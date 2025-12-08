@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::debug;
 
-// --- 业务命令定义 ---
+// --- Business Command Definitions ---
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum KvCommand {
     Set { key: String, value: String },
@@ -22,12 +22,12 @@ impl KvCommand {
     }
 }
 
-// --- 简单的内存 KV 存储 ---
+// --- Simple In-Memory KV Store ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimpleKvStore {
-    // 使用 RwLock 保护内部 HashMap
-    // 在实际 RaftCallbacks 中，应用操作是串行的，所以读写锁的开销可以接受
-    // 或者可以使用无锁结构，但这需要更仔细的设计
+    // Use RwLock to protect the internal HashMap
+    // In actual RaftCallbacks, apply operations are serial, so the overhead of read-write locks is acceptable
+    // Alternatively, a lock-free structure could be used, but this requires more careful design
     data: HashMap<String, String>,
 }
 
@@ -115,7 +115,7 @@ impl TestStateMachine {
             }
         }
 
-        // 更新已应用的索引和任期
+        // Update applied index and term
         *self.last_applied_index.write().unwrap() = index;
         *self.last_applied_term.write().unwrap() = term;
 
@@ -127,7 +127,7 @@ impl TestStateMachine {
         &self,
         _from: RaftId,
     ) -> raft::traits::SnapshotResult<(u64, u64, Vec<u8>)> {
-        // 使用已应用的索引和任期创建快照
+        // Create snapshot using applied index and term
         let applied_index = *self.last_applied_index.read().unwrap();
         let applied_term = *self.last_applied_term.read().unwrap();
 

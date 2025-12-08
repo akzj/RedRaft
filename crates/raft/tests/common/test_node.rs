@@ -96,7 +96,7 @@ impl TestNode {
         let target_id = id.clone();
         let driver = driver.clone();
         let driver2 = driver.clone();
-        // 初始化并保存集群配置，避免在 RaftState::new 时读取到 None
+        // Initialize and save cluster config to avoid reading None during RaftState::new
         {
             let (voters, learners) = if is_voter {
                 // 如果是 voter，将自己和 initial_peers_or_voters 都添加到 voters
@@ -119,7 +119,7 @@ impl TestNode {
                 .await
                 .expect("save_cluster_config before RaftState::new");
         }
-        // 注册网络并获取 dispatch 回调
+        // Register network and get dispatch callback
         let network = hub
             .register_node_with_dispatch(
                 id.clone(),
@@ -169,23 +169,23 @@ impl TestNode {
         let options = RaftStateOptions {
             id: id.clone(),
             peers: initial_peers_or_voters,
-            election_timeout_min: Duration::from_millis(150), // 更快的选举超时
+            election_timeout_min: Duration::from_millis(150), // Faster election timeout
             election_timeout_max: Duration::from_millis(300),
-            heartbeat_interval: Duration::from_millis(25), // 更频繁的心跳
-            apply_interval: Duration::from_millis(1),      // 更快的应用间隔
+            heartbeat_interval: Duration::from_millis(25), // More frequent heartbeats
+            apply_interval: Duration::from_millis(1),      // Faster apply interval
             config_change_timeout: Duration::from_secs(1),
             leader_transfer_timeout: Duration::from_secs(1),
             apply_batch_size: 50,
             schedule_snapshot_probe_interval: Duration::from_secs(5),
             schedule_snapshot_probe_retries: 3,
-            pre_vote_enabled: true,      // 启用 Pre-Vote
-            leader_lease_enabled: false, // 禁用 LeaderLease（测试默认）
+            pre_vote_enabled: true,      // Enable Pre-Vote
+            leader_lease_enabled: false, // Disable LeaderLease (test default)
             max_inflight_requests: 100,  // 调整InFlight限制
             initial_batch_size: 10,
             max_batch_size: 100,
             min_batch_size: 1,
             feedback_window_size: 10,
-            // 超极速智能超时配置 - 最激进的快速超时和重发
+            // Ultra-fast smart timeout configuration - most aggressive fast timeouts and retries
             base_request_timeout: Duration::from_millis(25), // 基础超时25ms
             max_request_timeout: Duration::from_millis(5000), // 最大超时500ms
             min_request_timeout: Duration::from_millis(10),  // 最小超时10ms
@@ -230,7 +230,7 @@ impl TestNode {
         })
     }
 
-    // 可以添加方法来查询状态机
+    // Methods can be added to query the state machine
     pub fn get_value(&self, key: &str) -> Option<String> {
         self.state_machine.get_value(key)
     }
@@ -249,7 +249,7 @@ impl TestNode {
         self.remove_node.notified().await;
     }
 
-    //restore
+    // Restore network connection
     pub async fn restore(&self) {
         info!("Restoring node {:?}", self.id);
         self.network.restore().await;

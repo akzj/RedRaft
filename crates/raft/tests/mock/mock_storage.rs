@@ -41,7 +41,7 @@ pub struct MockStorageInner {
     snapshot_storage: Option<SnapshotMemStore>,
 }
 
-/// 内存存储实现（用于测试和单机场景）
+/// In-memory storage implementation (for testing and single-node scenarios)
 #[derive(Clone)]
 pub struct MockStorage {
     inner: Arc<MockStorageInner>,
@@ -201,7 +201,7 @@ impl LogEntryStorage for MockStorage {
 
     async fn get_log_term(&self, _from: &RaftId, idx: u64) -> StorageResult<u64> {
         if idx == 0 {
-            return Ok(0); // 索引 0 的任期总是 0
+            return Ok(0); // Term for index 0 is always 0
         }
 
         let log = self.log.read().unwrap();
@@ -211,8 +211,8 @@ impl LogEntryStorage for MockStorage {
             }
         }
 
-        // 如果日志条目不存在，返回错误而不是 0
-        // 这样可以避免日志一致性检查的混淆
+        // Return error if log entry doesn't exist, not 0
+        // This avoids confusion in log consistency checks
         Err(raft::StorageError::LogNotFound(idx))
     }
 }
@@ -263,7 +263,7 @@ mod tests {
         let storage = MockStorage::new();
         let node_id = create_test_raft_id("group1", "node1");
 
-        // 验证初始状态
+        // Verify initial state
         let hard_state = storage.load_hard_state(&node_id).await.unwrap();
         assert_eq!(hard_state, None);
 
@@ -281,7 +281,7 @@ mod tests {
         let node_id = create_test_raft_id("group1", "node1");
         let candidate_id = create_test_raft_id("group1", "candidate1");
 
-        // 测试保存和加载硬状态
+        // Test saving and loading hard state
         storage
             .save_hard_state(
                 &node_id,
@@ -304,7 +304,7 @@ mod tests {
             },
         );
 
-        // 测试更新硬状态
+        // Test updating hard state
         storage
             .save_hard_state(
                 &node_id,
@@ -327,7 +327,7 @@ mod tests {
             })
         );
 
-        // 测试零任期返回None
+        // Test zero term returns None
         storage
             .save_hard_state(
                 &node_id,
@@ -348,7 +348,7 @@ mod tests {
         let storage = MockStorage::new();
         let node_id = create_test_raft_id("group1", "node1");
 
-        // 测试追加日志条目
+        // Test appending log entries
         let entries = vec![
             create_test_log_entry(1, 1, "command1"),
             create_test_log_entry(2, 1, "command2"),
@@ -360,22 +360,22 @@ mod tests {
             .await
             .unwrap();
 
-        // 测试获取最后日志索引
+        // Test getting last log index
         let (last_index, last_term) = storage.get_last_log_index(&node_id).await.unwrap();
         assert_eq!(last_index, 3);
         assert_eq!(last_term, 2);
 
-        // 测试获取日志条目范围
+        // Test getting log entries range
         let retrieved = storage.get_log_entries(&node_id, 1, 3).await.unwrap();
         assert_eq!(retrieved.len(), 2);
         assert_eq!(retrieved[0].index, 1);
         assert_eq!(retrieved[1].index, 2);
 
-        // 测试获取全部日志
+        // Test getting all logs
         let all_entries = storage.get_log_entries(&node_id, 1, 4).await.unwrap();
         assert_eq!(all_entries.len(), 3);
 
-        // 测试空范围
+        // Test empty range
         let empty = storage.get_log_entries(&node_id, 5, 10).await.unwrap();
         assert_eq!(empty.len(), 0);
     }
@@ -396,12 +396,12 @@ mod tests {
             .await
             .unwrap();
 
-        // 测试获取存在的日志任期
+        // Test getting term for existing log
         assert_eq!(storage.get_log_term(&node_id, 1).await.unwrap(), 1);
         assert_eq!(storage.get_log_term(&node_id, 2).await.unwrap(), 2);
         assert_eq!(storage.get_log_term(&node_id, 3).await.unwrap(), 2);
 
-        // 测试获取不存在的日志任期 - 现在应该返回错误
+        // Test getting term for non-existent log - should return error now
         assert!(storage.get_log_term(&node_id, 5).await.is_err());
     }
 
@@ -422,7 +422,7 @@ mod tests {
             .await
             .unwrap();
 
-        // 截断索引3及之后的日志
+        // Truncate logs from index 3 onwards
         storage.truncate_log_suffix(&node_id, 3).await.unwrap();
 
         let remaining = storage.get_log_entries(&node_id, 1, 10).await.unwrap();
@@ -433,7 +433,7 @@ mod tests {
         let (last_index, _) = storage.get_last_log_index(&node_id).await.unwrap();
         assert_eq!(last_index, 2);
 
-        // 测试截断不存在的索引
+        // Test truncating non-existent index
         storage.truncate_log_suffix(&node_id, 10).await.unwrap();
         let unchanged = storage.get_log_entries(&node_id, 1, 10).await.unwrap();
         assert_eq!(unchanged.len(), 2);
@@ -456,7 +456,7 @@ mod tests {
             .await
             .unwrap();
 
-        // 截断索引3之前的日志
+        // Truncate logs before index 3
         storage.truncate_log_prefix(&node_id, 3).await.unwrap();
 
         let remaining = storage.get_log_entries(&node_id, 1, 10).await.unwrap();
@@ -464,7 +464,7 @@ mod tests {
         assert_eq!(remaining[0].index, 3);
         assert_eq!(remaining[1].index, 4);
 
-        // 测试截断所有日志
+        // Test truncating all logs
         storage.truncate_log_prefix(&node_id, 5).await.unwrap();
         let empty = storage.get_log_entries(&node_id, 1, 10).await.unwrap();
         assert_eq!(empty.len(), 0);
@@ -479,11 +479,11 @@ mod tests {
         let storage = MockStorage::new();
         let node_id = create_test_raft_id("group1", "node1");
 
-        // 测试初始快照状态
+        // Test initial snapshot state
         let initial = storage.load_snapshot(&node_id).await.unwrap();
         assert_eq!(initial, None);
 
-        // 测试保存和加载快照
+        // Test saving and loading snapshot
         let snapshot = create_test_snapshot(10, 3, "snapshot_data");
         storage
             .save_snapshot(&node_id, snapshot.clone())
@@ -493,7 +493,7 @@ mod tests {
         let loaded = storage.load_snapshot(&node_id).await.unwrap();
         assert_eq!(loaded, Some(snapshot));
 
-        // 测试覆盖快照
+        // Test overwriting snapshot
         let new_snapshot = create_test_snapshot(20, 5, "new_snapshot_data");
         storage
             .save_snapshot(&node_id, new_snapshot.clone())
@@ -509,7 +509,7 @@ mod tests {
         let storage = MockStorage::new();
         let node_id = create_test_raft_id("group1", "node1");
 
-        // 测试保存和加载集群配置
+        // Test saving and loading cluster config
         let config = create_test_config(vec![
             ("group1", "node1"),
             ("group1", "node2"),
@@ -523,7 +523,7 @@ mod tests {
         let loaded = storage.load_cluster_config(&node_id).await.unwrap();
         assert_eq!(loaded, config);
 
-        // 测试更新配置
+        // Test updating config
         let new_config = create_test_config(vec![
             ("group1", "node1"),
             ("group1", "node2"),
@@ -547,7 +547,7 @@ mod tests {
         let storage = Arc::new(MockStorage::new());
         let node_id = create_test_raft_id("group1", "node1");
 
-        // 并发写入日志条目
+        // Concurrent log entry writes
         let mut handles = vec![];
         for i in 1..=10 {
             let storage_clone = storage.clone();
@@ -562,16 +562,16 @@ mod tests {
             handles.push(handle);
         }
 
-        // 等待所有任务完成
+        // Wait for all tasks to complete
         for handle in handles {
             handle.await.unwrap();
         }
 
-        // 验证所有日志都被正确写入
+        // Verify all logs are correctly written
         let all_entries = storage.get_log_entries(&node_id, 1, 11).await.unwrap();
         assert_eq!(all_entries.len(), 10);
 
-        // 验证日志顺序（可能因并发而乱序，但所有条目都应该存在）
+        // Verify log order (may be out of order due to concurrency, but all entries should exist)
         let mut indices: Vec<u64> = all_entries.iter().map(|e| e.index).collect();
         indices.sort();
         let expected: Vec<u64> = (1..=10).collect();
@@ -583,7 +583,7 @@ mod tests {
         let storage = MockStorage::new();
         let node_id = create_test_raft_id("group1", "node1");
 
-        // 测试边界范围查询
+        // Test boundary range queries
         let entries = vec![
             create_test_log_entry(1, 1, "command1"),
             create_test_log_entry(2, 1, "command2"),
@@ -594,24 +594,24 @@ mod tests {
             .await
             .unwrap();
 
-        // 测试相等的low和high
+        // Test equal low and high
         let same_range = storage.get_log_entries(&node_id, 2, 2).await.unwrap();
         assert_eq!(same_range.len(), 0);
 
-        // 测试超出范围的查询
+        // Test out-of-range query
         let out_of_range = storage.get_log_entries(&node_id, 10, 20).await.unwrap();
         assert_eq!(out_of_range.len(), 0);
 
-        // 测试倒序范围（high < low）
+        // Test reverse range (high < low)
         let reverse_range = storage.get_log_entries(&node_id, 3, 1).await.unwrap();
         assert_eq!(reverse_range.len(), 0);
 
-        // 测试截断不存在的索引
+        // Test truncating non-existent index
         storage.truncate_log_suffix(&node_id, 100).await.unwrap();
         let unchanged = storage.get_log_entries(&node_id, 1, 10).await.unwrap();
         assert_eq!(unchanged.len(), 3);
 
-        // 测试获取不存在索引的任期
+        // Test getting term for non-existent index
         assert!(storage.get_log_term(&node_id, 100).await.is_err());
     }
 
@@ -623,7 +623,7 @@ mod tests {
         let candidate1 = create_test_raft_id("group1", "candidate1");
         let candidate2 = create_test_raft_id("group1", "candidate2");
 
-        // 测试不同节点的独立操作（虽然MockStorage是共享的，但接口设计为支持多节点）
+        // Test independent operations for different nodes (MockStorage is shared, but interface is designed for multi-node support)
 
         let state1 = HardState {
             raft_id: node1.clone(),
