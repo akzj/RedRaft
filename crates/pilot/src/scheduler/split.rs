@@ -15,7 +15,7 @@ use tokio::sync::RwLock as AsyncRwLock;
 use tracing::{debug, error, info, warn};
 
 use crate::metadata::{
-    ClusterMetadata, KeyRange, ShardId, ShardInfo, ShardSplitState, ShardStatus,
+    ClusterMetadata, KeyRange, ShardId, ShardSplitState, ShardStatus,
     SplitPhase, SplitProgress, SplitRole, SplitStatus, SplitTask, SplittingShardInfo,
 };
 
@@ -68,14 +68,18 @@ impl SplitManager {
     /// # 参数
     /// - `source_shard_id`: 源分片 ID
     /// - `split_slot`: 分裂点槽位
-    /// - `target_shard_id`: 目标分片 ID（可选，自动生成）
-    /// - `target_nodes`: 目标分片的节点列表（可选，复用源分片节点）
+    /// - `target_shard_id`: 目标分片 ID（必须提供，且目标分片必须已存在且健康）
+    ///
+    /// # 要求
+    /// - 源分片必须存在且状态为 Normal
+    /// - 目标分片必须已存在且状态为 Normal（健康状态：有 leader 且副本数满足）
+    /// - 分裂点必须在源分片范围内
+    /// - 目标分片的 key_range 必须与分裂点匹配：[split_slot, source_shard.end)
     pub async fn trigger_split(
         &self,
         source_shard_id: &ShardId,
         split_slot: u32,
-        target_shard_id: Option<ShardId>,
-        target_nodes: Option<Vec<String>>,
+        target_shard_id: ShardId,
     ) -> Result<SplitTask, String> {
         let mut metadata = self.metadata.write().await;
 
@@ -108,36 +112,46 @@ impl SplitManager {
             ));
         }
 
-        // 3. 生成目标分片 ID
-        let target_shard_id = target_shard_id.unwrap_or_else(|| {
-            let max_id = metadata
-                .shards
-                .keys()
-                .filter_map(|k| k.strip_prefix("shard_").and_then(|n| n.parse::<u32>().ok()))
-                .max()
-                .unwrap_or(0);
-            format!("shard_{:04}", max_id + 1)
-        });
+        // 3. 验证目标分片存在
+        let target_shard = metadata
+            .shards
+            .get(&target_shard_id)
+            .ok_or_else(|| format!("Target shard {} not found. Target shard must be created and healthy before split", target_shard_id))?;
 
-        // 4. 检查目标分片 ID 是否已存在
-        if metadata.shards.contains_key(&target_shard_id) {
-            return Err(format!("Target shard {} already exists", target_shard_id));
+        // 4. 验证目标分片状态为 Normal（健康状态）
+        if target_shard.status != ShardStatus::Normal {
+            return Err(format!(
+                "Target shard {} is not in normal status: {}. Target shard must be healthy before split",
+                target_shard_id, target_shard.status
+            ));
         }
 
-        // 5. 确定目标分片的节点
-        let target_nodes = target_nodes.unwrap_or_else(|| source_shard.replicas.clone());
-        if target_nodes.is_empty() {
-            return Err("Target nodes cannot be empty".to_string());
+        // 5. 验证目标分片健康（有 leader 且副本数满足）
+        if !target_shard.is_healthy() {
+            return Err(format!(
+                "Target shard {} is not healthy. It must have a leader and satisfy replica factor before split",
+                target_shard_id
+            ));
         }
 
-        // 验证节点存在
-        for node_id in &target_nodes {
-            if !metadata.nodes.contains_key(node_id) {
-                return Err(format!("Node {} does not exist", node_id));
-            }
+        // 6. 验证目标分片不在分裂中
+        if target_shard.is_splitting() {
+            return Err(format!(
+                "Target shard {} is already splitting",
+                target_shard_id
+            ));
         }
 
-        // 6. 创建分裂任务
+        // 7. 验证目标分片的 key_range 与分裂点匹配
+        let expected_target_range = KeyRange::new(split_slot, key_range.end);
+        if target_shard.key_range != expected_target_range {
+            return Err(format!(
+                "Target shard {} key_range {:?} does not match expected range {:?} for split at slot {}",
+                target_shard_id, target_shard.key_range, expected_target_range, split_slot
+            ));
+        }
+
+        // 8. 创建分裂任务
         let task = SplitTask::new(
             source_shard_id.clone(),
             target_shard_id.clone(),
@@ -149,27 +163,16 @@ impl SplitManager {
             task.id, source_shard_id, target_shard_id, split_slot
         );
 
-        // 7. 创建目标分片（状态为 Creating）
-        let target_key_range = KeyRange::new(split_slot, key_range.end);
-        let mut target_shard =
-            ShardInfo::new(target_shard_id.clone(), target_key_range, source_shard.replica_factor);
-
-        // 添加副本节点
-        for node_id in &target_nodes {
-            target_shard.add_replica(node_id.clone());
-            if let Some(node) = metadata.nodes.get_mut(node_id) {
-                node.add_shard(target_shard_id.clone());
-            }
-        }
-
-        // 设置目标分片的分裂状态
+        // 9. 更新目标分片的分裂状态
+        let target_shard = metadata.shards.get_mut(&target_shard_id).unwrap();
         target_shard.set_split_state(ShardSplitState {
             split_task_id: task.id.clone(),
             split_slot,
             role: SplitRole::Target,
         });
+        let target_nodes = target_shard.replicas.clone();
 
-        // 8. 更新源分片状态
+        // 10. 更新源分片状态
         let source_shard = metadata.shards.get_mut(source_shard_id).unwrap();
         source_shard.set_split_state(ShardSplitState {
             split_task_id: task.id.clone(),
@@ -177,10 +180,7 @@ impl SplitManager {
             role: SplitRole::Source,
         });
 
-        // 9. 存储目标分片
-        metadata.shards.insert(target_shard_id.clone(), target_shard);
-
-        // 10. 添加分裂信息到路由表（用于 Node 感知分裂状态）
+        // 11. 添加分裂信息到路由表（用于 Node 感知分裂状态）
         let splitting_info = SplittingShardInfo {
             source_shard: source_shard_id.clone(),
             target_shard: target_shard_id.clone(),
@@ -191,12 +191,12 @@ impl SplitManager {
         };
         metadata.routing_table.add_splitting_shard(splitting_info);
 
-        // 11. 存储任务
+        // 12. 存储任务
         let task_clone = task.clone();
         self.tasks.write().insert(task.id.clone(), task);
 
         info!(
-            "Split task {} created successfully, target shard {} created",
+            "Split task {} created successfully, using existing healthy target shard {}",
             task_clone.id, target_shard_id
         );
 

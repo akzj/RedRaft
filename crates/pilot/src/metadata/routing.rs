@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::{KeyRange, NodeId, ShardId, SplitRole, TOTAL_SLOTS};
+use super::{KeyRange, NodeId, ShardId, TOTAL_SLOTS};
 
 /// 正在分裂的分片信息
 ///
@@ -173,7 +173,8 @@ impl RoutingTable {
 
     /// 添加正在分裂的分片信息
     pub fn add_splitting_shard(&mut self, info: SplittingShardInfo) {
-        self.splitting_shards.insert(info.source_shard.clone(), info);
+        self.splitting_shards
+            .insert(info.source_shard.clone(), info);
         self.bump_version();
     }
 
@@ -260,20 +261,26 @@ mod tests {
     #[test]
     fn test_routing() {
         let mut rt = RoutingTable::new();
-        
+
         // 分配槽位
         rt.assign_slots(&"shard1".to_string(), 0, 8192);
         rt.assign_slots(&"shard2".to_string(), 8192, 16384);
-        
+
         // 设置分片节点
-        rt.set_shard_nodes("shard1".to_string(), vec!["node1".to_string(), "node2".to_string()]);
-        rt.set_shard_nodes("shard2".to_string(), vec!["node2".to_string(), "node3".to_string()]);
-        
+        rt.set_shard_nodes(
+            "shard1".to_string(),
+            vec!["node1".to_string(), "node2".to_string()],
+        );
+        rt.set_shard_nodes(
+            "shard2".to_string(),
+            vec!["node2".to_string(), "node3".to_string()],
+        );
+
         // 设置节点地址
         rt.set_node_addr("node1".to_string(), "127.0.0.1:50051".to_string());
         rt.set_node_addr("node2".to_string(), "127.0.0.1:50052".to_string());
         rt.set_node_addr("node3".to_string(), "127.0.0.1:50053".to_string());
-        
+
         assert!(rt.is_complete());
         assert_eq!(rt.unassigned_slot_count(), 0);
     }

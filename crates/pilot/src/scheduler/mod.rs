@@ -204,15 +204,22 @@ impl Scheduler {
     }
 
     /// 触发分片分裂
+    ///
+    /// # 参数
+    /// - `source_shard_id`: 源分片 ID
+    /// - `split_slot`: 分裂点槽位
+    /// - `target_shard_id`: 目标分片 ID（必须提供，且目标分片必须已存在且健康）
+    ///
+    /// # 要求
+    /// - 目标分片必须已创建且状态为 Normal（健康状态）
     pub async fn split_shard(
         &self,
         source_shard_id: &ShardId,
         split_slot: u32,
-        target_shard_id: Option<String>,
-        target_nodes: Option<Vec<String>>,
+        target_shard_id: String,
     ) -> Result<SplitTask, String> {
         self.split_manager
-            .trigger_split(source_shard_id, split_slot, target_shard_id, target_nodes)
+            .trigger_split(source_shard_id, split_slot, target_shard_id)
             .await
     }
 

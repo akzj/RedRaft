@@ -61,7 +61,7 @@ impl ClusterMetadata {
 
             let key_range = KeyRange::new(start, end);
             let shard = ShardInfo::new(shard_id.clone(), key_range, self.default_replica_factor);
-            
+
             self.shards.insert(shard_id.clone(), shard);
             self.routing_table.assign_slots(&shard_id, start, end);
         }
@@ -70,38 +70,22 @@ impl ClusterMetadata {
     }
 
     /// 创建新分片
-    /// 
+    ///
     /// # 参数
     /// - `shard_id`: 分片 ID（如果为 None，自动生成）
-    /// - `slot_start`: 起始槽位
-    /// - `slot_end`: 结束槽位（不包含）
     /// - `replica_nodes`: 初始副本节点列表
-    /// 
+    ///
     /// # 返回
     /// - Ok(ShardInfo): 创建成功
     /// - Err(String): 创建失败原因
+    ///
+    /// # 说明
+    /// 新创建的分片是空的，没有分配任何 slot。后续需要通过数据迁移来分配 slot。
     pub fn create_shard(
         &mut self,
         shard_id: Option<String>,
-        slot_start: u32,
-        slot_end: u32,
         replica_nodes: Vec<NodeId>,
     ) -> Result<ShardInfo, String> {
-        // 验证槽位范围
-        if slot_start >= slot_end {
-            return Err("slot_start must be less than slot_end".to_string());
-        }
-        if slot_end > TOTAL_SLOTS {
-            return Err(format!("slot_end must not exceed {}", TOTAL_SLOTS));
-        }
-
-        // 检查槽位是否已被分配
-        for slot in slot_start..slot_end {
-            if self.routing_table.get_shard_for_slot(slot).is_some() {
-                return Err(format!("Slot {} is already assigned", slot));
-            }
-        }
-
         // 验证节点存在
         for node_id in &replica_nodes {
             if !self.nodes.contains_key(node_id) {
@@ -111,7 +95,9 @@ impl ClusterMetadata {
 
         // 生成分片 ID
         let shard_id = shard_id.unwrap_or_else(|| {
-            let max_id = self.shards.keys()
+            let max_id = self
+                .shards
+                .keys()
                 .filter_map(|k| k.strip_prefix("shard_").and_then(|n| n.parse::<u32>().ok()))
                 .max()
                 .unwrap_or(0);
@@ -123,8 +109,8 @@ impl ClusterMetadata {
             return Err(format!("Shard {} already exists", shard_id));
         }
 
-        // 创建分片
-        let key_range = KeyRange::new(slot_start, slot_end);
+        // 创建空分片（未分配 slot）
+        let key_range = KeyRange::empty();
         let mut shard = ShardInfo::new(shard_id.clone(), key_range, self.default_replica_factor);
 
         // 添加副本节点
@@ -141,9 +127,9 @@ impl ClusterMetadata {
             shard.status = super::ShardStatus::Normal;
         }
 
-        // 更新路由表
-        self.routing_table.assign_slots(&shard_id, slot_start, slot_end);
-        self.routing_table.set_shard_nodes(shard_id.clone(), replica_nodes);
+        // 更新路由表（只设置节点映射，不分配 slot）
+        self.routing_table
+            .set_shard_nodes(shard_id.clone(), replica_nodes);
 
         // 存储分片
         let result = shard.clone();
@@ -163,12 +149,12 @@ impl ClusterMetadata {
     pub fn register_node(&mut self, node: NodeInfo) -> bool {
         let node_id = node.id.clone();
         let grpc_addr = node.grpc_addr.clone();
-        
+
         let is_new = !self.nodes.contains_key(&node_id);
         self.nodes.insert(node_id.clone(), node);
         self.routing_table.set_node_addr(node_id, grpc_addr);
         self.touch();
-        
+
         is_new
     }
 
@@ -176,12 +162,12 @@ impl ClusterMetadata {
     pub fn remove_node(&mut self, node_id: &NodeId) -> Option<NodeInfo> {
         let node = self.nodes.remove(node_id)?;
         self.routing_table.remove_node(node_id);
-        
+
         // 从所有分片中移除该节点
         for shard in self.shards.values_mut() {
             shard.remove_replica(node_id);
         }
-        
+
         self.touch();
         Some(node)
     }
@@ -224,7 +210,8 @@ impl ClusterMetadata {
 
         // 更新路由表
         if let Some(shard) = self.shards.get(shard_id) {
-            self.routing_table.set_shard_nodes(shard_id.clone(), shard.replicas.clone());
+            self.routing_table
+                .set_shard_nodes(shard_id.clone(), shard.replicas.clone());
         }
 
         self.touch();
@@ -236,7 +223,7 @@ impl ClusterMetadata {
         if let Some(shard) = self.shards.get_mut(shard_id) {
             if shard.replicas.contains(leader_id) {
                 shard.set_leader(leader_id.clone());
-                
+
                 // 更新路由表，将 leader 放在第一位
                 let mut nodes = shard.replicas.clone();
                 if let Some(pos) = nodes.iter().position(|n| n == leader_id) {
@@ -244,7 +231,7 @@ impl ClusterMetadata {
                     nodes.insert(0, leader_id.clone());
                 }
                 self.routing_table.set_shard_nodes(shard_id.clone(), nodes);
-                
+
                 self.touch();
                 return true;
             }
@@ -282,13 +269,21 @@ impl ClusterMetadata {
     /// 获取集群统计信息
     pub fn stats(&self) -> ClusterStats {
         use super::{NodeStatus, ShardStatus};
-        
+
         ClusterStats {
             total_nodes: self.nodes.len(),
-            online_nodes: self.nodes.values().filter(|n| n.status == NodeStatus::Online).count(),
+            online_nodes: self
+                .nodes
+                .values()
+                .filter(|n| n.status == NodeStatus::Online)
+                .count(),
             total_shards: self.shards.len(),
             healthy_shards: self.shards.values().filter(|s| s.is_healthy()).count(),
-            migrating_shards: self.shards.values().filter(|s| s.status == ShardStatus::Migrating).count(),
+            migrating_shards: self
+                .shards
+                .values()
+                .filter(|s| s.status == ShardStatus::Migrating)
+                .count(),
             routing_version: self.routing_table.version,
             unassigned_slots: self.routing_table.unassigned_slot_count(),
         }

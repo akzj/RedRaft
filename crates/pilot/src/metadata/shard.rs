@@ -27,6 +27,16 @@ impl KeyRange {
         Self { start, end }
     }
 
+    /// 创建空的范围（用于表示未分配 slot 的分片）
+    pub fn empty() -> Self {
+        Self { start: 0, end: 0 }
+    }
+
+    /// 检查范围是否为空（未分配 slot）
+    pub fn is_empty(&self) -> bool {
+        self.start == 0 && self.end == 0
+    }
+
     /// 槽位数量
     pub fn slot_count(&self) -> u32 {
         self.end - self.start
@@ -34,7 +44,11 @@ impl KeyRange {
 
     /// 检查槽位是否在范围内
     pub fn contains(&self, slot: u32) -> bool {
-        slot >= self.start && slot < self.end
+        if self.is_empty() {
+            false
+        } else {
+            slot >= self.start && slot < self.end
+        }
     }
 }
 
