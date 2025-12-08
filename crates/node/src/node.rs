@@ -126,8 +126,15 @@ impl RedRaftNode {
     /// 
     /// 用于业务请求路由，不会创建新的 Raft 组。
     /// 如果 shard 不存在，返回 None。
+    /// 
+    /// # 类型转换
+    /// - 输入：`shard_id` (业务层 ShardId)
+    /// - 输出：`RaftId` 中的 `group` 字段（Raft 层 GroupId）
+    /// - 语义：一个 Shard 对应一个 Raft Group，ShardId 作为 GroupId 使用
     pub fn get_raft_group(&self, shard_id: &str) -> Option<RaftId> {
         if self.state_machines.lock().contains_key(shard_id) {
+            // ShardId (业务层) -> GroupId (Raft 层)
+            // 类型相同（都是 String），但语义不同
             Some(RaftId::new(shard_id.to_string(), self.node_id.clone()))
         } else {
             None
@@ -141,13 +148,20 @@ impl RedRaftNode {
     /// 业务请求应使用 `get_raft_group` 获取已存在的组。
     /// 
     /// # 参数
-    /// - `shard_id`: 分片 ID
+    /// - `shard_id`: 分片 ID（业务层 ShardId）
     /// - `nodes`: 该分片的所有节点 ID 列表
+    /// 
+    /// # 类型转换
+    /// - 输入：`shard_id` (业务层 ShardId)
+    /// - 内部：将 `shard_id` 作为 `group` 传递给 `RaftId`（Raft 层 GroupId）
+    /// - 语义：一个 Shard 对应一个 Raft Group，ShardId 作为 GroupId 使用
     pub async fn create_raft_group(
         &self,
         shard_id: String,
         nodes: Vec<String>,
     ) -> Result<RaftId, String> {
+        // ShardId (业务层) -> GroupId (Raft 层)
+        // 类型相同（都是 String），但语义不同：Shard 可以分裂，Raft Group 不会分裂
         let raft_id = RaftId::new(shard_id.clone(), self.node_id.clone());
         
         // 检查是否已存在

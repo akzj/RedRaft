@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
-use raft::{GroupId, NodeId};
+use raft::NodeId;
 
 /// Pilot 客户端错误
 #[derive(Debug, thiserror::Error)]
@@ -25,20 +25,23 @@ pub enum PilotError {
 }
 
 /// 路由表（从 Pilot 获取）
+/// 
+/// 注意：使用 ShardId（业务层概念），而不是 GroupId（Raft 层概念）
+/// 在创建 Raft 组时，ShardId 会作为 GroupId 传递
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingTable {
     /// 版本号
     pub version: u64,
-    /// 槽位到分片的映射
-    pub slots: Vec<Option<GroupId>>,
+    /// 槽位到分片的映射（使用 ShardId，业务层概念）
+    pub slots: Vec<Option<String>>,
     /// 分片到节点的映射（第一个为 leader）
-    /// 与 RaftId 结构一致：group (GroupId) -> nodes (Vec<NodeId>)
-    pub shard_nodes: HashMap<GroupId, Vec<NodeId>>,
+    /// 使用 ShardId 作为 key（业务层概念）
+    pub shard_nodes: HashMap<String, Vec<NodeId>>,
     /// 节点地址映射
     pub node_addrs: HashMap<NodeId, String>,
     /// 正在分裂的分片信息 (source_shard_id -> SplitInfo)
     #[serde(default)]
-    pub splitting_shards: HashMap<GroupId, ShardSplitInfo>,
+    pub splitting_shards: HashMap<String, ShardSplitInfo>,
 }
 
 /// 分片分裂信息
@@ -46,8 +49,8 @@ pub struct RoutingTable {
 pub struct ShardSplitInfo {
     /// 分裂点槽位
     pub split_slot: u32,
-    /// 目标分片 ID（与 RaftId.group 对应）
-    pub target_shard: GroupId,
+    /// 目标分片 ID（业务层 ShardId，创建 Raft 组时会作为 GroupId）
+    pub target_shard: String,
     /// 分裂状态
     pub status: String,
 }
@@ -79,26 +82,26 @@ impl RoutingTable {
         self.node_addrs.get(leader)
     }
 
-    /// 获取分片 ID
-    pub fn get_shard_for_key(&self, key: &[u8]) -> Option<&GroupId> {
+    /// 获取分片 ID（业务层 ShardId）
+    pub fn get_shard_for_key(&self, key: &[u8]) -> Option<&String> {
         let slot = Self::slot_for_key(key);
         self.slots.get(slot as usize)?.as_ref()
     }
 
     /// 检查分片是否正在分裂
-    pub fn is_shard_splitting(&self, shard_id: &GroupId) -> bool {
+    pub fn is_shard_splitting(&self, shard_id: &str) -> bool {
         self.splitting_shards.contains_key(shard_id)
     }
 
     /// 获取分片的分裂信息
-    pub fn get_split_info(&self, shard_id: &GroupId) -> Option<&ShardSplitInfo> {
+    pub fn get_split_info(&self, shard_id: &str) -> Option<&ShardSplitInfo> {
         self.splitting_shards.get(shard_id)
     }
 
     /// 检查 key 是否在分裂的目标范围内（应该 MOVED 到新分片）
     /// 
     /// 返回 (target_shard_id, target_leader_addr)
-    pub fn should_move_key(&self, key: &[u8], shard_id: &GroupId) -> Option<(&GroupId, &String)> {
+    pub fn should_move_key(&self, key: &[u8], shard_id: &str) -> Option<(&String, &String)> {
         let split_info = self.splitting_shards.get(shard_id)?;
         let slot = Self::slot_for_key(key);
         

@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use super::NodeId;
 
 /// 分片 ID
+/// 
+/// 业务层概念：一个分片可以分裂成多个分片。
+/// 在 Raft 层，每个分片对应一个 Raft Group（GroupId），
+/// 但 ShardId 和 GroupId 是不同层次的概念。
 pub type ShardId = String;
 
 /// 哈希槽总数（类似 Redis Cluster 的 16384）
