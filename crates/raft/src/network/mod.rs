@@ -16,7 +16,7 @@ use tokio::time::{timeout, Duration};
 use tonic::transport::{Endpoint, Server};
 use tracing::{debug, error, info, warn};
 
-/// 网络消息通道容量
+/// Network message channel capacity
 const NETWORK_CHANNEL_CAPACITY: usize = 4096;
 
 pub mod pb;
@@ -177,7 +177,7 @@ impl MultiRaftNetwork {
         node_map.remove(node_id);
     }
 
-    // 获取或创建到远程节点的 gRPC 客户端
+    // Get or create gRPC client to remote node
     async fn create_client(&self, node_id: &str) -> Result<GrpcClient, RpcError> {
         let target_addr = self.resolve_node_address(node_id).await.map_err(|e| {
             RpcError::Network(format!("Failed to resolve address for {}: {}", node_id, e))
@@ -197,30 +197,30 @@ impl MultiRaftNetwork {
         self.options.resolve_node_address(node_id).await
     }
 
-    // 运行异步任务，批量发送消息到远程节点
+    // Run async task to batch send messages to remote node
     async fn run_message_sender(
         &self,
         mut rx: mpsc::Receiver<OutgoingMessage>,
         rpc_client: GrpcClient,
         shutdown: Arc<Notify>,
     ) {
-        let batch_size = self.options.batch_size; // 批量大小
+        let batch_size = self.options.batch_size; // Batch size
 
         let mut client = RaftServiceClient::new(rpc_client.clone());
 
         loop {
             let mut batch: Vec<OutgoingMessage> = Vec::with_capacity(batch_size / 4);
-            // 收集一批消息
+            // Collect a batch of messages
             async {
                 tokio::select! {
-                    // 接收消息
+                    // Receive messages
                     size = rx.recv_many(&mut batch, batch_size) => {
                         if size == 0 {
                             warn!("No messages received, exiting sender task");
                             return;
                         }
                     }
-                    // 检查关闭通知
+                    // Check shutdown notification
                     _ = shutdown.notified() => {
                         warn!("Shutdown notified, exiting sender task");
                         return;
@@ -249,7 +249,7 @@ impl MultiRaftNetwork {
                 return;
             }
 
-            // 按目标节点分组消息
+            // Group messages by target node
             let mut batch_requests = pb::BatchRequest {
                 node_id: self.options.node_id.clone(),
                 messages: Vec::with_capacity(batch.len()),
@@ -341,7 +341,7 @@ impl MultiRaftNetwork {
         });
     }
 
-    // 启动 gRPC 服务端 (通常在应用主函数中调用)
+    // Start gRPC server (usually called in application main function)
     pub async fn start_grpc_server(&mut self, dispatch: Arc<dyn MessageDispatcher>) -> Result<()> {
         assert!(self.dispatch.is_none(), "gRPC server already running");
         self.dispatch = Some(dispatch);

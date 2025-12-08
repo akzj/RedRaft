@@ -183,7 +183,7 @@ impl From<crate::InstallSnapshotState> for i32 {
     }
 }
 
-// Pre-Vote 转换
+// Pre-Vote conversion
 impl From<crate::message::PreVoteRequest> for pb::PreVoteRequest {
     fn from(req: crate::message::PreVoteRequest) -> Self {
         pb::PreVoteRequest {
@@ -254,7 +254,7 @@ impl From<OutgoingMessage> for pb::RpcMessage {
         }
     }
 }
-// 反向转换实现
+// Reverse conversion implementation
 impl From<pb::RaftId> for crate::RaftId {
     fn from(value: pb::RaftId) -> Self {
         crate::RaftId {
@@ -376,14 +376,14 @@ impl From<i32> for crate::InstallSnapshotState {
     fn from(value: i32) -> Self {
         match value {
             2 => crate::InstallSnapshotState::Installing,
-            1 => crate::InstallSnapshotState::Failed(String::new()), // 反序列化时无法恢复msg
+            1 => crate::InstallSnapshotState::Failed(String::new()), // Cannot recover message during deserialization
             3 => crate::InstallSnapshotState::Success,
             _ => crate::InstallSnapshotState::Failed(String::from("Unknown state")),
         }
     }
 }
 
-// Pre-Vote 反向转换
+// Pre-Vote reverse conversion
 impl From<pb::PreVoteRequest> for Result<crate::message::PreVoteRequest> {
     fn from(req: pb::PreVoteRequest) -> Self {
         Ok(crate::message::PreVoteRequest {
