@@ -8,58 +8,58 @@ use crate::message::{
 };
 use crate::types::{Command, RaftId, RequestId};
 
-/// Raft 事件定义（输入）
+/// Raft event definitions (input)
 #[derive(Debug, Clone)]
 pub enum Event {
-    // 定时器事件
-    /// 选举超时（Follower/Candidate 触发）
+    // Timer events
+    /// Election timeout (triggered by Follower/Candidate)
     ElectionTimeout,
-    /// 心跳超时（Leader 触发日志同步）
+    /// Heartbeat timeout (Leader triggers log synchronization)
     HeartbeatTimeout,
-    /// 定期将已提交日志应用到状态机
+    /// Periodically apply committed logs to state machine
     ApplyLogTimeout,
-    /// 配置变更超时
+    /// Config change timeout
     ConfigChangeTimeout,
 
-    // RPC 请求事件（来自其他节点）
+    // RPC request events (from other nodes)
     RequestVoteRequest(RaftId, RequestVoteRequest),
     AppendEntriesRequest(RaftId, AppendEntriesRequest),
     InstallSnapshotRequest(RaftId, InstallSnapshotRequest),
 
-    // RPC 响应事件（其他节点对本节点请求的回复）
+    // RPC response events (other nodes' replies to this node's requests)
     RequestVoteResponse(RaftId, RequestVoteResponse),
     AppendEntriesResponse(RaftId, AppendEntriesResponse),
     InstallSnapshotResponse(RaftId, InstallSnapshotResponse),
 
-    // Pre-Vote 事件（防止网络分区节点干扰集群）
+    // Pre-Vote events (prevent network partitioned nodes from disrupting the cluster)
     PreVoteRequest(RaftId, PreVoteRequest),
     PreVoteResponse(RaftId, PreVoteResponse),
 
-    // 领导人转移相关事件
+    // Leader transfer related events
     LeaderTransfer {
         target: RaftId,
         request_id: RequestId,
     },
     LeaderTransferTimeout,
 
-    // 客户端事件
+    // Client events
     ClientPropose {
         cmd: Command,
         request_id: RequestId,
     },
 
-    /// ReadIndex 请求（用于线性一致性读）
+    /// ReadIndex request (for linearizable reads)
     ReadIndex {
         request_id: RequestId,
     },
 
-    // 配置变更事件
+    // Config change events
     ChangeConfig {
         new_voters: HashSet<RaftId>,
         request_id: RequestId,
     },
 
-    // Learner 管理事件
+    // Learner management events
     AddLearner {
         learner: RaftId,
         request_id: RequestId,
@@ -69,20 +69,20 @@ pub enum Event {
         request_id: RequestId,
     },
 
-    // 快照生成
+    // Snapshot generation
     CreateSnapshot,
 
-    // 快照安装结果
+    // Snapshot installation result
     CompleteSnapshotInstallation(CompleteSnapshotInstallation),
 }
 
-/// Raft 节点角色
+/// Raft node role
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Follower,
     Candidate,
     Leader,
-    /// 学习者角色（非投票成员）
+    /// Learner role (non-voting member)
     Learner,
 }
 

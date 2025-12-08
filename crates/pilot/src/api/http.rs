@@ -11,7 +11,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::metadata::{NodeInfo, ShardInfo, SplitTask};
 use crate::node_manager::RegisterResult;
@@ -42,6 +42,7 @@ impl HttpApi {
             .route("/api/v1/nodes/:node_id", get(get_node))
             .route("/api/v1/nodes/:node_id/heartbeat", post(node_heartbeat))
             .route("/api/v1/nodes/:node_id/drain", post(drain_node))
+            .route("/api/v1/nodes/:node_id/shards/:shard_id/status", post(report_shard_status))
             .route("/api/v1/nodes/:node_id", axum::routing::delete(remove_node))
             // Shards
             .route("/api/v1/shards", get(list_shards))
@@ -129,6 +130,14 @@ struct SplitShardRequest {
     split_slot: u32,
     /// Target shard ID (must be provided, and target shard must exist and be healthy)
     target_shard_id: String,
+}
+
+#[derive(Deserialize)]
+struct ReportShardStatusRequest {
+    /// Raft group status
+    status: crate::metadata::RaftGroupStatus,
+    /// Error message (if status is "failed")
+    error: Option<String>,
 }
 
 // ==================== Handler Functions ====================
@@ -237,6 +246,101 @@ async fn remove_node(
     }
 }
 
+async fn report_shard_status(
+    State(pilot): State<Arc<Pilot>>,
+    Path((node_id, shard_id)): Path<(String, String)>,
+    Json(req): Json<ReportShardStatusRequest>,
+) -> impl IntoResponse {
+    info!(
+        "Node {} reporting shard {} status: {}",
+        node_id, shard_id, req.status
+    );
+
+    let mut metadata = pilot.metadata_mut().await;
+    
+    // Verify node exists
+    if !metadata.nodes.contains_key(&node_id) {
+        return (
+            StatusCode::NOT_FOUND,
+            ApiResponse::<()>::err(format!("Node {} not found", node_id)),
+        );
+    }
+
+    // Verify shard exists
+    let shard = match metadata.shards.get_mut(&shard_id) {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                ApiResponse::<()>::err(format!("Shard {} not found", shard_id)),
+            );
+        }
+    };
+
+    use crate::metadata::{RaftGroupStatus, ShardStatus};
+
+    // Update shard status based on Raft group status
+    match req.status {
+        RaftGroupStatus::Ready => {
+            // Raft group created successfully
+            // Verify node is in replica list
+            if !shard.replicas.contains(&node_id) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    ApiResponse::<()>::err(format!(
+                        "Node {} is not a replica for shard {}",
+                        node_id, shard_id
+                    )),
+                );
+            }
+
+            // If shard was in Creating status and now has replicas, mark as Normal
+            if shard.status == ShardStatus::Creating {
+                if shard.is_replica_satisfied() {
+                    shard.status = ShardStatus::Normal;
+                    info!("Shard {} status updated to Normal after Raft group creation", shard_id);
+                }
+            }
+
+            drop(metadata);
+            let _ = pilot.save().await;
+            (StatusCode::OK, ApiResponse::ok(()))
+        }
+        RaftGroupStatus::Failed => {
+            // Raft group creation failed
+            let error_msg = req.error.unwrap_or_else(|| "Unknown error".to_string());
+            warn!(
+                "Node {} failed to create Raft group for shard {}: {}",
+                node_id, shard_id, error_msg
+            );
+
+            // Optionally mark shard as Error if all replicas failed
+            // For now, just log the error and keep shard status as is
+            // TODO: Track per-node Raft group status and mark shard as Error if all nodes failed
+
+            drop(metadata);
+            let _ = pilot.save().await;
+            (StatusCode::OK, ApiResponse::ok(()))
+        }
+        RaftGroupStatus::Removed => {
+            // Raft group removed (e.g., during shard deletion or migration)
+            info!("Node {} removed Raft group for shard {}", node_id, shard_id);
+            
+            // Remove node from shard replicas if present
+            shard.remove_replica(&node_id);
+            
+            // If no replicas left, mark shard as Error or Deleting
+            if shard.replicas.is_empty() {
+                shard.status = ShardStatus::Error;
+            }
+
+            drop(metadata);
+            let _ = pilot.save().await;
+            (StatusCode::OK, ApiResponse::ok(()))
+        }
+    }
+}
+
 // Shards
 async fn list_shards(State(pilot): State<Arc<Pilot>>) -> impl IntoResponse {
     let metadata = pilot.metadata().await;
@@ -258,11 +362,22 @@ async fn create_shard(
     match metadata.create_shard(req.shard_id, req.replica_nodes) {
         Ok(shard) => {
             let new_version = metadata.routing_table.version;
+            let needs_scheduling = shard.replicas.len() < shard.replica_factor as usize;
             drop(metadata);
             
             // If routing table version updated, notify watches
+            // Nodes will detect the new shard via routing table watch mechanism and
+            // create Raft groups asynchronously in sync_raft_groups_from_routing()
             if new_version > old_version {
                 pilot.notify_routing_watchers().await;
+            }
+            
+            // If shard needs more replicas, trigger scheduler to assign nodes
+            // Note: Raft group creation on nodes happens asynchronously via routing table refresh
+            // The shard status is set to Normal immediately, but actual Raft group creation
+            // on nodes may take some time. Use get_shard API to check shard status.
+            if needs_scheduling {
+                let _ = pilot.scheduler().schedule_shard_placement().await;
             }
             
             let _ = pilot.save().await;

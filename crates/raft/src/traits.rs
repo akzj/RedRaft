@@ -8,7 +8,7 @@ use crate::error::StateChangeError;
 use crate::message::{PreVoteRequest, PreVoteResponse};
 use crate::{cluster_config::ClusterConfig, *};
 
-// 结果类型别名
+// Result type aliases
 pub type RaftResult<T> = Result<T, RaftError>;
 pub type RpcResult<T> = Result<T, RpcError>;
 pub type StorageResult<T> = Result<T, StorageError>;
@@ -19,7 +19,7 @@ pub type SnapshotResult<T> = Result<T, SnapshotError>;
 
 #[async_trait::async_trait]
 pub trait Network: Send + Sync {
-    // 发送 RPC 回调
+    // Send RPC callbacks
     async fn send_request_vote_request(
         &self,
         from: &RaftId,
@@ -62,7 +62,7 @@ pub trait Network: Send + Sync {
         args: InstallSnapshotResponse,
     ) -> RpcResult<()>;
 
-    // Pre-Vote RPC（防止网络分区节点干扰集群）
+    // Pre-Vote RPC (prevents network partitioned nodes from disrupting the cluster)
     async fn send_pre_vote_request(
         &self,
         from: &RaftId,
@@ -182,7 +182,7 @@ pub trait EventSender: Send + Sync {
 
 #[async_trait]
 pub trait StateMachine: Send + Sync {
-    // 日志应用到状态机的回调
+    // Callback for applying logs to state machine
     async fn apply_command(
         &self,
         from: &RaftId,
@@ -191,14 +191,14 @@ pub trait StateMachine: Send + Sync {
         cmd: Command,
     ) -> ApplyResult<()>;
 
-    // 处理快照数据
+    // Process snapshot data
     fn process_snapshot(
         &self,
         from: &RaftId,
         index: u64,
         term: u64,
         data: Vec<u8>,
-        config: ClusterConfig, // 添加配置信息参数
+        config: ClusterConfig, // Add config information parameter
         request_id: RequestId,
         oneshot: oneshot::Sender<SnapshotResult<()>>,
     );
@@ -211,7 +211,7 @@ pub trait StateMachine: Send + Sync {
         saver: Arc<dyn SnapshotStorage>,
     ) -> StorageResult<(u64, u64)>;
 
-    // 客户端响应回调
+    // Client response callback
     async fn client_response(
         &self,
         from: &RaftId,
@@ -219,9 +219,9 @@ pub trait StateMachine: Send + Sync {
         result: ClientResult<u64>,
     ) -> ClientResult<()>;
 
-    /// ReadIndex 响应回调（用于线性一致性读）
-    /// result: Ok(read_index) 表示成功，返回可安全读取的索引
-    /// result: Err(e) 表示失败（如 NotLeader, Timeout）
+    /// ReadIndex response callback (for linearizable reads)
+    /// result: Ok(read_index) indicates success, returns index safe to read from
+    /// result: Err(e) indicates failure (e.g., NotLeader, Timeout)
     async fn read_index_response(
         &self,
         from: &RaftId,
@@ -232,10 +232,10 @@ pub trait StateMachine: Send + Sync {
 
 #[async_trait]
 pub trait EventNotify {
-    // 状态变更通知回调
+    // State change notification callback
     async fn on_state_changed(&self, from: &RaftId, role: Role) -> Result<(), StateChangeError>;
 
-    // 节点被从集群中删除的回调，用于优雅退出
+    // Callback when node is removed from cluster, for graceful exit
     async fn on_node_removed(&self, node_id: &RaftId) -> Result<(), StateChangeError>;
 }
 

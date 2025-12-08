@@ -141,6 +141,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 
+                // Set Pilot client for status reporting
+                node.set_pilot_client(client.clone());
+                
                 // Start background tasks
                 let _handles = client.clone().start_background_tasks();
                 

@@ -2,7 +2,7 @@ use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 
-// 类型定义
+// Type definitions
 pub type GroupId = String;
 pub type Command = Vec<u8>;
 pub type TimerId = u64;
@@ -26,7 +26,7 @@ impl RaftId {
     }
 }
 
-/// 请求ID类型（用于过滤超时响应）
+/// Request ID type (used to filter timed-out responses)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Encode, Decode)]
 pub struct RequestId(u64);
 

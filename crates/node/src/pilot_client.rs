@@ -13,6 +13,9 @@ use tracing::{debug, error, info, warn};
 
 use raft::NodeId;
 
+// Re-export RaftGroupStatus from pilot crate
+pub use pilot::RaftGroupStatus;
+
 /// Pilot client error
 #[derive(Debug, thiserror::Error)]
 pub enum PilotError {
@@ -345,6 +348,65 @@ impl PilotClient {
             Ok(true)
         } else {
             Ok(false)
+        }
+    }
+
+    /// Report Raft group status to Pilot
+    /// 
+    /// # Arguments
+    /// - `shard_id`: Shard ID (business layer ShardId)
+    /// - `status`: Raft group status
+    /// - `error`: Optional error message if status is "failed"
+    pub async fn report_shard_status(
+        &self,
+        shard_id: &str,
+        status: RaftGroupStatus,
+        error: Option<&str>,
+    ) -> Result<(), PilotError> {
+        #[derive(Serialize)]
+        struct ReportRequest {
+            status: RaftGroupStatus,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            error: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        struct ApiResponse<T> {
+            success: bool,
+            #[allow(dead_code)]
+            data: Option<T>,
+            error: Option<String>,
+        }
+
+        let url = format!(
+            "{}/api/v1/nodes/{}/shards/{}/status",
+            self.config.pilot_addr, self.node_id, shard_id
+        );
+
+        let req = ReportRequest {
+            status,
+            error: error.map(|e| e.to_string()),
+        };
+
+        let resp: ApiResponse<()> = self
+            .http_client
+            .post(&url)
+            .json(&req)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        if resp.success {
+            debug!("Reported shard {} status: {} to pilot", shard_id, status);
+            Ok(())
+        } else {
+            let error_msg = resp.error.clone().unwrap_or_default();
+            warn!(
+                "Failed to report shard {} status to pilot: {}",
+                shard_id, error_msg
+            );
+            Err(PilotError::Api(error_msg))
         }
     }
 

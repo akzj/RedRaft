@@ -7,33 +7,33 @@ use tracing::{debug, trace, warn};
 
 use crate::{RaftId, RaftStateOptions, RequestId};
 
-/// 超时队列清理阈值：当队列中的过期条目超过此数量时触发批量清理
+/// Timeout queue cleanup threshold: triggers batch cleanup when expired entries exceed this count
 const TIMEOUT_QUEUE_CLEANUP_THRESHOLD: usize = 100;
 
-/// Pipeline 状态管理器，负责处理 InFlight 请求的反馈控制和超时管理
+/// Pipeline state manager, responsible for handling feedback control and timeout management for InFlight requests
 pub struct PipelineState {
-    // 反馈控制状态
+    // Feedback control state
     /// peer -> (request_id -> (next_ack, send_time))
     inflight_requests: HashMap<RaftId, HashMap<RequestId, (u64, Instant)>>,
-    /// 每个 peer 的当前批次大小
+    /// Current batch size for each peer
     current_batch_size: HashMap<RaftId, u64>,
-    /// 响应时间历史窗口
+    /// Response time history window
     response_times: HashMap<RaftId, VecDeque<Duration>>,
-    /// 成功率历史窗口
+    /// Success rate history window
     success_rates: HashMap<RaftId, VecDeque<bool>>,
 
-    // 超时管理 - 按发送顺序排列
-    /// peer -> 按时间顺序的请求队列（用于高效超时检查）
+    // Timeout management - ordered by send time
+    /// peer -> time-ordered request queue (for efficient timeout checking)
     inflight_timeout_queue: HashMap<RaftId, VecDeque<(RequestId, Instant)>>,
-    /// 累计的陈旧条目计数（用于触发批量清理）
+    /// Accumulated stale entry count (used to trigger batch cleanup)
     stale_entry_count: usize,
 
-    // 配置选项
+    // Configuration options
     options: RaftStateOptions,
 }
 
 impl PipelineState {
-    /// 创建新的 Pipeline 状态管理器
+    /// Create a new Pipeline state manager
     pub fn new(options: RaftStateOptions) -> Self {
         Self {
             inflight_requests: HashMap::new(),
@@ -46,7 +46,7 @@ impl PipelineState {
         }
     }
 
-    /// 检查是否可以向peer发送请求（InFlight限制）
+    /// Check if requests can be sent to peer (InFlight limit)
     pub fn can_send_to_peer(&self, peer: &RaftId) -> bool {
         let inflight_count = self
             .inflight_requests
@@ -57,7 +57,7 @@ impl PipelineState {
         inflight_count < self.options.max_inflight_requests
     }
 
-    /// 获取基于反馈控制的批次大小
+    /// Get feedback-controlled batch size
     pub fn get_adaptive_batch_size(&mut self, peer: &RaftId) -> u64 {
         let current_batch = self
             .current_batch_size
@@ -79,7 +79,7 @@ impl PipelineState {
         adjusted
     }
 
-    /// 记录 InFlight 请求
+    /// Track InFlight requests
     pub fn track_inflight_request(
         &mut self,
         peer: &RaftId,
@@ -90,16 +90,16 @@ impl PipelineState {
         self.track_inflight_request_with_timeout(peer, request_id, next_ack);
     }
 
-    /// 移除 InFlight 请求（失败响应时调用）
+    /// Remove InFlight request (called on failed response)
     pub fn remove_inflight_request(&mut self, peer: &RaftId, request_id: RequestId) {
         if self.remove_inflight_request_with_request_id(peer, request_id) {
-            // 标记有陈旧条目需要清理（timeout_queue 中仍有此条目）
+            // Mark that there are stale entries to cleanup (this entry still exists in timeout_queue)
             self.stale_entry_count += 1;
             self.maybe_cleanup_stale_entries();
         }
     }
 
-    /// 记录成功响应的反馈
+    /// Record feedback for successful responses
     pub fn record_success_response(&mut self, peer: &RaftId, request_id: RequestId) {
         let removed_request = self
             .inflight_requests
@@ -116,13 +116,13 @@ impl PipelineState {
 
             self.record_response_feedback(peer, response_time, true);
             
-            // 标记有陈旧条目需要清理
+            // Mark that there are stale entries to cleanup
             self.stale_entry_count += 1;
             self.maybe_cleanup_stale_entries();
         }
     }
 
-    /// 记录 AppendEntries 响应反馈
+    /// Record AppendEntries response feedback
     pub fn record_append_entries_response_feedback(
         &mut self,
         peer: &RaftId,
@@ -136,21 +136,21 @@ impl PipelineState {
         }
     }
 
-    /// 优化的周期性超时检查 - 在心跳时调用
+    /// Optimized periodic timeout check - called during heartbeats
     pub fn periodic_timeout_check(&mut self) {
         self.check_and_cleanup_expired_requests();
     }
 
-    /// 记录响应反馈数据
+    /// Record response feedback data
     fn record_response_feedback(&mut self, peer: &RaftId, response_time: Duration, success: bool) {
-        // 记录响应时间
+        // Record response time
         let response_times = self.response_times.entry(peer.clone()).or_default();
         response_times.push_back(response_time);
         if response_times.len() > self.options.feedback_window_size {
             response_times.pop_front();
         }
 
-        // 记录成功率
+        // Record success rate
         let success_rates = self.success_rates.entry(peer.clone()).or_default();
         success_rates.push_back(success);
         if success_rates.len() > self.options.feedback_window_size {
@@ -158,7 +158,7 @@ impl PipelineState {
         }
     }
 
-    /// 计算平均响应时间
+    /// Calculate average response time
     fn calculate_average_response_time(&self, peer: &RaftId) -> Option<Duration> {
         self.response_times.get(peer).and_then(|times| {
             if times.is_empty() {
@@ -170,13 +170,13 @@ impl PipelineState {
         })
     }
 
-    /// 计算成功率
+    /// Calculate success rate
     fn calculate_success_rate(&self, peer: &RaftId) -> f64 {
         self.success_rates
             .get(peer)
             .map(|rates| {
                 if rates.is_empty() {
-                    1.0 // 默认成功率
+                    1.0 // Default success rate
                 } else {
                     let success_count = rates.iter().filter(|&&success| success).count();
                     success_count as f64 / rates.len() as f64
@@ -185,7 +185,7 @@ impl PipelineState {
             .unwrap_or(1.0)
     }
 
-    /// 基于反馈调整批次大小
+    /// Adjust batch size based on feedback
     fn adjust_batch_size_based_on_feedback(
         &self,
         current_batch: u64,
@@ -194,33 +194,33 @@ impl PipelineState {
     ) -> u64 {
         let mut new_batch = current_batch;
 
-        // 基于成功率调整
+        // Adjust based on success rate
         if success_rate < 0.8 {
-            // 成功率低，减小批次大小
+            // Low success rate, decrease batch size
             new_batch = (new_batch * 3 / 4).max(self.options.min_batch_size);
         } else if success_rate > 0.95 {
-            // 成功率高，可以尝试增大批次
+            // High success rate, can try to increase batch size
             new_batch = (new_batch * 5 / 4).min(self.options.max_batch_size);
         }
 
-        // 基于响应时间调整
+        // Adjust based on response time
         if let Some(response_time) = avg_response_time {
             let target = self.options.target_response_time;
 
             if response_time > target * 2 {
-                // 响应时间过长，减小批次
+                // Response time too long, decrease batch size
                 new_batch = (new_batch * 2 / 3).max(self.options.min_batch_size);
             } else if response_time < target / 2 {
-                // 响应时间很短，可以增大批次
+                // Response time very short, can increase batch size
                 new_batch = (new_batch * 6 / 5).min(self.options.max_batch_size);
             }
         }
 
-        // 确保在合法范围内
+        // Ensure within legal range
         new_batch.clamp(self.options.min_batch_size, self.options.max_batch_size)
     }
 
-    /// 当陈旧条目积累到阈值时，批量清理超时队列
+    /// Batch cleanup timeout queue when stale entries accumulate to threshold
     fn maybe_cleanup_stale_entries(&mut self) {
         if self.stale_entry_count < TIMEOUT_QUEUE_CLEANUP_THRESHOLD {
             return;
@@ -231,7 +231,7 @@ impl PipelineState {
             let inflight = self.inflight_requests.get(peer);
             let before_len = queue.len();
             
-            // 保留仍在 inflight_requests 中的条目
+            // Keep entries that are still in inflight_requests
             queue.retain(|(req_id, _)| {
                 inflight.is_some_and(|reqs| reqs.contains_key(req_id))
             });
@@ -249,22 +249,22 @@ impl PipelineState {
         self.stale_entry_count = 0;
     }
 
-    /// 简单高效的超时检查 - 利用时间顺序特性，基于智能超时计算
+    /// Simple and efficient timeout check - leverages time-ordered nature with smart timeout calculation
     fn check_and_cleanup_expired_requests(&mut self) {
         let now = Instant::now();
         let mut expired_items = Vec::new();
         let mut peer_timeouts = Vec::new();
 
-        // 预先计算所有peer的超时时间，避免借用冲突
+        // Pre-calculate timeout durations for all peers to avoid borrowing conflicts
         for peer in self.inflight_timeout_queue.keys() {
             let timeout_duration = self.calculate_smart_timeout(peer);
             peer_timeouts.push((peer.clone(), timeout_duration));
         }
 
-        // 遍历每个peer的超时队列
+        // Iterate through each peer's timeout queue
         for (peer, timeout_duration) in peer_timeouts {
             if let Some(timeout_queue) = self.inflight_timeout_queue.get_mut(&peer) {
-                // 从队列前面开始检查，遇到未超时的就停止
+                // Check from the front of the queue, stop when encountering unexpired items
                 while let Some((_request_id, send_time)) = timeout_queue.front() {
                     if now.duration_since(*send_time) > timeout_duration {
                         let (expired_request_id, expired_send_time) =
@@ -276,16 +276,16 @@ impl PipelineState {
                             timeout_duration,
                         ));
                     } else {
-                        // 遇到未超时的请求，后续的都不会超时，直接停止
+                        // Encountered an unexpired request, subsequent ones won't be expired, stop immediately
                         break;
                     }
                 }
             }
         }
 
-        // 批量处理过期的请求
+        // Batch process expired requests
         for (peer, expired_request_id, expired_send_time, timeout_used) in expired_items {
-            // 从inflight_requests中移除
+            // Remove from inflight_requests
             if let Some(peer_requests) = self.inflight_requests.get_mut(&peer) {
                 if peer_requests.remove(&expired_request_id).is_some() {
                     let elapsed = expired_send_time.elapsed();
@@ -294,28 +294,28 @@ impl PipelineState {
                         expired_request_id, peer, elapsed, timeout_used
                     );
 
-                    // 记录为失败的反馈
+                    // Record as failed feedback
                     self.record_response_feedback(&peer, elapsed, false);
                 }
             }
         }
     }
 
-    /// 计算基于平均响应时间的智能超时时间
+    /// Calculate smart timeout based on average response time
     fn calculate_smart_timeout(&self, peer: &RaftId) -> Duration {
         let avg_rtt = self.calculate_average_response_time(peer);
 
         if let Some(rtt) = avg_rtt {
-            // 超时 = avg_rtt * factor，限制在合理范围内
+            // Timeout = avg_rtt * factor, limited to reasonable range
             rtt.mul_f64(self.options.timeout_response_factor)
                 .clamp(self.options.min_request_timeout, self.options.max_request_timeout)
         } else {
-            // 没有历史数据时使用基础超时
+            // Use base timeout when there's no historical data
             self.options.base_request_timeout
         }
     }
 
-    /// 添加 InFlight 请求到超时队列
+    /// Add InFlight request to timeout queue
     fn track_inflight_request_with_timeout(
         &mut self,
         peer: &RaftId,
@@ -324,13 +324,13 @@ impl PipelineState {
     ) {
         let now = Instant::now();
 
-        // 添加到 inflight_requests
+        // Add to inflight_requests
         self.inflight_requests
             .entry(peer.clone())
             .or_default()
             .insert(request_id, (next_ack_index, now));
 
-        // 添加到超时队列的尾部（保持时间顺序）
+        // Add to the end of timeout queue (maintain time order)
         self.inflight_timeout_queue
             .entry(peer.clone())
             .or_default()
@@ -345,10 +345,10 @@ impl PipelineState {
         );
     }
 
-    /// 移除 InFlight 请求（O(1) 操作）
+    /// Remove InFlight request (O(1) operation)
     /// 
-    /// 注意：不从 timeout_queue 移除，因为 VecDeque 中移除需要 O(n)。
-    /// 超时检查时会自动跳过已不在 inflight_requests 中的条目。
+    /// Note: Do not remove from timeout_queue because removal from VecDeque requires O(n).
+    /// Timeout check will automatically skip entries not in inflight_requests.
     fn remove_inflight_request_with_request_id(
         &mut self,
         peer: &RaftId,
@@ -360,7 +360,7 @@ impl PipelineState {
             .is_some()
     }
 
-    /// 获取当前 InFlight 请求总数
+    /// Get current total InFlight requests
     pub fn get_inflight_request_count(&self) -> usize {
         self.inflight_requests
             .values()
@@ -368,7 +368,7 @@ impl PipelineState {
             .sum()
     }
 
-    /// 获取指定 peer 的 InFlight 请求数
+    /// Get InFlight request count for specific peer
     pub fn get_peer_inflight_count(&self, peer: &RaftId) -> usize {
         self.inflight_requests
             .get(peer)
@@ -376,7 +376,7 @@ impl PipelineState {
             .unwrap_or(0)
     }
 
-    /// 获取 Pipeline 统计信息
+    /// Get Pipeline statistics
     pub fn get_stats(&self) -> PipelineStats {
         let total_inflight = self.get_inflight_request_count();
         let total_timeout_queue: usize = self
@@ -414,7 +414,7 @@ impl PipelineState {
         }
     }
 
-    /// 清理所有状态（角色切换时调用）
+    /// Clear all state (called on role change)
     pub fn clear_all(&mut self) {
         self.inflight_requests.clear();
         self.current_batch_size.clear();
@@ -425,28 +425,28 @@ impl PipelineState {
     }
 }
 
-/// Pipeline 整体统计信息
+/// Pipeline overall statistics
 #[derive(Debug, Clone)]
 pub struct PipelineStats {
-    /// 总 InFlight 请求数
+    /// Total InFlight requests
     pub total_inflight: usize,
-    /// 超时队列总大小（可能包含已处理的陈旧条目）
+    /// Total timeout queue size (may contain processed stale entries)
     pub total_timeout_queue_size: usize,
-    /// 待清理的陈旧条目计数
+    /// Stale entries pending cleanup
     pub stale_entry_count: usize,
-    /// 各 peer 的统计信息
+    /// Per-peer statistics
     pub peer_stats: HashMap<RaftId, PeerPipelineStats>,
 }
 
-/// 单个 peer 的 Pipeline 统计信息
+/// Single peer Pipeline statistics
 #[derive(Debug, Clone)]
 pub struct PeerPipelineStats {
-    /// InFlight 请求数
+    /// InFlight request count
     pub inflight_count: usize,
-    /// 平均响应时间
+    /// Average response time
     pub avg_response_time: Option<Duration>,
-    /// 成功率
+    /// Success rate
     pub success_rate: f64,
-    /// 当前批次大小
+    /// Current batch size
     pub current_batch_size: u64,
 }

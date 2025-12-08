@@ -1397,6 +1397,7 @@ dependencies = [
  "bincode",
  "clap",
  "parking_lot",
+ "pilot",
  "raft",
  "rand",
  "redisstore",

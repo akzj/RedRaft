@@ -81,6 +81,15 @@ impl ClusterMetadata {
     ///
     /// # Note
     /// Newly created shards are empty with no assigned slots. Slots need to be assigned via data migration later.
+    ///
+    /// # Shard Status and Raft Group Creation
+    /// - If `replica_nodes` is provided and not empty, shard status is set to `Normal` immediately
+    /// - If `replica_nodes` is empty, shard status is `Creating` and scheduler will assign nodes later
+    /// - **Important**: Shard status reflects metadata state, not actual Raft group state on nodes
+    /// - Nodes detect new shards via routing table watch mechanism and create Raft groups asynchronously
+    /// - Raft group creation happens in `Node::sync_raft_groups_from_routing()` when routing table is refreshed
+    /// - There is currently no mechanism to verify if Raft groups are actually created and running on nodes
+    /// - Use `get_shard` API to check shard metadata status, but note it doesn't reflect actual Raft group health
     pub fn create_shard(
         &mut self,
         shard_id: Option<String>,
@@ -122,12 +131,15 @@ impl ClusterMetadata {
         }
 
         // Set first node as leader (if any)
+        // Note: This sets metadata state to Normal, but actual Raft group creation
+        // on nodes happens asynchronously via routing table refresh
         if let Some(leader) = replica_nodes.first() {
             shard.set_leader(leader.clone());
             shard.status = super::ShardStatus::Normal;
         }
 
         // Update routing table (only set node mapping, don't assign slots)
+        // Nodes will detect this change via watch mechanism and create Raft groups
         self.routing_table
             .set_shard_nodes(shard_id.clone(), replica_nodes);
 

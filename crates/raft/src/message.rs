@@ -10,7 +10,7 @@ use tracing::warn;
 
 use crate::{Command, RaftId, RequestId, cluster_config::ClusterConfig};
 
-// === 网络接口 ===
+// === Network Interfaces ===
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallSnapshotRequest {
     pub term: u64,
@@ -18,10 +18,10 @@ pub struct InstallSnapshotRequest {
     pub last_included_index: u64,
     pub last_included_term: u64,
     pub data: Vec<u8>,
-    pub config: ClusterConfig,          // 快照包含的集群配置信息
-    pub snapshot_request_id: RequestId, // 快照请求ID
-    pub request_id: RequestId,          // 请求ID
-    // 空消息标记 - 用于探测安装状态
+    pub config: ClusterConfig,          // Cluster config information included in snapshot
+    pub snapshot_request_id: RequestId, // Snapshot request ID
+    pub request_id: RequestId,          // Request ID
+    // Empty message flag - used to probe installation status
     pub is_probe: bool,
 }
 
@@ -38,9 +38,9 @@ pub struct CompleteSnapshotInstallation {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum InstallSnapshotState {
-    Failed(String), // 失败，附带原因
-    Installing,     // 正在安装
-    Success,        // 成功完成
+    Failed(String), // Failed, with reason
+    Installing,     // Currently installing
+    Success,        // Successfully completed
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,7 +48,7 @@ pub struct InstallSnapshotResponse {
     pub term: u64,
     pub request_id: RequestId,
     pub state: InstallSnapshotState,
-    pub error_message: String, // 错误信息，如果有的话
+    pub error_message: String, // Error message, if any
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Decode, Encode)]
@@ -59,26 +59,26 @@ pub struct Snapshot {
     pub config: ClusterConfig,
 }
 
-// 快照探测计划结构
+// Snapshot probe schedule structure
 #[derive(Debug, Clone)]
 pub struct SnapshotProbeSchedule {
     pub snapshot_request_id: RequestId,
     pub peer: RaftId,
     pub next_probe_time: Instant,
-    pub interval: Duration, // 探测间隔
-    pub max_attempts: u32,  // 最大尝试次数
-    pub attempts: u32,      // 当前尝试次数
+    pub interval: Duration, // Probe interval
+    pub max_attempts: u32,  // Maximum number of attempts
+    pub attempts: u32,      // Current attempt count
 }
 
-// === 核心状态与逻辑 ===
+// === Core State and Logic ===
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct LogEntry {
     pub term: u64,
     pub index: u64,
     pub command: Command,
-    pub is_config: bool,                      // 标记是否为配置变更日志
-    pub client_request_id: Option<RequestId>, // 关联的客户端请求ID，用于去重
+    pub is_config: bool,                      // Flag indicating if this is a config change log
+    pub client_request_id: Option<RequestId>, // Associated client request ID for deduplication
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,10 +97,10 @@ pub struct RequestVoteResponse {
     pub request_id: RequestId,
 }
 
-/// Pre-Vote 请求（不增加 term，用于防止网络分区节点干扰集群）
+/// Pre-Vote request (doesn't increment term, used to prevent network partitioned nodes from disrupting the cluster)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreVoteRequest {
-    /// 候选人期望的任期（current_term + 1），但不实际递增
+    /// The term the candidate expects (current_term + 1), but doesn't actually increment
     pub term: u64,
     pub candidate_id: RaftId,
     pub last_log_index: u64,
@@ -108,7 +108,7 @@ pub struct PreVoteRequest {
     pub request_id: RequestId,
 }
 
-/// Pre-Vote 响应
+/// Pre-Vote response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreVoteResponse {
     pub term: u64,
@@ -116,13 +116,13 @@ pub struct PreVoteResponse {
     pub request_id: RequestId,
 }
 
-/// ReadIndex 请求（用于线性一致性读）
+/// ReadIndex request (for linearizable reads)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadIndexRequest {
     pub request_id: RequestId,
 }
 
-/// ReadIndex 响应
+/// ReadIndex response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadIndexResponse {
     pub request_id: RequestId,
@@ -147,9 +147,9 @@ pub struct AppendEntriesResponse {
     pub term: u64,
     pub success: bool,
     pub conflict_index: Option<u64>,
-    pub conflict_term: Option<u64>, // 用于更高效的日志冲突处理
+    pub conflict_term: Option<u64>, // For more efficient log conflict handling
     pub request_id: RequestId,
-    pub matched_index: u64, // 用于快速同步
+    pub matched_index: u64, // For fast synchronization
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, Default)]

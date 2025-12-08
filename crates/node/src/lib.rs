@@ -10,5 +10,7 @@ pub mod state_machine;
 
 pub use node::RedRaftNode;
 pub use pilot_client::{PilotClient, PilotClientConfig, RoutingTable};
+// Re-export RaftGroupStatus from pilot crate
+pub use pilot::RaftGroupStatus;
 pub use server::RedisServer;
 pub use state_machine::KVStateMachine;

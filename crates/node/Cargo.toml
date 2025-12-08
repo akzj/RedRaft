@@ -38,6 +38,9 @@ sha2 = { workspace = true }
 # HTTP client for pilot communication
 reqwest = { version = "0.12", features = ["json"] }
 
+# Pilot types (for shared types like RaftGroupStatus)
+pilot = { path = "../pilot" }
+
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 

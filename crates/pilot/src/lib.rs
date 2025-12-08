@@ -24,6 +24,9 @@ pub mod scheduler;
 pub mod api;
 pub mod watch;
 
+// Re-export commonly used types
+pub use metadata::RaftGroupStatus;
+
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;

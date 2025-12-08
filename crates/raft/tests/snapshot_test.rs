@@ -14,7 +14,7 @@ use common::test_statemachine::KvCommand;
 async fn test_cluster_snapshot_and_learner_sync() {
     tracing_subscriber::fmt().init();
 
-    // 创建 3 节点集群
+    // Create 3-node cluster
     let node1 = RaftId::new("test_group".to_string(), "node1".to_string());
     let node2 = RaftId::new("test_group".to_string(), "node2".to_string());
     let node3 = RaftId::new("test_group".to_string(), "node3".to_string());
@@ -25,14 +25,14 @@ async fn test_cluster_snapshot_and_learner_sync() {
     };
     let cluster = TestCluster::new(config).await;
 
-    // 启动集群在后台
+    // Start cluster in background
     let cluster_clone = cluster.clone();
     tokio::spawn(async move { cluster_clone.start().await });
 
-    // 等待 Leader 选举
+    // Wait for leader election
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // 等待稳定的leader
+    // Wait for stable leader
     let leader_id = cluster
         .wait_for_leader(Duration::from_secs(5))
         .await
@@ -40,13 +40,13 @@ async fn test_cluster_snapshot_and_learner_sync() {
 
     println!("✓ Leader election successful, leader: {:?}", leader_id);
 
-    // ===== 1. 多轮数据写入和快照测试 =====
+    // ===== 1. Multi-round data writing and snapshot testing =====
     println!("\n=== Testing multi-round data writing and snapshot ===");
 
     for s in 1..=5 {
         println!("\n--- Round {} ---", s);
 
-        // 写入200条数据
+        // Write 200 data entries
         for i in 1..=200 {
             let command = KvCommand::Set {
                 key: format!("key{}-{}", s, i),
@@ -62,24 +62,24 @@ async fn test_cluster_snapshot_and_learner_sync() {
                 Err(e) => println!("✗ Failed to propose command: {}", e),
             }
 
-            // 小延迟避免过度发送
+            // Small delay to avoid excessive sending
             if i % 10 == 0 {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         }
 
-        // 等待数据复制
+        // Wait for data replication
         println!("Waiting for data replication...");
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // 验证数据一致性
+        // Verify data consistency
         if let Err(e) = cluster.verify_data_consistency().await {
             println!("✗ Data consistency check failed: {}", e);
         } else {
             println!("✓ Data consistency verified after round {}", s);
         }
 
-        // 触发快照
+        // Trigger snapshot
         let current_leaders = cluster.get_current_leader().await;
         assert_eq!(current_leaders.len(), 1);
         let current_leader = current_leaders.first().unwrap();
@@ -87,21 +87,21 @@ async fn test_cluster_snapshot_and_learner_sync() {
         println!("Triggering snapshot on leader {:?}", current_leader);
         cluster.trigger_snapshot(current_leader).unwrap();
 
-        // 等待快照完成
+        // Wait for snapshot completion
         tokio::time::sleep(Duration::from_secs(3)).await;
 
-        // 检查快照后数据一致性
+        // Check data consistency after snapshot
         if let Err(e) = cluster.verify_data_consistency().await {
             println!("✗ Data consistency check failed after snapshot: {}", e);
         } else {
             println!("✓ Data consistency verified after snapshot in round {}", s);
         }
 
-        // 每第3轮添加learner测试通过快照同步数据
+        // Add learner every 3rd round to test snapshot synchronization
         if s == 3 {
             println!("\n=== Testing learner sync via snapshot ===");
 
-            // 创建learner节点
+            // Create learner node
             let learner_id = RaftId::new("test_group".to_string(), format!("learner{}", s));
 
             println!("Adding learner {:?}", learner_id);
@@ -109,7 +109,7 @@ async fn test_cluster_snapshot_and_learner_sync() {
                 Ok(()) => {
                     println!("✓ Successfully added learner {:?}", learner_id);
 
-                    // 等待learner通过快照同步数据
+                    // Wait for learner to sync via snapshot
                     println!("Waiting for learner to sync via snapshot...");
                     match cluster
                         .wait_for_learner_sync(&learner_id, Duration::from_secs(10))
@@ -126,7 +126,7 @@ async fn test_cluster_snapshot_and_learner_sync() {
                         }
                     }
 
-                    // 验证learner的数据与集群一致
+                    // Verify learner data matches cluster
                     if let Some(learner_data) = cluster.get_node_data(&learner_id) {
                         if let Some(reference_data) = cluster.get_node_data(&leader_id) {
                             if learner_data == reference_data {
@@ -144,7 +144,7 @@ async fn test_cluster_snapshot_and_learner_sync() {
                         }
                     }
 
-                    // 移除learner
+                    // Remove learner
                     println!("Removing learner {:?}", learner_id);
                     match cluster.remove_learner(&learner_id).await {
                         Ok(()) => println!("✓ Successfully removed learner"),
@@ -158,10 +158,10 @@ async fn test_cluster_snapshot_and_learner_sync() {
         }
     }
 
-    // ===== 2. 最终数据一致性验证 =====
+    // ===== 2. Final data consistency verification =====
     println!("\n=== Final data consistency verification ===");
 
-    // 等待最终同步
+    // Wait for final synchronization
     match cluster
         .wait_for_data_replication(Duration::from_secs(5))
         .await
@@ -169,14 +169,14 @@ async fn test_cluster_snapshot_and_learner_sync() {
         Ok(()) => {
             println!("✓ Final data replication completed");
 
-            // 获取最终数据统计
+            // Get final data statistics
             if let Some(final_data) = cluster.get_node_data(&leader_id) {
                 println!(
                     "✓ Final cluster state: {} key-value pairs",
                     final_data.len()
                 );
 
-                // 验证数据完整性 - 应该有 5 * 200 = 1000 条记录
+                // Verify data integrity - should have 5 * 200 = 1000 records
                 let expected_count = 5 * 200;
                 if final_data.len() == expected_count {
                     println!(

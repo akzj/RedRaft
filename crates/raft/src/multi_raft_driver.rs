@@ -1,7 +1,7 @@
-//! Multi-Raft 驱动器
-//!
-//! 负责管理多个 Raft 组的事件调度和定时器服务。
-//! 使用无锁设计和高效的状态机转换来处理并发事件。
+//! Multi-Raft Driver
+//! 
+//! Responsible for managing event scheduling and timer services for multiple Raft groups.
+//! Uses lock-free design and efficient state machine transitions to handle concurrent events.
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::Deref;
@@ -15,24 +15,24 @@ use tracing::{debug, info, trace, warn};
 
 use crate::{Event, RaftId, TimerId};
 
-/// 事件通道容量（提供背压保护）
+/// Event channel capacity (provides backpressure protection)
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
-/// Raft 节点状态枚举
+/// Raft node status enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RaftNodeStatus {
-    /// 空闲状态（无未处理消息，未被 Worker 处理）
+    /// Idle state (no pending messages, not being processed by Worker)
     Idle = 0,
-    /// 待处理状态（有未处理消息，已加入 active_map）
+    /// Pending state (has pending messages, added to active_map)
     Pending = 1,
-    /// 活跃状态（正在被 Worker 处理）
+    /// Active state (being processed by Worker)
     Active = 2,
-    /// 停止状态
+    /// Stop state
     Stop = 3,
 }
 
 impl RaftNodeStatus {
-    /// 从 u8 转换，返回 None 如果值无效
+    /// Convert from u8, return None if value is invalid
     fn from_u8(val: u8) -> Option<Self> {
         match val {
             0 => Some(RaftNodeStatus::Idle),
@@ -46,7 +46,7 @@ impl RaftNodeStatus {
 
 use std::sync::atomic::AtomicU8;
 
-/// 原子 RaftNodeStatus 包装器
+/// Atomic RaftNodeStatus wrapper
 pub struct AtomicRaftNodeStatus(AtomicU8);
 
 impl AtomicRaftNodeStatus {
@@ -79,7 +79,7 @@ impl AtomicRaftNodeStatus {
     }
 }
 
-/// 定时器事件
+/// Timer event
 #[derive(Debug)]
 struct TimerEvent {
     timer_id: TimerId,
@@ -105,18 +105,18 @@ impl PartialOrd for TimerEvent {
 
 impl Ord for TimerEvent {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // 反转顺序实现最小堆
+        // Reverse order to implement min-heap
         other.trigger_time.cmp(&self.trigger_time)
     }
 }
 
-/// 事件处理 trait
+/// Event handling trait
 #[async_trait::async_trait]
 pub trait HandleEventTrait: Send + Sync {
     async fn handle_event(&self, event: Event);
 }
 
-/// Raft 组核心数据
+/// Raft group core data
 struct RaftGroupCore {
     status: AtomicRaftNodeStatus,
     sender: mpsc::Sender<Event>,
@@ -124,15 +124,15 @@ struct RaftGroupCore {
     handle_event: Box<dyn HandleEventTrait>,
 }
 
-/// 定时器内部状态
+/// Timer inner state
 pub struct TimerInner {
     timer_id_counter: AtomicU64,
     timer_heap: Mutex<BinaryHeap<TimerEvent>>,
-    /// 已取消的定时器 ID（惰性删除）
+    /// Cancelled timer IDs (lazy deletion)
     cancelled_timers: Mutex<HashSet<TimerId>>,
 }
 
-/// 定时器服务
+/// Timer service
 #[derive(Clone)]
 pub struct Timers {
     inner: Arc<TimerInner>,
@@ -151,7 +151,7 @@ impl Timers {
         }
     }
 
-    /// 添加定时器，返回定时器 ID
+    /// Add timer, return timer ID
     pub fn add_timer(&self, node_id: &RaftId, event: Event, delay: Duration) -> TimerId {
         let timer_id = self.inner.timer_id_counter.fetch_add(1, Ordering::Relaxed);
         let trigger_time = Instant::now() + delay;
@@ -173,18 +173,18 @@ impl Timers {
         timer_id
     }
 
-    /// 删除定时器（O(1) 惰性删除）
+    /// Delete timer (O(1) lazy deletion)
     pub fn del_timer(&self, timer_id: TimerId) {
         self.inner.cancelled_timers.lock().insert(timer_id);
         trace!("Cancelled timer {}", timer_id);
     }
 
-    /// 删除节点的所有定时器
+    /// Delete all timers for a node
     pub fn del_all_timers_for_node(&self, node_id: &RaftId) {
         let mut timer_heap = self.inner.timer_heap.lock();
         let before_len = timer_heap.len();
 
-        // 重建堆，排除该节点的定时器
+        // Rebuild heap, excluding timers for this node
         let remaining: Vec<_> = timer_heap
             .drain()
             .filter(|t| &t.node_id != node_id)
@@ -200,7 +200,7 @@ impl Timers {
         }
     }
 
-    /// 处理过期定时器，返回触发的事件和下一个定时器的等待时间
+    /// Process expired timers, return triggered events and wait time for next timer
     fn process_expired_timers(&self) -> (Vec<TimerEvent>, Option<Duration>) {
         let now = Instant::now();
         let mut events = Vec::new();
@@ -208,7 +208,7 @@ impl Timers {
         let cancelled = self.inner.cancelled_timers.lock();
 
         while let Some(timer_event) = timer_heap.peek() {
-            // 跳过已取消的定时器
+            // Skip cancelled timers
             if cancelled.contains(&timer_event.timer_id) {
                 timer_heap.pop();
                 continue;
@@ -225,11 +225,11 @@ impl Timers {
         (events, None)
     }
 
-    /// 清理已取消的定时器集合（定期调用以释放内存）
+    /// Clean up cancelled timers set (called periodically to free memory)
     pub fn cleanup_cancelled(&self) {
         let mut cancelled = self.inner.cancelled_timers.lock();
         if cancelled.len() > 1000 {
-            // 只有当积累较多时才清理
+            // Only clean up when accumulation is large
             let timer_heap = self.inner.timer_heap.lock();
             let active_ids: HashSet<_> = timer_heap.iter().map(|t| t.timer_id).collect();
             cancelled.retain(|id| active_ids.contains(id));
@@ -245,7 +245,7 @@ impl Deref for Timers {
     }
 }
 
-/// 发送事件结果
+/// Send event result
 #[derive(Debug)]
 pub enum SendEventResult {
     Success,
@@ -254,7 +254,7 @@ pub enum SendEventResult {
     ChannelFull,
 }
 
-/// Multi-Raft 驱动器内部状态
+/// Multi-Raft Driver inner state
 pub struct MultiRaftDriverInner {
     timer_service: Timers,
     groups: Mutex<HashMap<RaftId, Arc<RaftGroupCore>>>,
@@ -263,7 +263,7 @@ pub struct MultiRaftDriverInner {
     stop: AtomicBool,
 }
 
-/// Multi-Raft 驱动器
+/// Multi-Raft Driver
 #[derive(Clone)]
 pub struct MultiRaftDriver {
     inner: Arc<MultiRaftDriverInner>,
@@ -278,7 +278,7 @@ impl Deref for MultiRaftDriver {
 }
 
 impl MultiRaftDriver {
-    /// 创建新的 MultiRaftDriver
+    /// Create a new MultiRaftDriver
     pub fn new() -> Self {
         let notify = Arc::new(Notify::new());
         Self {
@@ -292,12 +292,12 @@ impl MultiRaftDriver {
         }
     }
 
-    /// 获取定时器服务
+    /// Get timer service
     pub fn get_timer_service(&self) -> Timers {
         self.inner.timer_service.clone()
     }
 
-    /// 添加新的 Raft 组
+    /// Add a new Raft group
     pub fn add_raft_group(&self, group_id: RaftId, handle_event: Box<dyn HandleEventTrait>) {
         let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let core = RaftGroupCore {
@@ -310,7 +310,7 @@ impl MultiRaftDriver {
         info!("Added Raft group: {}", group_id);
     }
 
-    /// 删除 Raft 组
+    /// Delete a Raft group
     pub fn del_raft_group(&self, group_id: &RaftId) {
         if self.groups.lock().remove(group_id).is_some() {
             info!("Removed Raft group: {}", group_id);
@@ -318,14 +318,14 @@ impl MultiRaftDriver {
         }
     }
 
-    /// 停止驱动器
+    /// Stop the driver
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Release);
         self.notify.notify_waiters();
         info!("MultiRaftDriver stop signal sent");
     }
 
-    /// 处理过期定时器
+    /// Process expired timers
     async fn process_expired_timers(&self) -> Option<Duration> {
         let (events, duration) = self.timer_service.process_expired_timers();
 
@@ -348,13 +348,13 @@ impl MultiRaftDriver {
             }
         }
 
-        // 定期清理已取消的定时器
+        // Periodically clean up cancelled timers
         self.timer_service.cleanup_cancelled();
 
         duration
     }
 
-    /// 向指定 Raft 组发送事件
+    /// Send event to specified Raft group
     pub fn dispatch_event(&self, target: RaftId, event: Event) -> SendEventResult {
         let core = {
             let groups = self.groups.lock();
@@ -364,7 +364,7 @@ impl MultiRaftDriver {
             }
         };
 
-        // 1. 发送事件到通道
+        // 1. Send event to channel
         match core.sender.try_send(event) {
             Ok(_) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -376,11 +376,11 @@ impl MultiRaftDriver {
             }
         }
 
-        // 2. 根据当前状态决定是否需要激活组
+        // 2. Determine if group needs activation based on current state
         let current_status = core.status.load(Ordering::Acquire);
         match current_status {
             RaftNodeStatus::Idle => {
-                // 从 Idle -> Pending，加入 active_map 并唤醒 Worker
+                // From Idle -> Pending, add to active_map and wake up Worker
                 if core
                     .status
                     .compare_exchange(
@@ -396,7 +396,7 @@ impl MultiRaftDriver {
                 }
             }
             RaftNodeStatus::Pending | RaftNodeStatus::Active => {
-                // 已在处理中
+                // Already being processed
             }
             RaftNodeStatus::Stop => {
                 warn!("Target node {} is in Stop status", target);
@@ -407,15 +407,15 @@ impl MultiRaftDriver {
         SendEventResult::Success
     }
 
-    /// 主循环
+    /// Main loop
     pub async fn main_loop(&self) {
         info!("Starting main loop for MultiRaftDriver");
 
         loop {
-            // 处理过期定时器
+            // Process expired timers
             let wait_duration = self.process_expired_timers().await;
 
-            // 等待：有定时器则等待到期，否则等待唤醒
+            // Wait: if there are timers, wait until expiration, otherwise wait for wakeup
             if let Some(duration) = wait_duration {
                 tokio::select! {
                     _ = tokio::time::sleep(duration) => {
@@ -427,18 +427,18 @@ impl MultiRaftDriver {
                 self.notify.notified().await;
             }
 
-            // 检查停止标志
+            // Check stop flag
             if self.stop.load(Ordering::Acquire) {
                 info!("Stop signal received, exiting main loop");
                 break;
             }
 
-            // 处理活跃节点
+            // Process active nodes
             self.process_active_nodes().await;
         }
     }
 
-    /// 处理 active_map 中的所有待处理组
+    /// Process all pending groups in active_map
     async fn process_active_nodes(&self) {
         let pendings: HashSet<RaftId> = {
             let mut active_map = self.active_map.lock();
@@ -453,7 +453,7 @@ impl MultiRaftDriver {
         }
     }
 
-    /// 处理单个 Raft 组的所有事件
+    /// Process all events for a single Raft group
     async fn process_single_group(&self, node_id: RaftId) {
         let core = {
             let groups = self.groups.lock();
@@ -466,7 +466,7 @@ impl MultiRaftDriver {
             }
         };
 
-        // 1. 尝试获取处理权（Pending -> Active）
+        // 1. Attempt to acquire processing rights (Pending -> Active)
         if core
             .status
             .compare_exchange(
@@ -485,13 +485,13 @@ impl MultiRaftDriver {
             return;
         }
 
-        // 2. 处理事件循环
+        // 2. Process event loop
         let mut rx = core.receiver.lock().await;
 
         loop {
             match rx.try_recv() {
                 Ok(event) => {
-                    // 检查是否已停止
+                    // Check if already stopped
                     if core.status.load(Ordering::Acquire) == RaftNodeStatus::Stop {
                         warn!("Node {} stopped, ignoring event", node_id);
                         return;
@@ -499,7 +499,7 @@ impl MultiRaftDriver {
                     core.handle_event.handle_event(event).await;
                 }
                 Err(mpsc::error::TryRecvError::Empty) => {
-                    // 尝试转为 Idle
+                    // Attempt to transition to Idle
                     if core
                         .status
                         .compare_exchange(
@@ -510,10 +510,10 @@ impl MultiRaftDriver {
                         )
                         .is_ok()
                     {
-                        // 转换成功后，检查是否有新消息（不移除）
-                        // 使用 is_empty() 而非 try_recv()，确保消息留在队列中
+                        // After successful transition, check for new messages (without removing)
+                        // Use is_empty() instead of try_recv() to ensure messages stay in queue
                         if !rx.is_empty() {
-                            // 有新消息，尝试回到 Active 状态
+                            // New messages available, attempt to return to Active state
                             if core
                                 .status
                                 .compare_exchange(
@@ -524,12 +524,12 @@ impl MultiRaftDriver {
                                 )
                                 .is_ok()
                             {
-                                // 成功回到 Active，继续处理
+                                // Successfully returned to Active, continue processing
                                 continue;
                             } else {
-                                // CAS 失败，说明 dispatch_event 已将状态改为 Pending
-                                // 并添加到 active_map，会有新 worker 接管
-                                // 消息仍在队列中，不会丢失
+                                // CAS failed, indicating dispatch_event has changed status to Pending
+                                // and added to active_map, new worker will take over
+                                // Messages remain in queue, no loss
                                 trace!(
                                     "Node {} yielding to new worker (status changed during idle check)",
                                     node_id
@@ -537,11 +537,11 @@ impl MultiRaftDriver {
                                 break;
                             }
                         } else {
-                            // 队列确实为空，退出
+                            // Queue is actually empty, exit
                             break;
                         }
                     } else {
-                        // 状态变更失败，退出
+                        // State change failed, exit
                         break;
                     }
                 }
@@ -716,12 +716,12 @@ mod tests {
             Duration::from_millis(100),
         );
 
-        // 立即取消
+        // Cancel immediately
         timers.del_timer(timer_id);
 
         sleep(Duration::from_millis(150)).await;
 
-        // 定时器已取消，不应收到事件
+        // Timer has been canceled, should not receive events
         let received_events = mock_handler.get_events();
         assert_eq!(received_events.len(), 0);
     }

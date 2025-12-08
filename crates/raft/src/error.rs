@@ -6,7 +6,7 @@ use tracing::{error, info, warn};
 
 use crate::{RaftId, RequestId, Role, TimerId};
 
-/// 顶层Raft错误类型
+/// Top-level Raft error type
 #[derive(Debug, Error)]
 pub enum RaftError {
     #[error("RPC error: {0}")]
@@ -31,7 +31,7 @@ pub enum RaftError {
     Snapshot(#[from] SnapshotError),
 }
 
-/// RPC通信相关错误
+/// RPC communication related error
 #[derive(Debug, Error)]
 pub enum RpcError {
     #[error("Target node {0} not found")]
@@ -50,7 +50,7 @@ pub enum RpcError {
     Protocol(String),
 }
 
-/// 存储相关错误
+/// Storage related error
 #[derive(Clone, Debug, Error)]
 pub enum StorageError {
     #[error("IO error: {0}")]
@@ -81,7 +81,7 @@ pub enum StorageError {
     ChannelClosed,
 }
 
-/// 定时器相关错误
+/// Timer related error
 #[derive(Debug, Error)]
 pub enum TimerError {
     #[error("Timer {0} not found")]
@@ -97,7 +97,7 @@ pub enum TimerError {
     InvalidDuration,
 }
 
-/// 客户端相关错误
+/// Client related error
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("Request {0} not found")]
@@ -122,7 +122,7 @@ pub enum ClientError {
     BadRequest(anyhow::Error),
 }
 
-/// 状态变更相关错误
+/// State change related error
 #[derive(Debug, Error)]
 pub enum StateChangeError {
     #[error("Invalid state transition from {0} to {1}")]
@@ -135,7 +135,7 @@ pub enum StateChangeError {
     ConfigChangeInProgress,
 }
 
-/// 状态机应用相关错误
+/// State machine application related error
 #[derive(Debug, Error)]
 pub enum ApplyError {
     #[error("Command at index {0} already applied")]
@@ -151,7 +151,7 @@ pub enum ApplyError {
     Internal(String),
 }
 
-/// 快照相关错误
+/// Snapshot related error
 #[derive(Debug, Clone, Error)]
 pub enum SnapshotError {
     #[error("Snapshot at index {0} already exists")]
@@ -176,7 +176,7 @@ pub enum SnapshotError {
     Unknown,
 }
 
-/// 配置变更相关错误
+/// Configuration change related error
 #[derive(Debug, Error, Serialize, Deserialize)]
 pub enum ConfigError {
     #[error("Configuration is empty")]
@@ -198,12 +198,12 @@ pub enum ConfigError {
     InvalidJoint(String),
 }
 
-// === 统一错误处理机制 ===
+// === Unified Error Handling Mechanism ===
 #[derive(Debug, Clone, PartialEq)]
 pub enum ErrorSeverity {
-    Fatal,       // 需要终止当前操作并可能进入只读模式
-    Recoverable, // 可以重试或降级处理的错误
-    Ignorable,   // 仅需记录日志的错误
+    Fatal,       // Need to terminate current operation and possibly enter readonly mode
+    Recoverable, // Can retry or degrade processing
+    Ignorable,   // Only need to log
 }
 
 pub trait ErrorHandler {
@@ -211,7 +211,7 @@ pub trait ErrorHandler {
     fn context(&self) -> String;
 }
 
-// 为RPC错误实现ErrorHandler
+// Implement ErrorHandler for RPC errors
 impl ErrorHandler for RpcError {
     fn severity(&self) -> ErrorSeverity {
         match self {
@@ -234,7 +234,7 @@ impl ErrorHandler for RpcError {
     }
 }
 
-// 为存储错误实现ErrorHandler
+// Implement ErrorHandler for storage errors
 impl ErrorHandler for StorageError {
     fn severity(&self) -> ErrorSeverity {
         match self {
@@ -267,7 +267,7 @@ impl ErrorHandler for StorageError {
     }
 }
 
-// 为客户端错误实现ErrorHandler
+// Implement ErrorHandler for client errors
 impl ErrorHandler for ClientError {
     fn severity(&self) -> ErrorSeverity {
         match self {
@@ -294,7 +294,7 @@ impl ErrorHandler for ClientError {
     }
 }
 
-// 为定时器错误实现ErrorHandler
+// Implement ErrorHandler for timer errors
 impl ErrorHandler for TimerError {
     fn severity(&self) -> ErrorSeverity {
         match self {
@@ -315,7 +315,7 @@ impl ErrorHandler for TimerError {
     }
 }
 
-// 为快照错误实现ErrorHandler
+// Implement ErrorHandler for snapshot errors
 impl ErrorHandler for SnapshotError {
     fn severity(&self) -> ErrorSeverity {
         match self {
@@ -344,7 +344,7 @@ impl ErrorHandler for SnapshotError {
     }
 }
 
-// 为状态变更错误实现ErrorHandler
+// Implement ErrorHandler for state change errors
 impl ErrorHandler for StateChangeError {
     fn severity(&self) -> ErrorSeverity {
         match self {
@@ -380,7 +380,7 @@ impl CallbackErrorHandler {
         }
     }
 
-    /// 统一处理回调错误
+    /// Unified callback error handling
     pub async fn handle<T, E: ErrorHandler>(
         &mut self,
         result: Result<T, E>,
@@ -419,7 +419,7 @@ impl CallbackErrorHandler {
         }
     }
 
-    /// 处理不需要返回值的操作
+    /// Handle operations that don't need return values
     pub async fn handle_void<E: ErrorHandler>(
         &mut self,
         result: Result<(), E>,
@@ -436,7 +436,7 @@ impl CallbackErrorHandler {
                 self.node_id
             );
             self.readonly_mode = true;
-            // 这里可以添加进入只读模式的具体逻辑
+            // Specific logic for entering readonly mode can be added here
         }
     }
 

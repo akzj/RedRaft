@@ -24,13 +24,13 @@ use super::entry::{
 /// Type alias for cluster config map (raft_id -> cluster_config)
 pub type ClusterConfigMap = HashMap<RaftId, ClusterConfig>;
 
-// 快照存储目录结构（以本地磁盘为例）：
+// Snapshot storage directory structure (local disk example):
 // /raft/snapshots/{raft_id}
-// ├─ {timestamp}_10000_5000/  # 快照目录名：时间戳_lastIncludedIndex_lastIncludedTerm（便于定位和清理）
-// │  ├─ snapshot.meta       # 元数据文件（小文件，~100B，快速读取）
-// │  ├─ data_000.dat        # 业务数据分片1（按固定大小分片，如100MB/片）
-// │  ├─ data_001.dat        # 业务数据分片2
-// │  └─ checksum.sha256     # 分片校验文件（记录每个data文件的SHA256，避免分片损坏）
+// ├─ {timestamp}_10000_5000/  # Snapshot directory name: timestamp_lastIncludedIndex_lastIncludedTerm (for easy location and cleanup)
+// │  ├─ snapshot.meta       # Metadata file (small file, ~100B, for quick reading)
+// │  ├─ data_000.dat        # Business data shard 1 (fixed size sharding, e.g., 100MB per shard)
+// │  ├─ data_001.dat        # Business data shard 2
+// │  └─ checksum.sha256     # Shard checksum file (records SHA256 of each data file to prevent corruption)
 
 #[allow(dead_code)]
 pub struct SnapshotStore {

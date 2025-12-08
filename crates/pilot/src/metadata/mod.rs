@@ -9,7 +9,7 @@ mod cluster;
 
 pub use node::{NodeId, NodeInfo, NodeStatus};
 pub use shard::{
-    KeyRange, ShardId, ShardInfo, ShardSplitState, ShardStatus,
+    KeyRange, RaftGroupStatus, ShardId, ShardInfo, ShardSplitState, ShardStatus,
     SplitProgress, SplitRole, SplitStatus, SplitTask, TOTAL_SLOTS,
 };
 pub use routing::{RoutingTable, SplitPhase, SplittingShardInfo};

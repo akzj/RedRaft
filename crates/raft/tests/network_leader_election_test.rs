@@ -13,7 +13,7 @@ use common::test_cluster::{TestCluster, TestClusterConfig};
 async fn test_network_leader_election() {
     tracing_subscriber::fmt().init();
 
-    // 创建 3 节点集群
+    // Create 3-node cluster
     let node1 = RaftId::new("test_group".to_string(), "node1".to_string());
     let node2 = RaftId::new("test_group".to_string(), "node2".to_string());
     let node3 = RaftId::new("test_group".to_string(), "node3".to_string());
@@ -24,14 +24,14 @@ async fn test_network_leader_election() {
     };
     let cluster = TestCluster::new(config).await;
 
-    // 3. 启动集群在后台
+    // 3. Start cluster in background
     let cluster_clone = cluster.clone();
     tokio::spawn(async move { cluster_clone.start().await });
 
-    // 等待 Leader 选举
+    // Wait for leader election
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // 检查是否有 Leader
+    // Check if there is a leader
     let mut leader_found = false;
     for node_id in &[&node1, &node2, &node3] {
         if let Some(node) = cluster.get_node(node_id) {
@@ -47,9 +47,9 @@ async fn test_network_leader_election() {
     assert!(leader_found, "No leader found after election");
     println!("✓ Leader election successful");
 
-    // 模拟网络丢包，测试网络恢复后 Leader 是否仍然存在
+    // Test network packet loss and leader persistence after recovery
 
-    // 1. 记录当前的 Leader
+    // 1. Record current leader
     let mut current_leader = None;
     for node_id in &[&node1, &node2, &node3] {
         if let Some(node) = cluster.get_node(node_id) {
@@ -64,22 +64,22 @@ async fn test_network_leader_election() {
     let leader_id = current_leader.expect("Should have found a leader");
     println!("Current leader before network partition: {:?}", leader_id);
 
-    // 2. 模拟网络分区 - 隔离当前 Leader
+    // 2. Simulate network partition - isolate current leader
     println!(
         "Simulating network partition: isolating leader {:?}",
         leader_id
     );
     cluster.isolate_node(&leader_id).await;
 
-    // 3. 等待一段时间，让剩余节点重新选举
+    // 3. Wait for remaining nodes to re-elect
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // 4. 检查剩余节点是否选出了新的 Leader
+    // 4. Check if remaining nodes elected a new leader
     let mut new_leader_found = false;
     let mut new_leader_id = None;
     for node_id in &[&node1, &node2, &node3] {
         if *node_id == &leader_id {
-            continue; // 跳过被隔离的节点
+            continue; // Skip isolated node
         }
         if let Some(node) = cluster.get_node(node_id) {
             let role = node.get_role();
@@ -101,14 +101,14 @@ async fn test_network_leader_election() {
     );
     println!("✓ New leader elected after partition");
 
-    // 5. 恢复网络连接
+    // 5. Restore network connection
     println!("Restoring network connection for node {:?}", leader_id);
     cluster.restore_node(&leader_id).await;
 
-    // 6. 等待网络恢复后的状态稳定
+    // 6. Wait for stable state after network recovery
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // 7. 检查最终状态 - 应该仍然只有一个 Leader
+    // 7. Check final state - should have exactly one leader
     let mut final_leader_count = 0;
     let mut final_leader_id = None;
     for node_id in &[&node1, &node2, &node3] {
@@ -129,16 +129,16 @@ async fn test_network_leader_election() {
     println!("✓ Network partition and recovery test successful");
     println!("Final leader: {:?}", final_leader_id.unwrap());
 
-    // 模拟网络丢包，看丢包的情况下，选举是否正常
+    // Test leader election under packet loss
 
     println!("\n=== Testing leader election under packet loss ===");
 
-    // 1. 设置所有节点的网络为中等丢包率（30%）
+    // 1. Set moderate packet loss rate (30%) for all nodes
     let packet_loss_config = MockRaftNetworkConfig {
         base_latency_ms: 20,
         jitter_max_ms: 30,
-        drop_rate: 0.3,    // 30% 丢包率
-        failure_rate: 0.1, // 10% 发送失败率
+        drop_rate: 0.3,    // 30% packet loss
+        failure_rate: 0.1, // 10% send failure rate
     };
 
     for node_id in &[&node1, &node2, &node3] {
@@ -149,7 +149,7 @@ async fn test_network_leader_election() {
 
     println!("Set 30% packet loss rate for all nodes");
 
-    // 2. 记录当前 leader
+    // 2. Record current leader
     let mut current_leader_with_loss = None;
     for node_id in &[&node1, &node2, &node3] {
         if let Some(node) = cluster.get_node(node_id) {
@@ -168,14 +168,14 @@ async fn test_network_leader_election() {
         leader_with_loss
     );
 
-    // 3. 强制触发新选举（通过隔离当前 leader 很短时间）
+    // 3. Force new election by temporarily isolating current leader
     println!("Temporarily isolating current leader to trigger election under packet loss");
     cluster.isolate_node(&leader_with_loss).await;
 
-    // 等待短时间让选举超时触发
+    // Wait briefly to trigger election timeout
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // 4. 立即恢复网络，但保持丢包率
+    // 4. Restore network immediately but keep packet loss
     cluster.restore_node(&leader_with_loss).await;
     cluster
         .update_network_config_for_node(&leader_with_loss, packet_loss_config.clone())
@@ -183,10 +183,10 @@ async fn test_network_leader_election() {
 
     println!("Restored leader network with packet loss, waiting for election under lossy network");
 
-    // 5. 等待足够长的时间让选举在丢包环境下完成
+    // 5. Wait for election to complete in lossy environment
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    // 6. 检查是否成功选出了 leader（即使在丢包环境下）
+    // 6. Check if leader was successfully elected (even in lossy environment)
     let mut leader_count_with_loss = 0;
     let mut leader_with_loss_final = None;
 
@@ -244,14 +244,14 @@ async fn test_network_leader_election() {
         );
     }
 
-    // 7. 测试更高丢包率（40%，更合理的测试值）
+    // 7. Test higher packet loss rate (40%, more reasonable test value)
     println!("\n=== Testing with higher packet loss (40%) ===");
 
     let high_loss_config = MockRaftNetworkConfig {
         base_latency_ms: 20,
         jitter_max_ms: 30,
-        drop_rate: 0.4,    // 40% 丢包率（降低到更合理的水平）
-        failure_rate: 0.1, // 10% 发送失败率
+        drop_rate: 0.4,    // 40% packet loss (reduced to more reasonable level)
+        failure_rate: 0.1, // 10% send failure rate
     };
 
     for node_id in &[&node1, &node2, &node3] {
@@ -260,7 +260,7 @@ async fn test_network_leader_election() {
             .await;
     }
 
-    // 强制触发新选举
+    // Force new election
     let current_leader_high_loss = leader_with_loss_final.clone().unwrap_or(node1.clone());
     cluster.isolate_node(&current_leader_high_loss).await;
     tokio::time::sleep(Duration::from_millis(800)).await;
@@ -271,10 +271,10 @@ async fn test_network_leader_election() {
 
     println!("Testing election under 40% packet loss");
 
-    // 等待更长时间，因为高丢包率下选举可能需要更多时间
+    // Wait longer as election may take more time with high packet loss
     tokio::time::sleep(Duration::from_secs(8)).await;
 
-    // 8. 最终验证
+    // 8. Final verification
     let mut final_leader_count_high_loss = 0;
     let mut final_leader_high_loss = None;
 
@@ -319,7 +319,7 @@ async fn test_network_leader_election() {
         println!("No stable leader under moderate packet loss (expected behavior)");
     }
 
-    // 9. 恢复正常网络配置
+    // 9. Restore normal network configuration
     let normal_config = MockRaftNetworkConfig::default();
     for node_id in &[&node1, &node2, &node3] {
         cluster

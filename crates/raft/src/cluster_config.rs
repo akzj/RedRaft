@@ -5,34 +5,34 @@ use serde::{Deserialize, Serialize};
 
 use crate::{RaftId, error::ConfigError};
 
-/// Quorum要求
+/// Quorum requirement
 #[derive(Debug, Clone, PartialEq)]
 pub enum QuorumRequirement {
     Simple(usize),
     Joint { old: usize, new: usize },
 }
 
-// 为错误类型实现便捷构造函数
+// Implement convenient constructors for error types
 
-// === 集群配置 ===
+// === Cluster Configuration ===
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Decode, Encode)]
 pub struct ClusterConfig {
-    pub epoch: u64,     // 配置版本号
-    pub log_index: u64, // 最后一次配置变更的日志索引
+    pub epoch: u64,     // Configuration version number
+    pub log_index: u64, // Log index of the last configuration change
     pub voters: HashSet<RaftId>,
-    pub learners: Option<HashSet<RaftId>>, // 不具有投票权的学习者节点
+    pub learners: Option<HashSet<RaftId>>, // Learner nodes without voting rights
     pub joint: Option<JointConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Decode, Encode)]
 pub struct JointConfig {
-    pub log_index: u64, // 最后一次配置变更的日志索引
+    pub log_index: u64, // Log index of the last configuration change
 
     pub old_voters: HashSet<RaftId>,
     pub new_voters: HashSet<RaftId>,
 
-    pub old_learners: Option<HashSet<RaftId>>, // 旧配置中的 Learners
-    pub new_learners: Option<HashSet<RaftId>>, // 新配置中的 Learners
+    pub old_learners: Option<HashSet<RaftId>>, // Learners in old configuration
+    pub new_learners: Option<HashSet<RaftId>>, // Learners in new configuration
 }
 
 impl ClusterConfig {
@@ -85,7 +85,7 @@ impl ClusterConfig {
         new_learners: Option<HashSet<RaftId>>,
         log_index: u64,
     ) -> Result<(), ConfigError> {
-        // 验证配置
+        // Validate configuration
         if old_voters.is_empty() || new_voters.is_empty() {
             return Err(ConfigError::EmptyConfig);
         }
@@ -94,7 +94,7 @@ impl ClusterConfig {
             return Err(ConfigError::AlreadyInJoint);
         }
 
-        // 验证 Learners 不能同时是 Voters (在任何配置中)
+        // Validate that Learners cannot be Voters simultaneously (in any configuration)
         let voter_in_learners = |v: &RaftId| {
             old_learners.as_ref().is_some_and(|l| l.contains(v))
                 || new_learners.as_ref().is_some_and(|l| l.contains(v))
@@ -170,14 +170,14 @@ impl ClusterConfig {
         &self.voters
     }
 
-    // 验证配置是否合法
+    // Validate if configuration is legal
     pub fn is_valid(&self) -> bool {
-        // 确保配置不会导致无法形成多数派
+        // Ensure configuration allows forming a majority
         if self.voters.is_empty() {
             return false;
         }
 
-        // 对于联合配置，确保新旧配置都能形成多数派
+        // For joint configuration, ensure both old and new configurations can form a majority
         if let Some(joint) = &self.joint {
             if joint.old_voters.is_empty() || joint.new_voters.is_empty() {
                 return false;
@@ -187,21 +187,21 @@ impl ClusterConfig {
         true
     }
 
-    /// 检查是否是单节点集群
+    /// Check if it's a single-node cluster
     pub fn is_single_voter(&self) -> bool {
         self.voters.len() == 1 && !self.is_joint()
     }
 
-    // === Learner 管理方法 ===
+    // === Learner Management Methods ===
     pub fn add_learner(&mut self, learner: RaftId, log_index: u64) -> Result<(), ConfigError> {
-        // 验证 learner 不是 voter
+        // Validate learner is not a voter
         if self.voters.contains(&learner) {
             return Err(ConfigError::InvalidJoint(
                 "Cannot add a voter as learner".into(),
             ));
         }
 
-        // 如果正在 joint 配置中，不允许修改 learners
+        // Cannot modify learners while in joint configuration
         if self.is_joint() {
             return Err(ConfigError::AlreadyInJoint);
         }
@@ -215,7 +215,7 @@ impl ClusterConfig {
     }
 
     pub fn remove_learner(&mut self, learner: &RaftId, log_index: u64) -> Result<(), ConfigError> {
-        // 如果正在 joint 配置中，不允许修改 learners
+        // Cannot modify learners while in joint configuration
         if self.is_joint() {
             return Err(ConfigError::AlreadyInJoint);
         }

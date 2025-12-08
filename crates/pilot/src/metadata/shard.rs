@@ -235,6 +235,28 @@ impl SplitTask {
     }
 }
 
+/// Raft group status reported by nodes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RaftGroupStatus {
+    /// Raft group created successfully and ready
+    Ready,
+    /// Raft group creation failed
+    Failed,
+    /// Raft group removed (e.g., during shard deletion or migration)
+    Removed,
+}
+
+impl std::fmt::Display for RaftGroupStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RaftGroupStatus::Ready => write!(f, "ready"),
+            RaftGroupStatus::Failed => write!(f, "failed"),
+            RaftGroupStatus::Removed => write!(f, "removed"),
+        }
+    }
+}
+
 /// Shard's role in split
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SplitRole {

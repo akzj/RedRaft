@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tokio::sync::oneshot;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use raft::{
     ClusterConfig, ClusterConfigStorage, Event, RequestId,
@@ -87,6 +87,8 @@ pub struct RedRaftNode {
     state_machines: Arc<Mutex<HashMap<String, Arc<KVStateMachine>>>>,
     /// Pending request tracker
     pending_requests: PendingRequests,
+    /// Optional Pilot client for status reporting
+    pilot_client: Arc<RwLock<Option<Arc<crate::pilot_client::PilotClient>>>>,
 }
 
 impl RedRaftNode {
@@ -104,7 +106,13 @@ impl RedRaftNode {
             router: Arc::new(ShardRouter::new(shard_count)),
             state_machines: Arc::new(Mutex::new(HashMap::new())),
             pending_requests: PendingRequests::new(),
+            pilot_client: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set Pilot client for status reporting
+    pub fn set_pilot_client(&self, client: Arc<crate::pilot_client::PilotClient>) {
+        *self.pilot_client.write() = Some(client);
     }
     
     /// Get pending request tracker
@@ -269,9 +277,34 @@ impl RedRaftNode {
                 Ok(raft_id) => {
                     info!("Successfully created Raft group: {}", raft_id);
                     created_count += 1;
+                    
+                    // Report success to Pilot
+                    if let Some(client) = self.pilot_client.read().as_ref() {
+                        let client = client.clone();
+                        let shard_id_clone = shard_id.clone();
+                        tokio::spawn(async move {
+                            use pilot::RaftGroupStatus;
+                            if let Err(e) = client.report_shard_status(&shard_id_clone, RaftGroupStatus::Ready, None).await {
+                                warn!("Failed to report shard {} ready status to pilot: {}", shard_id_clone, e);
+                            }
+                        });
+                    }
                 }
                 Err(e) => {
+                    let error_msg = e.clone();
                     info!("Failed to create Raft group for shard {}: {}", shard_id, e);
+                    
+                    // Report failure to Pilot
+                    if let Some(client) = self.pilot_client.read().as_ref() {
+                        let client = client.clone();
+                        let shard_id_clone = shard_id.clone();
+                        tokio::spawn(async move {
+                            use pilot::RaftGroupStatus;
+                            if let Err(report_err) = client.report_shard_status(&shard_id_clone, RaftGroupStatus::Failed, Some(&error_msg)).await {
+                                warn!("Failed to report shard {} failure status to pilot: {}", shard_id_clone, report_err);
+                            }
+                        });
+                    }
                 }
             }
         }
@@ -301,18 +334,32 @@ impl RedRaftNode {
         // Get routing key
         let key = cmd.get_key();
         
-        // Determine shard
-        let (shard_id, key_bytes) = match key {
-            Some(k) => (self.router.route_key(k), k),
-            None => {
-                // Commands without key (e.g., PING, DBSIZE) execute locally
-                return self.handle_global_read(cmd);
+        // For commands without key (e.g., PING, ECHO), use any available state machine
+        // These commands are stateless and handled by redisstore
+        let state_machines = self.state_machines.lock();
+        
+        if key.is_none() {
+            // Commands without key: use first available state machine
+            // redisstore will handle PING, ECHO, etc.
+            if let Some((_group_id, sm)) = state_machines.iter().next() {
+                let result = sm.store().apply(&cmd);
+                return Ok(apply_result_to_resp(result));
+            } else {
+                // No state machines available, but PING/ECHO can still work
+                // Create a temporary store instance for these stateless commands
+                // Note: This is a fallback, ideally we should have at least one shard
+                return Err("No shards available".to_string());
             }
-        };
+        }
+        
+        let key_bytes = key.unwrap();
+        
+        // Determine shard for key-based commands
+        let shard_id = self.router.route_key(&key_bytes);
         
         // Check split status - return redirect if MOVED needed
-        if let Some((_target_shard, target_addr)) = self.router.should_move_for_split(key_bytes, &shard_id) {
-            let slot = crate::router::ShardRouter::slot_for_key(key_bytes);
+        if let Some((_target_shard, target_addr)) = self.router.should_move_for_split(&key_bytes, &shard_id) {
+            let slot = crate::router::ShardRouter::slot_for_key(&key_bytes);
             return Err(format!("MOVED {} {}", slot, target_addr));
         }
         
@@ -321,83 +368,11 @@ impl RedRaftNode {
             .ok_or_else(|| format!("CLUSTERDOWN Shard {} not ready", shard_id))?;
         
         // Read from state machine
-        let state_machines = self.state_machines.lock();
         if let Some(sm) = state_machines.get(&raft_id.group) {
             let result = sm.store().apply(&cmd);
             Ok(apply_result_to_resp(result))
         } else {
             Err("State machine not found".to_string())
-        }
-    }
-
-    /// Handle global read commands (no specific key)
-    fn handle_global_read(&self, cmd: Command) -> Result<RespValue, String> {
-        match cmd {
-            Command::Ping { message } => {
-                Ok(match message {
-                    Some(msg) => RespValue::BulkString(Some(msg)),
-                    None => RespValue::SimpleString("PONG".to_string()),
-                })
-            }
-            Command::Echo { message } => {
-                Ok(RespValue::BulkString(Some(message)))
-            }
-            Command::DbSize => {
-                let state_machines = self.state_machines.lock();
-                let total: i64 = state_machines.values()
-                    .map(|sm| sm.store().dbsize() as i64)
-                    .sum();
-                Ok(RespValue::Integer(total))
-            }
-            Command::CommandInfo => {
-                // Simplified implementation
-                Ok(RespValue::Array(vec![]))
-            }
-            Command::Info { .. } => {
-                Ok(RespValue::BulkString(Some(b"# Server\nredraft_version:0.1.0\n".to_vec())))
-            }
-            Command::Keys { pattern } => {
-                // Collect keys from all shards
-                let state_machines = self.state_machines.lock();
-                let mut all_keys = Vec::new();
-                for sm in state_machines.values() {
-                    let keys = sm.store().keys(&pattern);
-                    for key in keys {
-                        all_keys.push(RespValue::BulkString(Some(key)));
-                    }
-                }
-                Ok(RespValue::Array(all_keys))
-            }
-            Command::Scan { cursor, pattern, count } => {
-                // Simplified implementation: only return all keys when cursor=0
-                if cursor != 0 {
-                    return Ok(RespValue::Array(vec![
-                        RespValue::BulkString(Some(b"0".to_vec())),
-                        RespValue::Array(vec![]),
-                    ]));
-                }
-                let state_machines = self.state_machines.lock();
-                let mut all_keys = Vec::new();
-                let limit = count.unwrap_or(10) as usize;
-                let pattern_bytes = pattern.as_ref().map(|p| p.as_slice()).unwrap_or(b"*");
-                for sm in state_machines.values() {
-                    let keys = sm.store().keys(pattern_bytes);
-                    for key in keys {
-                        all_keys.push(RespValue::BulkString(Some(key)));
-                        if all_keys.len() >= limit {
-                            break;
-                        }
-                    }
-                    if all_keys.len() >= limit {
-                        break;
-                    }
-                }
-                Ok(RespValue::Array(vec![
-                    RespValue::BulkString(Some(b"0".to_vec())),
-                    RespValue::Array(all_keys),
-                ]))
-            }
-            _ => Err(format!("Unsupported global read command: {}", cmd.name())),
         }
     }
 
