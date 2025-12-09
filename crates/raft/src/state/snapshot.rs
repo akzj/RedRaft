@@ -1,12 +1,12 @@
 //! Snapshot handling for Raft state machine
-//! 
+//!
 //! # Snapshot Module Overview
-//! 
+//!
 //! This module is responsible for Raft snapshot creation, sending, and installation. Snapshots are used for:
 //! - Compressing logs to prevent infinite growth
 //! - Allowing lagging Followers to quickly catch up with the Leader
 //! - Fast recovery after node restart
-//! 
+//!
 //! # Snapshot Installation Process
 //!
 //! ## Flowchart
@@ -116,8 +116,8 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
 use super::RaftState;
-use crate::event::Role;
 use crate::error::SnapshotError;
+use crate::event::Role;
 use crate::message::{
     CompleteSnapshotInstallation, HardState, InstallSnapshotRequest, InstallSnapshotResponse,
     InstallSnapshotState, Snapshot, SnapshotProbeSchedule,
@@ -178,8 +178,7 @@ impl RaftState {
         {
             error!(
                 "node {}: failed to send InstallSnapshotRequest: {}",
-                self.id,
-                err
+                self.id, err
             );
         }
     }
@@ -314,7 +313,9 @@ impl RaftState {
                             } else {
                                 InstallSnapshotState::Failed(format!(
                                     "Snapshot installation failed: {}",
-                                    error.map(|e| e.to_string()).unwrap_or_else(|| "Unknown error".to_string())
+                                    error
+                                        .map(|e| e.to_string())
+                                        .unwrap_or_else(|| "Unknown error".to_string())
                                 ))
                             }
                         }
@@ -764,10 +765,18 @@ impl RaftState {
         self.send_snapshot_to(peer).await;
     }
 
-    /// Generate and persist snapshot
-    pub(crate) async fn create_snapshot(&mut self) {
-        let begin = Instant::now();
+    /// Trigger async snapshot creation (non-blocking)
+    ///
+    /// This method spawns a background task to create the snapshot,
+    /// avoiding blocking the Raft event loop during snapshot creation.
+    pub(crate) async fn trigger_snapshot_creation(&mut self) {
+        // Check if snapshot creation is already in progress
+        if self.snapshot_in_progress {
+            info!("Snapshot creation already in progress, skipping");
+            return;
+        }
 
+        // Check if there are new committed logs to snapshot
         if self.commit_index <= self.last_snapshot_index {
             info!(
                 "No new committed logs to snapshot (commit_index: {}, last_snapshot_index: {})",
@@ -775,6 +784,9 @@ impl RaftState {
             );
             return;
         }
+
+        // Mark snapshot creation as in progress
+        self.snapshot_in_progress = true;
 
         let snapshot_index = self.commit_index;
         let snapshot_term = if snapshot_index == 0 {
@@ -789,77 +801,94 @@ impl RaftState {
                         "Failed to get log term for snapshot at index {}: {}",
                         snapshot_index, e
                     );
+                    self.snapshot_in_progress = false;
                     return;
                 }
             }
         };
 
         let config = self.config.clone();
+        let id = self.id.clone();
+        let callbacks = self.callbacks.clone();
+        let event_sender = self.callbacks.clone();
 
-        let (snap_index, snap_term) = match self
-            .error_handler
-            .handle(
-                self.callbacks
-                    .create_snapshot(&self.id, config, self.callbacks.clone())
-                    .await,
-                "create_snapshot",
-                None,
-            )
-            .await
-        {
-            Some((idx, term)) => (idx, term),
-            None => {
-                error!("Failed to create snapshot via callback");
-                return;
-            }
-        };
+        info!(
+            "Starting async snapshot creation at index {}, term {}",
+            snapshot_index, snapshot_term
+        );
 
-        if snap_index != snapshot_index {
-            warn!(
-                "Snapshot index mismatch: expected {}, got {}, using expected value",
-                snapshot_index, snap_index
+        // Spawn background task for snapshot creation
+        tokio::spawn(async move {
+            let begin = std::time::Instant::now();
+
+            // Create snapshot in background
+            let result = callbacks
+                .create_snapshot(&id, config, callbacks.clone())
+                .await;
+
+            let (success, snap_index, snap_term, error) = match result {
+                Ok((idx, term)) => (true, idx, term, None),
+                Err(e) => {
+                    error!("Failed to create snapshot: {:?}", e);
+                    (false, 0, 0, Some(format!("{:?}", e)))
+                }
+            };
+
+            let elapsed = begin.elapsed();
+            info!(
+                "Snapshot creation task completed: success={}, index={}, term={}, elapsed={:?}",
+                success, snap_index, snap_term, elapsed
             );
-        }
-        if snap_term != snapshot_term {
-            warn!(
-                "Snapshot term mismatch: expected {}, got {}, using expected value",
-                snapshot_term, snap_term
-            );
-        }
 
-        let snap = match self.callbacks.load_snapshot(&self.id).await {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                error!("No snapshot found after creation");
-                return;
-            }
-            Err(e) => {
-                error!("Failed to load snapshot after creation: {}", e);
-                return;
-            }
-        };
+            // Send completion event back to Raft state
+            let event = crate::Event::SnapshotCreated(crate::message::SnapshotCreated {
+                index: snap_index,
+                term: snap_term,
+                success,
+                error,
+            });
 
-        if snap.index < snapshot_index {
+            if let Err(e) = event_sender.send(id.clone(), event).await {
+                error!("Failed to send SnapshotCreated event: {:?}", e);
+            }
+        });
+    }
+
+    /// Handle snapshot creation completion (async notification)
+    pub(crate) async fn handle_snapshot_created(
+        &mut self,
+        result: crate::message::SnapshotCreated,
+    ) {
+        // Clear in-progress flag
+        self.snapshot_in_progress = false;
+
+        if !result.success {
             error!(
-                "Snapshot index too old: expected >= {}, got {}",
-                snapshot_index, snap.index
+                "Snapshot creation failed: {:?}",
+                result.error.unwrap_or_else(|| "Unknown error".to_string())
             );
             return;
         }
 
-        info!(
-            "Snapshot validation passed: index={}, term={}, config_valid={}",
-            snap.index,
-            snap.term,
-            snap.config.is_valid()
-        );
+        let snap_index = result.index;
+        let snap_term = result.term;
 
-        if snap.index > 0 {
+        // Validate snapshot index (should not go backwards)
+        if snap_index < self.last_snapshot_index {
+            error!(
+                "Snapshot index too old: expected >= {}, got {}",
+                self.last_snapshot_index, snap_index
+            );
+            return;
+        }
+
+        // Truncate log prefix
+        if snap_index > 0 {
             let _ = self
                 .error_handler
                 .handle_void(
                     self.callbacks
-                        .truncate_log_prefix(&self.id, snap.index + 1)
+                        .truncate_log_prefix(&self.id, snap_index + 1)
                         .await,
                     "truncate_log_prefix",
                     None,
@@ -867,16 +896,15 @@ impl RaftState {
                 .await;
         }
 
-        self.last_snapshot_index = snap.index;
-        self.last_snapshot_term = snap.term;
-        self.last_applied = self.last_applied.max(snap.index);
-        self.commit_index = self.commit_index.max(snap.index);
+        // Update state
+        self.last_snapshot_index = snap_index;
+        self.last_snapshot_term = snap_term;
+        self.last_applied = self.last_applied.max(snap_index);
+        self.commit_index = self.commit_index.max(snap_index);
 
-        let elapsed = begin.elapsed();
         info!(
-            "Snapshot created at index {}, term {} (elapsed: {:?})",
-            snap.index, snap.term, elapsed
+            "Snapshot created: index={}, term={}, last_applied={}, commit_index={}",
+            self.last_snapshot_index, self.last_snapshot_term, self.last_applied, self.commit_index
         );
     }
 }
-

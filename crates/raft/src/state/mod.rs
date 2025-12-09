@@ -208,6 +208,9 @@ pub struct RaftState {
     /// Snapshot installation success flag
     pub install_snapshot_success: Option<(bool, RequestId, Option<crate::error::SnapshotError>)>,
 
+    /// Snapshot creation in progress flag (prevents concurrent snapshot creation)
+    pub snapshot_in_progress: bool,
+
     // Snapshot-related state (for Leader)
     pub follower_snapshot_states: HashMap<RaftId, InstallSnapshotState>,
     pub follower_last_snapshot_index: HashMap<RaftId, u64>,
@@ -328,6 +331,7 @@ impl RaftState {
             lease_end: None,
             install_snapshot_success: None,
             current_snapshot_request_id: None,
+            snapshot_in_progress: false,
             follower_snapshot_states: HashMap::new(),
             follower_last_snapshot_index: HashMap::new(),
             snapshot_probe_schedules: Vec::new(),
@@ -488,30 +492,19 @@ impl RaftState {
         use crate::Event;
 
         match event {
+            // ========== Timer Events ==========
             Event::ElectionTimeout => self.handle_election_timeout().await,
+            Event::HeartbeatTimeout => self.handle_heartbeat_timeout().await,
+            Event::ApplyLogTimeout => self.apply_committed_logs().await,
+            Event::ConfigChangeTimeout => self.handle_config_change_timeout().await,
+            Event::LeaderTransferTimeout => self.handle_leader_transfer_timeout().await,
+
+            // ========== Election & Pre-Vote ==========
             Event::RequestVoteRequest(sender, request) => {
                 self.handle_request_vote(sender, request).await
             }
-            Event::AppendEntriesRequest(sender, request) => {
-                self.handle_append_entries_request(sender, request).await
-            }
             Event::RequestVoteResponse(sender, response) => {
                 self.handle_request_vote_response(sender, response).await
-            }
-            Event::AppendEntriesResponse(sender, response) => {
-                self.handle_append_entries_response(sender, response).await
-            }
-            Event::HeartbeatTimeout => self.handle_heartbeat_timeout().await,
-            Event::ClientPropose { cmd, request_id } => {
-                self.handle_client_propose(cmd, request_id).await
-            }
-            Event::ReadIndex { request_id } => self.handle_read_index(request_id).await,
-            Event::InstallSnapshotRequest(sender, request) => {
-                self.handle_install_snapshot(sender, request).await
-            }
-            Event::InstallSnapshotResponse(sender, response) => {
-                self.handle_install_snapshot_response(sender, response)
-                    .await
             }
             Event::PreVoteRequest(sender, request) => {
                 self.handle_pre_vote_request(sender, request).await
@@ -519,34 +512,50 @@ impl RaftState {
             Event::PreVoteResponse(sender, response) => {
                 self.handle_pre_vote_response(sender, response).await
             }
-            Event::ApplyLogTimeout => self.apply_committed_logs().await,
-            Event::ConfigChangeTimeout => self.handle_config_change_timeout().await,
-            Event::ChangeConfig {
-                new_voters,
-                request_id,
-            } => self.handle_change_config(new_voters, request_id).await,
-            Event::AddLearner {
-                learner,
-                request_id,
-            } => {
-                self.handle_add_learner(learner, request_id).await;
+
+            // ========== Log Replication ==========
+            Event::AppendEntriesRequest(sender, request) => {
+                self.handle_append_entries_request(sender, request).await
             }
-            Event::RemoveLearner {
-                learner,
-                request_id,
-            } => {
-                self.handle_remove_learner(learner, request_id).await;
+            Event::AppendEntriesResponse(sender, response) => {
+                self.handle_append_entries_response(sender, response).await
             }
+
+            // ========== Client Requests ==========
+            Event::ClientPropose { cmd, request_id } => {
+                self.handle_client_propose(cmd, request_id).await
+            }
+            Event::ReadIndex { request_id } => {
+                self.handle_read_index(request_id).await
+            }
+
+            // ========== Snapshot ==========
+            Event::CreateSnapshot => self.trigger_snapshot_creation().await,
+            Event::SnapshotCreated(result) => self.handle_snapshot_created(result).await,
+            Event::InstallSnapshotRequest(sender, request) => {
+                self.handle_install_snapshot(sender, request).await
+            }
+            Event::InstallSnapshotResponse(sender, response) => {
+                self.handle_install_snapshot_response(sender, response).await
+            }
+            Event::CompleteSnapshotInstallation(event) => {
+                self.handle_complete_snapshot_installation(event).await
+            }
+
+            // ========== Config Change ==========
+            Event::ChangeConfig { new_voters, request_id } => {
+                self.handle_change_config(new_voters, request_id).await
+            }
+            Event::AddLearner { learner, request_id } => {
+                self.handle_add_learner(learner, request_id).await
+            }
+            Event::RemoveLearner { learner, request_id } => {
+                self.handle_remove_learner(learner, request_id).await
+            }
+
+            // ========== Leader Transfer ==========
             Event::LeaderTransfer { target, request_id } => {
-                self.handle_leader_transfer(target, request_id).await;
-            }
-            Event::LeaderTransferTimeout => {
-                self.handle_leader_transfer_timeout().await;
-            }
-            Event::CreateSnapshot => self.create_snapshot().await,
-            Event::CompleteSnapshotInstallation(complete_snapshot_installation) => {
-                self.handle_complete_snapshot_installation(complete_snapshot_installation)
-                    .await;
+                self.handle_leader_transfer(target, request_id).await
             }
         }
     }

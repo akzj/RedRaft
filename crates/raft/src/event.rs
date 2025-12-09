@@ -4,14 +4,14 @@ use std::fmt::{self, Display};
 use crate::message::{
     AppendEntriesRequest, AppendEntriesResponse, CompleteSnapshotInstallation,
     InstallSnapshotRequest, InstallSnapshotResponse, PreVoteRequest, PreVoteResponse,
-    RequestVoteRequest, RequestVoteResponse,
+    RequestVoteRequest, RequestVoteResponse, SnapshotCreated,
 };
 use crate::types::{Command, RaftId, RequestId};
 
 /// Raft event definitions (input)
 #[derive(Debug, Clone)]
 pub enum Event {
-    // Timer events
+    // ========== Timer Events ==========
     /// Election timeout (triggered by Follower/Candidate)
     ElectionTimeout,
     /// Heartbeat timeout (Leader triggers log synchronization)
@@ -20,60 +20,71 @@ pub enum Event {
     ApplyLogTimeout,
     /// Config change timeout
     ConfigChangeTimeout,
-
-    // RPC request events (from other nodes)
-    RequestVoteRequest(RaftId, RequestVoteRequest),
-    AppendEntriesRequest(RaftId, AppendEntriesRequest),
-    InstallSnapshotRequest(RaftId, InstallSnapshotRequest),
-
-    // RPC response events (other nodes' replies to this node's requests)
-    RequestVoteResponse(RaftId, RequestVoteResponse),
-    AppendEntriesResponse(RaftId, AppendEntriesResponse),
-    InstallSnapshotResponse(RaftId, InstallSnapshotResponse),
-
-    // Pre-Vote events (prevent network partitioned nodes from disrupting the cluster)
-    PreVoteRequest(RaftId, PreVoteRequest),
-    PreVoteResponse(RaftId, PreVoteResponse),
-
-    // Leader transfer related events
-    LeaderTransfer {
-        target: RaftId,
-        request_id: RequestId,
-    },
+    /// Leader transfer timeout
     LeaderTransferTimeout,
 
-    // Client events
+    // ========== Election & Pre-Vote ==========
+    /// Request vote from other nodes
+    RequestVoteRequest(RaftId, RequestVoteRequest),
+    /// Response to vote request
+    RequestVoteResponse(RaftId, RequestVoteResponse),
+    /// Pre-vote request (prevents network partitioned nodes from disrupting cluster)
+    PreVoteRequest(RaftId, PreVoteRequest),
+    /// Pre-vote response
+    PreVoteResponse(RaftId, PreVoteResponse),
+
+    // ========== Log Replication ==========
+    /// Append entries request from Leader
+    AppendEntriesRequest(RaftId, AppendEntriesRequest),
+    /// Response to append entries
+    AppendEntriesResponse(RaftId, AppendEntriesResponse),
+
+    // ========== Client Requests ==========
+    /// Client proposes a command
     ClientPropose {
         cmd: Command,
         request_id: RequestId,
     },
-
     /// ReadIndex request (for linearizable reads)
     ReadIndex {
         request_id: RequestId,
     },
 
-    // Config change events
+    // ========== Snapshot ==========
+    /// Trigger async snapshot creation
+    CreateSnapshot,
+    /// Snapshot creation completed (async notification)
+    SnapshotCreated(SnapshotCreated),
+    /// Install snapshot request from Leader
+    InstallSnapshotRequest(RaftId, InstallSnapshotRequest),
+    /// Response to install snapshot
+    InstallSnapshotResponse(RaftId, InstallSnapshotResponse),
+    /// Snapshot installation completed
+    CompleteSnapshotInstallation(CompleteSnapshotInstallation),
+
+    // ========== Config Change ==========
+    /// Change cluster configuration (voters)
     ChangeConfig {
         new_voters: HashSet<RaftId>,
         request_id: RequestId,
     },
-
-    // Learner management events
+    /// Add a learner node
     AddLearner {
         learner: RaftId,
         request_id: RequestId,
     },
+    /// Remove a learner node
     RemoveLearner {
         learner: RaftId,
         request_id: RequestId,
     },
 
-    // Snapshot generation
-    CreateSnapshot,
-
-    // Snapshot installation result
-    CompleteSnapshotInstallation(CompleteSnapshotInstallation),
+    // ========== Leader Transfer ==========
+    /// Transfer leadership to target node
+    LeaderTransfer {
+        target: RaftId,
+        request_id: RequestId,
+    },
 }
 
 /// Raft node role

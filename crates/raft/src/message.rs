@@ -36,6 +36,15 @@ pub struct CompleteSnapshotInstallation {
     pub config: Option<ClusterConfig>,
 }
 
+/// Snapshot creation result (for async notification)
+#[derive(Debug, Clone)]
+pub struct SnapshotCreated {
+    pub index: u64,
+    pub term: u64,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum InstallSnapshotState {
     Failed(String), // Failed, with reason
