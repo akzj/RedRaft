@@ -13,3 +13,5 @@ parking_lot = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 bincode = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
+ordered-float = "5.1.0"

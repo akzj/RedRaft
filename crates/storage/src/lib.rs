@@ -21,4 +21,7 @@ mod traits;
 mod memory;
 
 pub use traits::{ApplyResult, RedisStore, StoreError, StoreResult};
-pub use memory::{MemoryStore, RedisValue};
+pub use memory::{
+    MemoryStore, RedisValue,
+    ListStore, SetStore, ZSetStore, PubSubStore,
+};
