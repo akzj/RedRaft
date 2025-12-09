@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use raft::{ApplyResult, ClusterConfig, RaftId, RequestId, SnapshotStorage, StateMachine, StorageResult, traits::ClientResult};
-use redisstore::{ApplyResult as StoreApplyResult, RedisStore};
+use storage::{ApplyResult as StoreApplyResult, RedisStore};
 use resp::Command;
 
 use crate::node::PendingRequests;
@@ -199,7 +199,7 @@ impl StateMachine for KVStateMachine {
                         .unwrap_or(StoreApplyResult::Ok)
                 }
                 Err(e) => {
-                    StoreApplyResult::Error(redisstore::StoreError::Internal(format!("{:?}", e)))
+                    StoreApplyResult::Error(storage::StoreError::Internal(format!("{:?}", e)))
                 }
             };
             pending.complete(request_id, store_result);
@@ -220,7 +220,7 @@ impl StateMachine for KVStateMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use redisstore::MemoryStore;
+    use storage::MemoryStore;
     use resp::Command;
 
     #[tokio::test]

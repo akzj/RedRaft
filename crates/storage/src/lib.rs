@@ -10,7 +10,7 @@
 //! 
 //! # Example
 //! ```rust
-//! use redisstore::{MemoryStore, RedisStore};
+//! use storage::{MemoryStore, RedisStore};
 //! 
 //! let store = MemoryStore::new();
 //! store.set(b"key".to_vec(), b"value".to_vec());

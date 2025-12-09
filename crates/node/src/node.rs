@@ -20,7 +20,7 @@ use raft::{
 
 use crate::router::ShardRouter;
 use crate::state_machine::KVStateMachine;
-use redisstore::{ApplyResult as StoreApplyResult, MemoryStore};
+use storage::{ApplyResult as StoreApplyResult, MemoryStore};
 use resp::{Command, CommandType, RespValue};
 
 /// Pending request tracker
@@ -335,12 +335,12 @@ impl RedRaftNode {
         let key = cmd.get_key();
         
         // For commands without key (e.g., PING, ECHO), use any available state machine
-        // These commands are stateless and handled by redisstore
+        // These commands are stateless and handled by storage
         let state_machines = self.state_machines.lock();
         
         if key.is_none() {
             // Commands without key: use first available state machine
-            // redisstore will handle PING, ECHO, etc.
+            // storage will handle PING, ECHO, etc.
             if let Some((_group_id, sm)) = state_machines.iter().next() {
                 let result = sm.store().apply(&cmd);
                 return Ok(apply_result_to_resp(result));

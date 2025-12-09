@@ -19,7 +19,7 @@ raft = { path = "../raft" }
 # RESP protocol support
 resp = { path = "../resp" }
 # Redis store state machine
-redisstore = { path = "../redisstore" }
+storage = { path = "../storage" }
 
 # Workspace dependencies
 tokio = { workspace = true }
