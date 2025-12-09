@@ -1,27 +1,110 @@
 //! Redis storage abstraction layer
-//! 
-//! Defines storage traits, supporting in-memory and persistent storage (like RocksDB)
-//! 
-//! # Supported Redis Data Types
-//! - String: GET, SET, MGET, MSET, INCR, DECR, APPEND, STRLEN
-//! - List: LPUSH, RPUSH, LPOP, RPOP, LRANGE, LLEN, LINDEX, LSET
-//! - Hash: HGET, HSET, HMGET, HMSET, HDEL, HGETALL, HKEYS, HVALS
-//! - Set: SADD, SREM, SMEMBERS, SISMEMBER, SCARD
-//! 
-//! # Example
-//! ```rust
-//! use storage::{MemoryStore, RedisStore};
-//! 
-//! let store = MemoryStore::new();
+//!
+//! Defines storage traits, supporting multiple storage backends.
+//!
+//! # Storage Architecture
+//!
+//! ## Hybrid Storage (Recommended)
+//!
+//! The `HybridStore` combines multiple backends for optimal performance:
+//! - **RocksDB**: String, Hash (persistent, durable)
+//! - **Memory**: List, Set, ZSet (high-performance, volatile)
+//! - **StreamStore**: Stream (persistent, large capacity)
+//!
+//! ## Path Structure
+//!
+//! All backends use the same path: `shard_id -> key -> value`
+//!
+//! ## Data Type Routing
+//!
+//! | Data Type | Backend     | Persistence |
+//! |-----------|-------------|-------------|
+//! | String    | RocksDB     | ✅ Yes      |
+//! | Hash      | RocksDB     | ✅ Yes      |
+//! | List      | Memory      | ❌ No       |
+//! | Set       | Memory      | ❌ No       |
+//! | ZSet      | Memory      | ❌ No       |
+//! | Stream    | StreamStore | ✅ Yes      |
+//!
+//! # Example (HybridStore - Recommended)
+//!
+//! ```rust,ignore
+//! use storage::{HybridStore, RedisStore};
+//!
+//! // Create hybrid store with 16 shards
+//! let store = HybridStore::new("/tmp/mydb", 16).unwrap();
+//!
+//! // String (RocksDB - persistent)
 //! store.set(b"key".to_vec(), b"value".to_vec());
-//! assert_eq!(store.get(b"key"), Some(b"value".to_vec()));
+//!
+//! // Hash (RocksDB - persistent)
+//! store.hset(b"hash", b"field".to_vec(), b"value".to_vec());
+//!
+//! // List (Memory - volatile)
+//! store.lpush(b"list", vec![b"item".to_vec()]);
+//!
+//! // Set (Memory - volatile)
+//! store.sadd(b"set", vec![b"member".to_vec()]);
+//! ```
+//!
+//! # Example (MemoryStore - Standalone)
+//!
+//! ```rust
+//! use storage::{MemoryStore, StringStore};
+//!
+//! let store = MemoryStore::new(16);
+//! store.set(b"key".to_vec(), b"value".to_vec());
+//! ```
+//!
+//! # Example (RocksDBStore - Standalone)
+//!
+//! ```rust,ignore
+//! use storage::{RocksDBStore, RedisStore};
+//!
+//! let store = RocksDBStore::new("/tmp/mydb").unwrap();
+//! store.set(b"key".to_vec(), b"value".to_vec());
 //! ```
 
+pub mod hybrid;
+pub mod memory;
+pub mod rocksdb;
 mod traits;
-mod memory;
 
-pub use traits::{ApplyResult, RedisStore, StoreError, StoreResult};
+// Hybrid storage (recommended)
+pub use hybrid::{DataType, HybridSnapshot, HybridStore, ShardedRocksDB, StreamStore};
+
+// Individual stores
 pub use memory::{
-    MemoryStore, RedisValue,
-    ListStore, SetStore, ZSetStore, PubSubStore,
+    shard_for_key,
+    shard_slot_range,
+    // Shard utilities
+    slot_for_key,
+    // Data types
+    ListData,
+    MemoryStore,
+    PubSubStore,
+    RedisValue,
+    SetData,
+    ShardId,
+    ZSetData,
+    TOTAL_SLOTS,
+};
+pub use rocksdb::RocksDBStore;
+
+// Traits (organized by data structure)
+pub use traits::{
+    // Error types
+    ApplyResult,
+    StoreError,
+    StoreResult,
+    // Data structure traits
+    HashStore,
+    KeyStore,
+    ListStore,
+    SetStore,
+    SnapshotStore,
+    StringStore,
+    ZSetStore,
+    // Combined trait
+    RedisStore,
 };

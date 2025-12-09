@@ -225,7 +225,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_and_get() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(MemoryStore::default());
         let sm = KVStateMachine::new(store);
         let raft_id = RaftId::new("test".to_string(), "node1".to_string());
 
@@ -247,7 +247,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_del() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(MemoryStore::default());
         let sm = KVStateMachine::new(store);
         let raft_id = RaftId::new("test".to_string(), "node1".to_string());
 
@@ -275,7 +275,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_operations() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(MemoryStore::default());
         let sm = KVStateMachine::new(store);
         let raft_id = RaftId::new("test".to_string(), "node1".to_string());
 
@@ -294,7 +294,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hash_operations() {
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(MemoryStore::default());
         let sm = KVStateMachine::new(store);
         let raft_id = RaftId::new("test".to_string(), "node1".to_string());
 

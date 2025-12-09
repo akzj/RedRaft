@@ -179,7 +179,7 @@ impl RedRaftNode {
         }
 
         // Create state machine (using memory store, can be replaced with RocksDB later)
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(MemoryStore::default());
         let state_machine = Arc::new(KVStateMachine::with_pending_requests(
             store,
             self.pending_requests.clone(),

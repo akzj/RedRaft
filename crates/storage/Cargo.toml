@@ -15,3 +15,9 @@ bincode = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 ordered-float = "5.1.0"
+# RocksDB for persistent storage
+rocksdb = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

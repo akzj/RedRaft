@@ -1,8 +1,21 @@
-//! Redis storage trait definition
-//! 
-//! Supports multiple Redis data types and operations
+//! Redis storage trait definitions
+//!
+//! Traits are organized by data structure for flexible implementation:
+//!
+//! - `StringStore`: String operations (GET, SET, INCR, etc.)
+//! - `ListStore`: List operations (LPUSH, RPUSH, LPOP, etc.)
+//! - `HashStore`: Hash operations (HGET, HSET, HDEL, etc.)
+//! - `SetStore`: Set operations (SADD, SREM, SMEMBERS, etc.)
+//! - `ZSetStore`: Sorted Set operations (ZADD, ZREM, ZRANGE, etc.)
+//! - `KeyStore`: Generic key operations (DEL, EXISTS, TYPE, TTL, etc.)
+//! - `SnapshotStore`: Snapshot operations
+//! - `RedisStore`: Combines all traits with command execution
 
 use resp::Command;
+
+// ============================================================================
+// Error Types
+// ============================================================================
 
 /// Command execution result
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +51,8 @@ pub enum StoreError {
     InvalidArgument(String),
     /// Internal error
     Internal(String),
+    /// Operation not supported
+    NotSupported,
 }
 
 impl std::fmt::Display for StoreError {
@@ -48,6 +63,7 @@ impl std::fmt::Display for StoreError {
                 write!(f, "WRONGTYPE Operation against a key holding the wrong kind of value")
             }
             StoreError::IndexOutOfRange => write!(f, "index out of range"),
+            StoreError::NotSupported => write!(f, "operation not supported"),
             StoreError::InvalidArgument(msg) => write!(f, "invalid argument: {}", msg),
             StoreError::Internal(msg) => write!(f, "internal error: {}", msg),
         }
@@ -58,19 +74,16 @@ impl std::error::Error for StoreError {}
 
 pub type StoreResult<T> = Result<T, StoreError>;
 
-/// Redis storage abstraction trait
-/// 
-/// Defines Redis-compatible key-value storage operations, supporting:
-/// - String: GET, SET, MGET, MSET, INCR, DECR, APPEND, STRLEN
-/// - List: LPUSH, RPUSH, LPOP, RPOP, LRANGE, LLEN, LINDEX
-/// - Hash: HGET, HSET, HDEL, HGETALL, HKEYS, HVALS, HLEN
-/// - Set: SADD, SREM, SMEMBERS, SISMEMBER, SCARD
-/// - Generic: DEL, EXISTS, KEYS, TYPE, TTL, EXPIRE, DBSIZE, FLUSHDB
-/// 
-/// Can be easily replaced with persistent storage like RocksDB later
-pub trait RedisStore: Send + Sync {
-    // ==================== String Operations ====================
+// ============================================================================
+// String Store Trait
+// ============================================================================
 
+/// String data structure operations
+///
+/// Supports: GET, SET, SETNX, SETEX, MGET, MSET, INCR, DECR, APPEND, STRLEN
+///
+/// Recommended backend: RocksDB (persistent)
+pub trait StringStore: Send + Sync {
     /// GET: Get string value
     fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
 
@@ -84,22 +97,34 @@ pub trait RedisStore: Send + Sync {
     fn setex(&self, key: Vec<u8>, value: Vec<u8>, ttl_secs: u64);
 
     /// MGET: Batch get
-    fn mget(&self, keys: &[&[u8]]) -> Vec<Option<Vec<u8>>>;
+    fn mget(&self, keys: &[&[u8]]) -> Vec<Option<Vec<u8>>> {
+        keys.iter().map(|k| self.get(k)).collect()
+    }
 
     /// MSET: Batch set
-    fn mset(&self, kvs: Vec<(Vec<u8>, Vec<u8>)>);
+    fn mset(&self, kvs: Vec<(Vec<u8>, Vec<u8>)>) {
+        for (k, v) in kvs {
+            self.set(k, v);
+        }
+    }
 
     /// INCR: Increment integer by 1
-    fn incr(&self, key: &[u8]) -> StoreResult<i64>;
+    fn incr(&self, key: &[u8]) -> StoreResult<i64> {
+        self.incrby(key, 1)
+    }
 
     /// INCRBY: Increment integer by specified value
     fn incrby(&self, key: &[u8], delta: i64) -> StoreResult<i64>;
 
     /// DECR: Decrement integer by 1
-    fn decr(&self, key: &[u8]) -> StoreResult<i64>;
+    fn decr(&self, key: &[u8]) -> StoreResult<i64> {
+        self.incrby(key, -1)
+    }
 
     /// DECRBY: Decrement integer by specified value
-    fn decrby(&self, key: &[u8], delta: i64) -> StoreResult<i64>;
+    fn decrby(&self, key: &[u8], delta: i64) -> StoreResult<i64> {
+        self.incrby(key, -delta)
+    }
 
     /// APPEND: Append string
     fn append(&self, key: &[u8], value: &[u8]) -> usize;
@@ -108,10 +133,23 @@ pub trait RedisStore: Send + Sync {
     fn strlen(&self, key: &[u8]) -> usize;
 
     /// GETSET: Set new value and return old value
-    fn getset(&self, key: Vec<u8>, value: Vec<u8>) -> Option<Vec<u8>>;
+    fn getset(&self, key: Vec<u8>, value: Vec<u8>) -> Option<Vec<u8>> {
+        let old = self.get(&key);
+        self.set(key, value);
+        old
+    }
+}
 
-    // ==================== List Operations ====================
+// ============================================================================
+// List Store Trait
+// ============================================================================
 
+/// List data structure operations
+///
+/// Supports: LPUSH, RPUSH, LPOP, RPOP, LRANGE, LLEN, LINDEX, LSET
+///
+/// Recommended backend: Memory (high performance)
+pub trait ListStore: Send + Sync {
     /// LPUSH: Insert elements from left
     fn lpush(&self, key: &[u8], values: Vec<Vec<u8>>) -> usize;
 
@@ -136,25 +174,66 @@ pub trait RedisStore: Send + Sync {
     /// LSET: Set element at specified index
     fn lset(&self, key: &[u8], index: i64, value: Vec<u8>) -> StoreResult<()>;
 
-    // ==================== Hash Operations ====================
+    /// LTRIM: Trim list to specified range
+    fn ltrim(&self, key: &[u8], start: i64, stop: i64) -> StoreResult<()> {
+        let _ = (key, start, stop);
+        Err(StoreError::NotSupported)
+    }
 
+    /// LREM: Remove elements from list
+    fn lrem(&self, key: &[u8], count: i64, value: &[u8]) -> usize {
+        let _ = (key, count, value);
+        0
+    }
+
+    /// LINSERT: Insert element before or after pivot
+    fn linsert(&self, key: &[u8], before: bool, pivot: &[u8], value: Vec<u8>) -> StoreResult<i64> {
+        let _ = (key, before, pivot, value);
+        Err(StoreError::NotSupported)
+    }
+
+    /// RPOPLPUSH: Pop from right, push to left of another list
+    fn rpoplpush(&self, source: &[u8], destination: &[u8]) -> Option<Vec<u8>> {
+        let _ = (source, destination);
+        None
+    }
+}
+
+// ============================================================================
+// Hash Store Trait
+// ============================================================================
+
+/// Hash data structure operations
+///
+/// Supports: HGET, HSET, HMGET, HMSET, HDEL, HEXISTS, HGETALL, HKEYS, HVALS, HLEN, HINCRBY
+///
+/// Recommended backend: RocksDB (persistent)
+pub trait HashStore: Send + Sync {
     /// HGET: Get hash field value
     fn hget(&self, key: &[u8], field: &[u8]) -> Option<Vec<u8>>;
 
-    /// HSET: Set hash field value
+    /// HSET: Set hash field value, returns true if field is new
     fn hset(&self, key: &[u8], field: Vec<u8>, value: Vec<u8>) -> bool;
 
     /// HMGET: Batch get hash fields
-    fn hmget(&self, key: &[u8], fields: &[&[u8]]) -> Vec<Option<Vec<u8>>>;
+    fn hmget(&self, key: &[u8], fields: &[&[u8]]) -> Vec<Option<Vec<u8>>> {
+        fields.iter().map(|f| self.hget(key, f)).collect()
+    }
 
     /// HMSET: Batch set hash fields
-    fn hmset(&self, key: &[u8], fvs: Vec<(Vec<u8>, Vec<u8>)>);
+    fn hmset(&self, key: &[u8], fvs: Vec<(Vec<u8>, Vec<u8>)>) {
+        for (f, v) in fvs {
+            self.hset(key, f, v);
+        }
+    }
 
     /// HDEL: Delete hash fields
     fn hdel(&self, key: &[u8], fields: &[&[u8]]) -> usize;
 
     /// HEXISTS: Check if hash field exists
-    fn hexists(&self, key: &[u8], field: &[u8]) -> bool;
+    fn hexists(&self, key: &[u8], field: &[u8]) -> bool {
+        self.hget(key, field).is_some()
+    }
 
     /// HGETALL: Get all hash fields and values
     fn hgetall(&self, key: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)>;
@@ -171,8 +250,27 @@ pub trait RedisStore: Send + Sync {
     /// HINCRBY: Increment hash field integer
     fn hincrby(&self, key: &[u8], field: &[u8], delta: i64) -> StoreResult<i64>;
 
-    // ==================== Set Operations ====================
+    /// HSETNX: Set hash field only if it does not exist
+    fn hsetnx(&self, key: &[u8], field: Vec<u8>, value: Vec<u8>) -> bool {
+        if self.hexists(key, &field) {
+            false
+        } else {
+            self.hset(key, field, value);
+            true
+        }
+    }
+}
 
+// ============================================================================
+// Set Store Trait
+// ============================================================================
+
+/// Set data structure operations
+///
+/// Supports: SADD, SREM, SMEMBERS, SISMEMBER, SCARD, SPOP, SRANDMEMBER
+///
+/// Recommended backend: Memory (high performance)
+pub trait SetStore: Send + Sync {
     /// SADD: Add set members
     fn sadd(&self, key: &[u8], members: Vec<Vec<u8>>) -> usize;
 
@@ -182,14 +280,127 @@ pub trait RedisStore: Send + Sync {
     /// SMEMBERS: Get all set members
     fn smembers(&self, key: &[u8]) -> Vec<Vec<u8>>;
 
-    /// SISMEMBER: Check if set member
+    /// SISMEMBER: Check if set member exists
     fn sismember(&self, key: &[u8], member: &[u8]) -> bool;
 
     /// SCARD: Get set size
     fn scard(&self, key: &[u8]) -> usize;
 
-    // ==================== Generic Operations ====================
+    /// SPOP: Remove and return random member(s)
+    fn spop(&self, key: &[u8], count: usize) -> Vec<Vec<u8>> {
+        let _ = (key, count);
+        Vec::new()
+    }
 
+    /// SRANDMEMBER: Get random member(s) without removing
+    fn srandmember(&self, key: &[u8], count: i64) -> Vec<Vec<u8>> {
+        let _ = (key, count);
+        Vec::new()
+    }
+
+    /// SINTER: Intersection of multiple sets
+    fn sinter(&self, keys: &[&[u8]]) -> Vec<Vec<u8>> {
+        let _ = keys;
+        Vec::new()
+    }
+
+    /// SUNION: Union of multiple sets
+    fn sunion(&self, keys: &[&[u8]]) -> Vec<Vec<u8>> {
+        let _ = keys;
+        Vec::new()
+    }
+
+    /// SDIFF: Difference of multiple sets
+    fn sdiff(&self, keys: &[&[u8]]) -> Vec<Vec<u8>> {
+        let _ = keys;
+        Vec::new()
+    }
+}
+
+// ============================================================================
+// ZSet (Sorted Set) Store Trait
+// ============================================================================
+
+/// Sorted Set data structure operations
+///
+/// Supports: ZADD, ZREM, ZSCORE, ZRANK, ZRANGE, ZRANGEBYSCORE, ZCARD, ZINCRBY
+///
+/// Recommended backend: Memory (high performance)
+pub trait ZSetStore: Send + Sync {
+    /// ZADD: Add members with scores
+    fn zadd(&self, key: &[u8], members: Vec<(f64, Vec<u8>)>) -> usize;
+
+    /// ZREM: Remove members
+    fn zrem(&self, key: &[u8], members: &[&[u8]]) -> usize;
+
+    /// ZSCORE: Get member score
+    fn zscore(&self, key: &[u8], member: &[u8]) -> Option<f64>;
+
+    /// ZRANK: Get member rank (0-based)
+    fn zrank(&self, key: &[u8], member: &[u8]) -> Option<usize>;
+
+    /// ZREVRANK: Get member reverse rank
+    fn zrevrank(&self, key: &[u8], member: &[u8]) -> Option<usize> {
+        let _ = (key, member);
+        None
+    }
+
+    /// ZRANGE: Get members by rank range
+    fn zrange(&self, key: &[u8], start: i64, stop: i64, with_scores: bool) -> Vec<(Vec<u8>, f64)>;
+
+    /// ZREVRANGE: Get members by reverse rank range
+    fn zrevrange(&self, key: &[u8], start: i64, stop: i64, with_scores: bool) -> Vec<(Vec<u8>, f64)> {
+        let _ = (key, start, stop, with_scores);
+        Vec::new()
+    }
+
+    /// ZRANGEBYSCORE: Get members by score range
+    fn zrangebyscore(
+        &self,
+        key: &[u8],
+        min: f64,
+        max: f64,
+        with_scores: bool,
+        offset: Option<usize>,
+        count: Option<usize>,
+    ) -> Vec<(Vec<u8>, f64)> {
+        let _ = (key, min, max, with_scores, offset, count);
+        Vec::new()
+    }
+
+    /// ZCARD: Get sorted set size
+    fn zcard(&self, key: &[u8]) -> usize;
+
+    /// ZCOUNT: Count members in score range
+    fn zcount(&self, key: &[u8], min: f64, max: f64) -> usize {
+        let _ = (key, min, max);
+        0
+    }
+
+    /// ZINCRBY: Increment member score
+    fn zincrby(&self, key: &[u8], delta: f64, member: &[u8]) -> StoreResult<f64>;
+
+    /// ZINTERSTORE: Store intersection of sorted sets
+    fn zinterstore(&self, destination: &[u8], keys: &[&[u8]], weights: Option<&[f64]>) -> usize {
+        let _ = (destination, keys, weights);
+        0
+    }
+
+    /// ZUNIONSTORE: Store union of sorted sets
+    fn zunionstore(&self, destination: &[u8], keys: &[&[u8]], weights: Option<&[f64]>) -> usize {
+        let _ = (destination, keys, weights);
+        0
+    }
+}
+
+// ============================================================================
+// Key Store Trait
+// ============================================================================
+
+/// Generic key operations (cross data structure)
+///
+/// Supports: DEL, EXISTS, KEYS, TYPE, TTL, EXPIRE, PERSIST, DBSIZE, FLUSHDB, RENAME
+pub trait KeyStore: Send + Sync {
     /// DEL: Delete keys (supports multiple)
     fn del(&self, keys: &[&[u8]]) -> usize;
 
@@ -220,21 +431,36 @@ pub trait RedisStore: Send + Sync {
     /// RENAME: Rename key
     fn rename(&self, key: &[u8], new_key: Vec<u8>) -> StoreResult<()>;
 
-    // ==================== Snapshot Operations ====================
+    /// RENAMENX: Rename key only if new key does not exist
+    fn renamenx(&self, key: &[u8], new_key: Vec<u8>) -> StoreResult<bool> {
+        if self.exists(&[&new_key]) > 0 {
+            Ok(false)
+        } else {
+            self.rename(key, new_key)?;
+            Ok(true)
+        }
+    }
+}
+
+// ============================================================================
+// Snapshot Store Trait
+// ============================================================================
+
+/// Snapshot operations for persistence and replication
+pub trait SnapshotStore: Send + Sync {
+    /// Create snapshot data
+    fn create_snapshot(&self) -> Result<Vec<u8>, String>;
 
     /// Restore from snapshot data
     fn restore_from_snapshot(&self, snapshot: &[u8]) -> Result<(), String>;
 
-    /// Create snapshot data
-    fn create_snapshot(&self) -> Result<Vec<u8>, String>;
-
     /// Create split snapshot - only contains data within specified slot range
-    /// 
+    ///
     /// # Arguments
     /// - `slot_start`: Start slot (inclusive)
     /// - `slot_end`: End slot (exclusive)
     /// - `total_slots`: Total number of slots (used to calculate key slots)
-    /// 
+    ///
     /// # Returns
     /// Snapshot data containing only keys with slot ∈ [slot_start, slot_end)
     fn create_split_snapshot(
@@ -245,20 +471,20 @@ pub trait RedisStore: Send + Sync {
     ) -> Result<Vec<u8>, String>;
 
     /// Restore from split snapshot - merge into existing data
-    /// 
+    ///
     /// Unlike restore_from_snapshot, this method does not clear existing data,
     /// but merges the snapshot data into it.
     fn merge_from_snapshot(&self, snapshot: &[u8]) -> Result<usize, String>;
 
     /// Delete all keys within specified slot range
-    /// 
+    ///
     /// Used by source shard to clean up transferred data after splitting
-    /// 
+    ///
     /// # Arguments
     /// - `slot_start`: Start slot (inclusive)
     /// - `slot_end`: End slot (exclusive)
     /// - `total_slots`: Total number of slots
-    /// 
+    ///
     /// # Returns
     /// Number of keys deleted
     fn delete_keys_in_slot_range(
@@ -267,11 +493,37 @@ pub trait RedisStore: Send + Sync {
         slot_end: u32,
         total_slots: u32,
     ) -> usize;
+}
 
-    // ==================== Command Execution ====================
+// ============================================================================
+// Redis Store Trait (Combines All)
+// ============================================================================
 
+/// Complete Redis-compatible storage trait
+///
+/// Combines all data structure traits and provides unified command execution.
+///
+/// Implementations can be:
+/// - Full implementation: Implement all traits directly
+/// - Hybrid implementation: Delegate to specialized backends
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // Full implementation
+/// impl RedisStore for MemoryStore {}
+///
+/// // Hybrid implementation
+/// impl RedisStore for HybridStore {
+///     // String/Hash -> RocksDB
+///     // List/Set/ZSet -> Memory
+/// }
+/// ```
+pub trait RedisStore:
+    StringStore + ListStore + HashStore + SetStore + KeyStore + SnapshotStore + Send + Sync
+{
     /// Execute Redis command
-    /// 
+    ///
     /// Unified command execution entry, calls corresponding operation method based on Command type
     fn apply(&self, cmd: &Command) -> ApplyResult {
         match cmd {
@@ -406,15 +658,13 @@ pub trait RedisStore: Send + Sync {
                 Ok(()) => ApplyResult::Ok,
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::LTrim { key, start, stop } => {
-                // TODO: Implement LTRIM
-                let _ = (key, start, stop);
-                ApplyResult::Ok
-            }
+            Command::LTrim { key, start, stop } => match self.ltrim(key, *start, *stop) {
+                Ok(()) => ApplyResult::Ok,
+                Err(e) => ApplyResult::Error(e),
+            },
             Command::LRem { key, count, value } => {
-                // TODO: Implement LREM
-                let _ = (key, count, value);
-                ApplyResult::Integer(0)
+                let removed = self.lrem(key, *count, value);
+                ApplyResult::Integer(removed as i64)
             }
 
             // ==================== Hash Read Commands ====================
@@ -443,12 +693,8 @@ pub trait RedisStore: Send + Sync {
                 ApplyResult::Integer(fvs.len() as i64)
             }
             Command::HSetNx { key, field, value } => {
-                if !self.hexists(key, field) {
-                    self.hset(key, field.clone(), value.clone());
-                    ApplyResult::Integer(1)
-                } else {
-                    ApplyResult::Integer(0)
-                }
+                let result = self.hsetnx(key, field.clone(), value.clone());
+                ApplyResult::Integer(if result { 1 } else { 0 })
             }
             Command::HMSet { key, fvs } => {
                 self.hmset(key, fvs.clone());
@@ -477,9 +723,20 @@ pub trait RedisStore: Send + Sync {
                 ApplyResult::Integer(if self.sismember(key, member) { 1 } else { 0 })
             }
             Command::SCard { key } => ApplyResult::Integer(self.scard(key) as i64),
-            Command::SInter { .. } | Command::SUnion { .. } | Command::SDiff { .. } => {
-                // TODO: Implement set operations
-                ApplyResult::Array(vec![])
+            Command::SInter { keys } => {
+                let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+                let result = self.sinter(&keys_refs);
+                ApplyResult::Array(result.into_iter().map(Some).collect())
+            }
+            Command::SUnion { keys } => {
+                let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+                let result = self.sunion(&keys_refs);
+                ApplyResult::Array(result.into_iter().map(Some).collect())
+            }
+            Command::SDiff { keys } => {
+                let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+                let result = self.sdiff(&keys_refs);
+                ApplyResult::Array(result.into_iter().map(Some).collect())
             }
 
             // ==================== Set Write Commands ====================
@@ -492,9 +749,13 @@ pub trait RedisStore: Send + Sync {
                 let count = self.srem(key, &members_refs);
                 ApplyResult::Integer(count as i64)
             }
-            Command::SPop { .. } => {
-                // TODO: Implement SPOP
-                ApplyResult::Value(None)
+            Command::SPop { key, count } => {
+                let result = self.spop(key, count.unwrap_or(1) as usize);
+                if result.len() == 1 {
+                    ApplyResult::Value(result.into_iter().next())
+                } else {
+                    ApplyResult::Array(result.into_iter().map(Some).collect())
+                }
             }
 
             // ==================== Key Read Commands ====================
@@ -536,16 +797,11 @@ pub trait RedisStore: Send + Sync {
                 Ok(()) => ApplyResult::Ok,
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::RenameNx { key, new_key } => {
-                if self.get(new_key).is_some() {
-                    ApplyResult::Integer(0)
-                } else {
-                    match self.rename(key, new_key.clone()) {
-                        Ok(()) => ApplyResult::Integer(1),
-                        Err(e) => ApplyResult::Error(e),
-                    }
-                }
-            }
+            Command::RenameNx { key, new_key } => match self.renamenx(key, new_key.clone()) {
+                Ok(true) => ApplyResult::Integer(1),
+                Ok(false) => ApplyResult::Integer(0),
+                Err(e) => ApplyResult::Error(e),
+            },
         }
     }
 }
