@@ -399,21 +399,30 @@ impl ZSetDataCow {
         self.get_score(member).is_some()
     }
 
-    /// Get member count (approximate, includes COW changes)
+    /// Get member count (accurate, includes COW changes)
     pub fn len(&self) -> usize {
+        if !self.is_cow_mode() {
+            let base = self.base.read();
+            return base.len();
+        }
+
+        // In COW mode, we need to calculate accurately
+        let updated = self.scores_updated.as_ref().unwrap();
+        let removed = self.scores_removed.as_ref().unwrap();
+        
         let base = self.base.read();
         let base_len = base.len();
+        
+        // Count how many base items are removed
+        let base_removed_count = removed.keys().filter(|member| base.contains(member)).count();
+        
+        // Count how many items in updated are truly new (not in base)
+        let new_items_count = updated.keys().filter(|member| !base.contains(member)).count();
+        
         drop(base);
-
-        if self.is_cow_mode() {
-            let updated = self.scores_updated.as_ref().unwrap();
-            let removed = self.scores_removed.as_ref().unwrap();
-            // Base count - removed + updated (new items)
-            let new_items = updated.len() - removed.len();
-            base_len + new_items
-        } else {
-            base_len
-        }
+        
+        // Final count: base - removed_base_items + new_items
+        base_len - base_removed_count + new_items_count
     }
 
     /// Check if empty

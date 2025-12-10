@@ -272,6 +272,28 @@ impl ShardedRocksDB {
         }
     }
 
+    /// Helper: Check if apply_index should be skipped (idempotent check)
+    fn should_skip_apply_index(&self, shard_id: ShardId, new_index: u64) -> Result<bool, String> {
+        let current_index = self.get_apply_index_from_db(shard_id)?;
+        if let Some(current) = current_index {
+            if new_index <= current {
+                return Ok(true); // Already applied, skip
+            }
+        }
+        Ok(false)
+    }
+
+    /// Helper: Add apply_index to WriteBatch
+    fn add_apply_index_to_batch(
+        &self,
+        batch: &mut WriteBatch,
+        cf: &ColumnFamily,
+        apply_index: u64,
+    ) {
+        let index_key = apply_index_key();
+        batch.put_cf(cf, &index_key, apply_index.to_le_bytes().as_slice());
+    }
+
     /// Atomically update apply_index in RocksDB (without data write)
     pub fn update_apply_index(&self, shard_id: ShardId, apply_index: u64) -> Result<(), String> {
         let cf = self.get_or_create_cf(shard_id)?;
@@ -344,20 +366,14 @@ impl ShardedRocksDB {
 
         // If apply_index is provided, check for duplicate commit
         if let Some(new_index) = apply_index {
-            let current_index = self.get_apply_index_from_db(shard_id)?;
-            if let Some(current) = current_index {
-                if new_index <= current {
-                    // Already applied, skip (idempotent)
-                    return Ok(());
-                }
+            if self.should_skip_apply_index(shard_id, new_index)? {
+                return Ok(()); // Already applied, skip (idempotent)
             }
 
             // Atomic write: data + apply_index in single batch
             let mut batch = WriteBatch::default();
             batch.put_cf(cf, &db_key, &value);
-            
-            let index_key = apply_index_key();
-            batch.put_cf(cf, &index_key, new_index.to_le_bytes().as_slice());
+            self.add_apply_index_to_batch(&mut batch, cf, new_index);
             
             self.db
                 .write_opt(batch, &self.write_opts)
@@ -377,6 +393,17 @@ impl ShardedRocksDB {
 
     /// SETNX: Set if not exists
     pub fn setnx(&self, shard_id: ShardId, key: &[u8], value: Vec<u8>) -> Result<bool, String> {
+        self.setnx_with_index(shard_id, key, value, None)
+    }
+
+    /// SETNX with apply_index: Atomically set if not exists and update apply_index
+    pub fn setnx_with_index(
+        &self,
+        shard_id: ShardId,
+        key: &[u8],
+        value: Vec<u8>,
+        apply_index: Option<u64>,
+    ) -> Result<bool, String> {
         let cf = self.get_or_create_cf(shard_id)?;
         let db_key = string_key(key);
 
@@ -384,18 +411,66 @@ impl ShardedRocksDB {
             return Ok(false);
         }
 
-        self.db
-            .put_cf_opt(cf, &db_key, &value, &self.write_opts)
-            .map_err(|e| format!("RocksDB SETNX error: {}", e))?;
+        if let Some(new_index) = apply_index {
+            if self.should_skip_apply_index(shard_id, new_index)? {
+                return Ok(false); // Already applied, skip
+            }
+
+            // Atomic write: data + apply_index in single batch
+            let mut batch = WriteBatch::default();
+            batch.put_cf(cf, &db_key, &value);
+            self.add_apply_index_to_batch(&mut batch, cf, new_index);
+            
+            self.db
+                .write_opt(batch, &self.write_opts)
+                .map_err(|e| format!("RocksDB SETNX (with index) error: {}", e))?;
+
+            // Update in-memory cache
+            self.set_shard_apply_index(shard_id, new_index);
+        } else {
+            // Normal write without apply_index
+            self.db
+                .put_cf_opt(cf, &db_key, &value, &self.write_opts)
+                .map_err(|e| format!("RocksDB SETNX error: {}", e))?;
+        }
+
         Ok(true)
     }
 
     /// DEL: Delete key from specific shard
     pub fn del(&self, shard_id: ShardId, key: &[u8]) -> bool {
+        self.del_with_index(shard_id, key, None)
+    }
+
+    /// DEL with apply_index: Atomically delete key and update apply_index
+    pub fn del_with_index(
+        &self,
+        shard_id: ShardId,
+        key: &[u8],
+        apply_index: Option<u64>,
+    ) -> bool {
         if let Some(cf) = self.get_cf(shard_id) {
             let db_key = string_key(key);
             if self.db.get_cf(cf, &db_key).ok().flatten().is_some() {
-                return self.db.delete_cf_opt(cf, &db_key, &self.write_opts).is_ok();
+                if let Some(new_index) = apply_index {
+                    if self.should_skip_apply_index(shard_id, new_index).unwrap_or(false) {
+                        return true; // Already applied, skip
+                    }
+
+                    // Atomic write: delete + apply_index in single batch
+                    let mut batch = WriteBatch::default();
+                    batch.delete_cf(cf, &db_key);
+                    self.add_apply_index_to_batch(&mut batch, cf, new_index);
+                    
+                    if self.db.write_opt(batch, &self.write_opts).is_ok() {
+                        // Update in-memory cache
+                        self.set_shard_apply_index(shard_id, new_index);
+                        return true;
+                    }
+                } else {
+                    // Normal delete without apply_index
+                    return self.db.delete_cf_opt(cf, &db_key, &self.write_opts).is_ok();
+                }
             }
         }
         false
@@ -403,6 +478,17 @@ impl ShardedRocksDB {
 
     /// INCR/INCRBY
     pub fn incrby(&self, shard_id: ShardId, key: &[u8], delta: i64) -> StoreResult<i64> {
+        self.incrby_with_index(shard_id, key, delta, None)
+    }
+
+    /// INCRBY with apply_index: Atomically increment and update apply_index
+    pub fn incrby_with_index(
+        &self,
+        shard_id: ShardId,
+        key: &[u8],
+        delta: i64,
+        apply_index: Option<u64>,
+    ) -> StoreResult<i64> {
         let cf = self.get_or_create_cf(shard_id).map_err(|e| StoreError::Internal(e))?;
         let db_key = string_key(key);
 
@@ -420,15 +506,46 @@ impl ShardedRocksDB {
             .checked_add(delta)
             .ok_or_else(|| StoreError::InvalidArgument("integer overflow".to_string()))?;
 
-        self.db
-            .put_cf_opt(cf, &db_key, new_value.to_string().as_bytes(), &self.write_opts)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        if let Some(new_index) = apply_index {
+            if self.should_skip_apply_index(shard_id, new_index)
+                .map_err(|e| StoreError::Internal(e))? {
+                return Ok(new_value); // Already applied, skip
+            }
+
+            // Atomic write: data + apply_index in single batch
+            let mut batch = WriteBatch::default();
+            batch.put_cf(cf, &db_key, new_value.to_string().as_bytes());
+            self.add_apply_index_to_batch(&mut batch, cf, new_index);
+            
+            self.db
+                .write_opt(batch, &self.write_opts)
+                .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+            // Update in-memory cache
+            self.set_shard_apply_index(shard_id, new_index);
+        } else {
+            // Normal write without apply_index
+            self.db
+                .put_cf_opt(cf, &db_key, new_value.to_string().as_bytes(), &self.write_opts)
+                .map_err(|e| StoreError::Internal(e.to_string()))?;
+        }
 
         Ok(new_value)
     }
 
     /// APPEND
     pub fn append(&self, shard_id: ShardId, key: &[u8], value: &[u8]) -> usize {
+        self.append_with_index(shard_id, key, value, None)
+    }
+
+    /// APPEND with apply_index: Atomically append and update apply_index
+    pub fn append_with_index(
+        &self,
+        shard_id: ShardId,
+        key: &[u8],
+        value: &[u8],
+        apply_index: Option<u64>,
+    ) -> usize {
         if let Ok(cf) = self.get_or_create_cf(shard_id) {
             let db_key = string_key(key);
             let new_value = match self.db.get_cf(cf, &db_key) {
@@ -440,8 +557,27 @@ impl ShardedRocksDB {
             };
 
             let len = new_value.len();
-            if self.db.put_cf_opt(cf, &db_key, &new_value, &self.write_opts).is_ok() {
-                return len;
+
+            if let Some(new_index) = apply_index {
+                if self.should_skip_apply_index(shard_id, new_index).unwrap_or(false) {
+                    return len; // Already applied, skip
+                }
+
+                // Atomic write: data + apply_index in single batch
+                let mut batch = WriteBatch::default();
+                batch.put_cf(cf, &db_key, &new_value);
+                self.add_apply_index_to_batch(&mut batch, cf, new_index);
+                
+                if self.db.write_opt(batch, &self.write_opts).is_ok() {
+                    // Update in-memory cache
+                    self.set_shard_apply_index(shard_id, new_index);
+                    return len;
+                }
+            } else {
+                // Normal write without apply_index
+                if self.db.put_cf_opt(cf, &db_key, &new_value, &self.write_opts).is_ok() {
+                    return len;
+                }
             }
         }
         0
@@ -469,15 +605,48 @@ impl ShardedRocksDB {
 
     /// HSET
     pub fn hset(&self, shard_id: ShardId, key: &[u8], field: Vec<u8>, value: Vec<u8>) -> bool {
+        self.hset_with_index(shard_id, key, field, value, None)
+    }
+
+    /// HSET with apply_index: Atomically set hash field and update apply_index
+    pub fn hset_with_index(
+        &self,
+        shard_id: ShardId,
+        key: &[u8],
+        field: Vec<u8>,
+        value: Vec<u8>,
+        apply_index: Option<u64>,
+    ) -> bool {
         if let Ok(cf) = self.get_or_create_cf(shard_id) {
             let db_key = hash_field_key(key, &field);
             let is_new = self.db.get_cf(cf, &db_key).ok().flatten().is_none();
 
-            if self.db.put_cf_opt(cf, &db_key, &value, &self.write_opts).is_ok() {
-                if is_new {
-                    self.hash_incr_field_count(shard_id, key, 1);
+            if let Some(new_index) = apply_index {
+                if self.should_skip_apply_index(shard_id, new_index).unwrap_or(false) {
+                    return is_new; // Already applied, skip
                 }
-                return is_new;
+
+                // Atomic write: data + apply_index in single batch
+                let mut batch = WriteBatch::default();
+                batch.put_cf(cf, &db_key, &value);
+                self.add_apply_index_to_batch(&mut batch, cf, new_index);
+                
+                if self.db.write_opt(batch, &self.write_opts).is_ok() {
+                    if is_new {
+                        self.hash_incr_field_count(shard_id, key, 1);
+                    }
+                    // Update in-memory cache
+                    self.set_shard_apply_index(shard_id, new_index);
+                    return is_new;
+                }
+            } else {
+                // Normal write without apply_index
+                if self.db.put_cf_opt(cf, &db_key, &value, &self.write_opts).is_ok() {
+                    if is_new {
+                        self.hash_incr_field_count(shard_id, key, 1);
+                    }
+                    return is_new;
+                }
             }
         }
         false
@@ -485,7 +654,29 @@ impl ShardedRocksDB {
 
     /// HMSET
     pub fn hmset(&self, shard_id: ShardId, key: &[u8], fvs: Vec<(Vec<u8>, Vec<u8>)>) {
+        self.hmset_with_index(shard_id, key, fvs, None)
+    }
+
+    /// HMSET with apply_index: Atomically set multiple hash fields and update apply_index
+    pub fn hmset_with_index(
+        &self,
+        shard_id: ShardId,
+        key: &[u8],
+        fvs: Vec<(Vec<u8>, Vec<u8>)>,
+        apply_index: Option<u64>,
+    ) {
         if let Ok(cf) = self.get_or_create_cf(shard_id) {
+            // Check apply_index first (idempotent)
+            let should_skip = if let Some(new_index) = apply_index {
+                self.should_skip_apply_index(shard_id, new_index).unwrap_or(false)
+            } else {
+                false
+            };
+
+            if should_skip {
+                return; // Already applied, skip
+            }
+
             let mut batch = WriteBatch::default();
             let mut new_fields = 0;
 
@@ -497,15 +688,55 @@ impl ShardedRocksDB {
                 batch.put_cf(cf, &db_key, &value);
             }
 
-            if self.db.write_opt(batch, &self.write_opts).is_ok() && new_fields > 0 {
-                self.hash_incr_field_count(shard_id, key, new_fields);
+            if let Some(new_index) = apply_index {
+                self.add_apply_index_to_batch(&mut batch, cf, new_index);
+            }
+
+            if self.db.write_opt(batch, &self.write_opts).is_ok() {
+                if new_fields > 0 {
+                    self.hash_incr_field_count(shard_id, key, new_fields);
+                }
+                if let Some(new_index) = apply_index {
+                    // Update in-memory cache
+                    self.set_shard_apply_index(shard_id, new_index);
+                }
             }
         }
     }
 
     /// HDEL
     pub fn hdel(&self, shard_id: ShardId, key: &[u8], fields: &[&[u8]]) -> usize {
+        self.hdel_with_index(shard_id, key, fields, None)
+    }
+
+    /// HDEL with apply_index: Atomically delete hash fields and update apply_index
+    pub fn hdel_with_index(
+        &self,
+        shard_id: ShardId,
+        key: &[u8],
+        fields: &[&[u8]],
+        apply_index: Option<u64>,
+    ) -> usize {
         if let Ok(cf) = self.get_or_create_cf(shard_id) {
+            // Check apply_index first (idempotent)
+            let should_skip = if let Some(new_index) = apply_index {
+                self.should_skip_apply_index(shard_id, new_index).unwrap_or(false)
+            } else {
+                false
+            };
+
+            if should_skip {
+                // Count existing fields to return correct count
+                let mut count = 0;
+                for field in fields {
+                    let db_key = hash_field_key(key, field);
+                    if self.db.get_cf(cf, &db_key).ok().flatten().is_some() {
+                        count += 1;
+                    }
+                }
+                return count;
+            }
+
             let mut batch = WriteBatch::default();
             let mut deleted = 0;
 
@@ -517,9 +748,19 @@ impl ShardedRocksDB {
                 }
             }
 
-            if deleted > 0 && self.db.write_opt(batch, &self.write_opts).is_ok() {
-                self.hash_incr_field_count(shard_id, key, -(deleted as i64));
-                return deleted;
+            if deleted > 0 {
+                if let Some(new_index) = apply_index {
+                    self.add_apply_index_to_batch(&mut batch, cf, new_index);
+                }
+
+                if self.db.write_opt(batch, &self.write_opts).is_ok() {
+                    self.hash_incr_field_count(shard_id, key, -(deleted as i64));
+                    if let Some(new_index) = apply_index {
+                        // Update in-memory cache
+                        self.set_shard_apply_index(shard_id, new_index);
+                    }
+                    return deleted;
+                }
             }
         }
         0
@@ -615,6 +856,18 @@ impl ShardedRocksDB {
         field: &[u8],
         delta: i64,
     ) -> StoreResult<i64> {
+        self.hincrby_with_index(shard_id, key, field, delta, None)
+    }
+
+    /// HINCRBY with apply_index: Atomically increment hash field and update apply_index
+    pub fn hincrby_with_index(
+        &self,
+        shard_id: ShardId,
+        key: &[u8],
+        field: &[u8],
+        delta: i64,
+        apply_index: Option<u64>,
+    ) -> StoreResult<i64> {
         let cf = self.get_or_create_cf(shard_id).map_err(|e| StoreError::Internal(e))?;
         let db_key = hash_field_key(key, field);
 
@@ -634,12 +887,36 @@ impl ShardedRocksDB {
             .checked_add(delta)
             .ok_or_else(|| StoreError::InvalidArgument("integer overflow".to_string()))?;
 
-        self.db
-            .put_cf_opt(cf, &db_key, new_value.to_string().as_bytes(), &self.write_opts)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        if let Some(new_index) = apply_index {
+            if self.should_skip_apply_index(shard_id, new_index)
+                .map_err(|e| StoreError::Internal(e))? {
+                return Ok(new_value); // Already applied, skip
+            }
 
-        if is_new {
-            self.hash_incr_field_count(shard_id, key, 1);
+            // Atomic write: data + apply_index in single batch
+            let mut batch = WriteBatch::default();
+            batch.put_cf(cf, &db_key, new_value.to_string().as_bytes());
+            self.add_apply_index_to_batch(&mut batch, cf, new_index);
+            
+            self.db
+                .write_opt(batch, &self.write_opts)
+                .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+            if is_new {
+                self.hash_incr_field_count(shard_id, key, 1);
+            }
+
+            // Update in-memory cache
+            self.set_shard_apply_index(shard_id, new_index);
+        } else {
+            // Normal write without apply_index
+            self.db
+                .put_cf_opt(cf, &db_key, new_value.to_string().as_bytes(), &self.write_opts)
+                .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+            if is_new {
+                self.hash_incr_field_count(shard_id, key, 1);
+            }
         }
 
         Ok(new_value)
