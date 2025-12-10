@@ -43,23 +43,19 @@
 //! - Slot maps to shard_id based on shard_count
 //! - Per-shard locking enables atomic snapshot generation
 
-mod bitmap;
-mod list;
-mod set;
 mod shard_store;
 mod store;
 mod stream_store;
-mod zset;
+
+// Re-export data structures from memory module
+pub use crate::memory::{ListData, OrderedFloat, SetData, ZSetData, ZSetDataCow};
 
 pub use bitmap::{BitmapData, BitmapStoreCow};
-pub use list::{ListData, ListStoreCow};
-pub use set::{SetData, SetDataCow, SetStoreCow};
 pub use shard_store::{
-    ShardStore, ShardSnapshot, ShardedHybridStore, ShardStats, StringStore, StringSnapshot,
+    ShardSnapshot, ShardStats, ShardStore, ShardedHybridStore, StringSnapshot, StringStore,
 };
 pub use store::{HybridSnapshot, HybridStore};
 pub use stream_store::StreamStore;
-pub use zset::{OrderedFloat, ZSetData, ZSetDataCow, ZSetStoreCow};
 
 /// Data type for routing to correct storage backend
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,4 +92,3 @@ impl DataType {
         matches!(self, DataType::String | DataType::Hash | DataType::Stream)
     }
 }
-

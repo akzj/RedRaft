@@ -7,9 +7,7 @@
 //! Note: ZSet data structure is defined in zset.rs module.
 //! Note: List data structure is defined in list.rs module with COW support.
 
-use crate::memory::ShardId;
-use super::list::ListStoreCow;
-use super::zset::ZSetData;
+use crate::memory::{ListStoreCow, ShardId, ZSetData};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};

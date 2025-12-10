@@ -60,7 +60,10 @@ impl std::fmt::Display for StoreError {
         match self {
             StoreError::KeyNotFound => write!(f, "key not found"),
             StoreError::WrongType => {
-                write!(f, "WRONGTYPE Operation against a key holding the wrong kind of value")
+                write!(
+                    f,
+                    "WRONGTYPE Operation against a key holding the wrong kind of value"
+                )
             }
             StoreError::IndexOutOfRange => write!(f, "index out of range"),
             StoreError::NotSupported => write!(f, "operation not supported"),
@@ -151,25 +154,25 @@ pub trait StringStore: Send + Sync {
 /// Recommended backend: Memory (high performance)
 pub trait ListStore: Send + Sync {
     /// LPUSH: Insert elements from left
-    fn lpush(&self, key: &[u8], values: Vec<Vec<u8>>) -> usize;
+    fn lpush(&self, key: &[u8], values: Vec<Vec<u8>>) -> StoreResult<usize>;
 
     /// RPUSH: Insert elements from right
-    fn rpush(&self, key: &[u8], values: Vec<Vec<u8>>) -> usize;
+    fn rpush(&self, key: &[u8], values: Vec<Vec<u8>>) -> StoreResult<usize>;
 
     /// LPOP: Pop element from left
-    fn lpop(&self, key: &[u8]) -> Option<Vec<u8>>;
+    fn lpop(&self, key: &[u8]) -> StoreResult<Option<Vec<u8>>>;
 
     /// RPOP: Pop element from right
-    fn rpop(&self, key: &[u8]) -> Option<Vec<u8>>;
+    fn rpop(&self, key: &[u8]) -> StoreResult<Option<Vec<u8>>>;
 
     /// LRANGE: Get list range
-    fn lrange(&self, key: &[u8], start: i64, stop: i64) -> Vec<Vec<u8>>;
+    fn lrange(&self, key: &[u8], start: i64, stop: i64) -> StoreResult<Vec<Vec<u8>>>;
 
     /// LLEN: Get list length
-    fn llen(&self, key: &[u8]) -> usize;
+    fn llen(&self, key: &[u8]) -> StoreResult<usize>;
 
     /// LINDEX: Get element at specified index
-    fn lindex(&self, key: &[u8], index: i64) -> Option<Vec<u8>>;
+    fn lindex(&self, key: &[u8], index: i64) -> StoreResult<Option<Vec<u8>>>;
 
     /// LSET: Set element at specified index
     fn lset(&self, key: &[u8], index: i64, value: Vec<u8>) -> StoreResult<()>;
@@ -181,9 +184,9 @@ pub trait ListStore: Send + Sync {
     }
 
     /// LREM: Remove elements from list
-    fn lrem(&self, key: &[u8], count: i64, value: &[u8]) -> usize {
+    fn lrem(&self, key: &[u8], count: i64, value: &[u8]) -> StoreResult<usize> {
         let _ = (key, count, value);
-        0
+        Ok(0)
     }
 
     /// LINSERT: Insert element before or after pivot
@@ -193,9 +196,9 @@ pub trait ListStore: Send + Sync {
     }
 
     /// RPOPLPUSH: Pop from right, push to left of another list
-    fn rpoplpush(&self, source: &[u8], destination: &[u8]) -> Option<Vec<u8>> {
+    fn rpoplpush(&self, source: &[u8], destination: &[u8]) -> StoreResult<Option<Vec<u8>>> {
         let _ = (source, destination);
-        None
+        Ok(None)
     }
 }
 
@@ -272,48 +275,48 @@ pub trait HashStore: Send + Sync {
 /// Recommended backend: Memory (high performance)
 pub trait SetStore: Send + Sync {
     /// SADD: Add set members
-    fn sadd(&self, key: &[u8], members: Vec<Vec<u8>>) -> usize;
+    fn sadd(&self, key: &[u8], members: Vec<Vec<u8>>) -> StoreResult<usize>;
 
     /// SREM: Remove set members
-    fn srem(&self, key: &[u8], members: &[&[u8]]) -> usize;
+    fn srem(&self, key: &[u8], members: &[&[u8]]) -> StoreResult<usize>;
 
     /// SMEMBERS: Get all set members
-    fn smembers(&self, key: &[u8]) -> Vec<Vec<u8>>;
+    fn smembers(&self, key: &[u8]) -> StoreResult<Vec<Vec<u8>>>;
 
     /// SISMEMBER: Check if set member exists
-    fn sismember(&self, key: &[u8], member: &[u8]) -> bool;
+    fn sismember(&self, key: &[u8], member: &[u8]) -> StoreResult<bool>;
 
     /// SCARD: Get set size
-    fn scard(&self, key: &[u8]) -> usize;
+    fn scard(&self, key: &[u8]) -> StoreResult<usize>;
 
     /// SPOP: Remove and return random member(s)
-    fn spop(&self, key: &[u8], count: usize) -> Vec<Vec<u8>> {
+    fn spop(&self, key: &[u8], count: usize) -> StoreResult<Vec<Vec<u8>>> {
         let _ = (key, count);
-        Vec::new()
+        Ok(Vec::new())
     }
 
     /// SRANDMEMBER: Get random member(s) without removing
-    fn srandmember(&self, key: &[u8], count: i64) -> Vec<Vec<u8>> {
+    fn srandmember(&self, key: &[u8], count: i64) -> StoreResult<Vec<Vec<u8>>> {
         let _ = (key, count);
-        Vec::new()
+        Ok(Vec::new())
     }
 
     /// SINTER: Intersection of multiple sets
-    fn sinter(&self, keys: &[&[u8]]) -> Vec<Vec<u8>> {
+    fn sinter(&self, keys: &[&[u8]]) -> StoreResult<Vec<Vec<u8>>> {
         let _ = keys;
-        Vec::new()
+        Ok(Vec::new())
     }
 
     /// SUNION: Union of multiple sets
-    fn sunion(&self, keys: &[&[u8]]) -> Vec<Vec<u8>> {
+    fn sunion(&self, keys: &[&[u8]]) -> StoreResult<Vec<Vec<u8>>> {
         let _ = keys;
-        Vec::new()
+        Ok(Vec::new())
     }
 
     /// SDIFF: Difference of multiple sets
-    fn sdiff(&self, keys: &[&[u8]]) -> Vec<Vec<u8>> {
+    fn sdiff(&self, keys: &[&[u8]]) -> StoreResult<Vec<Vec<u8>>> {
         let _ = keys;
-        Vec::new()
+        Ok(Vec::new())
     }
 }
 
@@ -349,7 +352,13 @@ pub trait ZSetStore: Send + Sync {
     fn zrange(&self, key: &[u8], start: i64, stop: i64, with_scores: bool) -> Vec<(Vec<u8>, f64)>;
 
     /// ZREVRANGE: Get members by reverse rank range
-    fn zrevrange(&self, key: &[u8], start: i64, stop: i64, with_scores: bool) -> Vec<(Vec<u8>, f64)> {
+    fn zrevrange(
+        &self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        with_scores: bool,
+    ) -> Vec<(Vec<u8>, f64)> {
         let _ = (key, start, stop, with_scores);
         Vec::new()
     }
@@ -487,12 +496,7 @@ pub trait SnapshotStore: Send + Sync {
     ///
     /// # Returns
     /// Number of keys deleted
-    fn delete_keys_in_slot_range(
-        &self,
-        slot_start: u32,
-        slot_end: u32,
-        total_slots: u32,
-    ) -> usize;
+    fn delete_keys_in_slot_range(&self, slot_start: u32, slot_end: u32, total_slots: u32) -> usize;
 }
 
 // ============================================================================
@@ -554,7 +558,14 @@ pub trait RedisStore:
             }
 
             // ==================== String Write Commands ====================
-            Command::Set { key, value, ex, px, nx, xx } => {
+            Command::Set {
+                key,
+                value,
+                ex,
+                px,
+                nx,
+                xx,
+            } => {
                 // Handle XX condition: key must exist
                 if *xx && self.get(key).is_none() {
                     return ApplyResult::Value(None);
@@ -579,11 +590,19 @@ pub trait RedisStore:
                 let result = self.setnx(key.clone(), value.clone());
                 ApplyResult::Integer(if result { 1 } else { 0 })
             }
-            Command::SetEx { key, seconds, value } => {
+            Command::SetEx {
+                key,
+                seconds,
+                value,
+            } => {
                 self.setex(key.clone(), value.clone(), *seconds);
                 ApplyResult::Ok
             }
-            Command::PSetEx { key, milliseconds, value } => {
+            Command::PSetEx {
+                key,
+                milliseconds,
+                value,
+            } => {
                 self.setex(key.clone(), value.clone(), *milliseconds / 1000);
                 ApplyResult::Ok
             }

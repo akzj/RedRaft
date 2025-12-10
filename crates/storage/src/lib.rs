@@ -83,9 +83,7 @@ pub use memory::{
     slot_for_key,
     // Data types
     ListData,
-    MemoryStore,
     PubSubStore,
-    RedisValue,
     SetData,
     ShardId,
     ZSetData,
