@@ -8,7 +8,7 @@
 //! Note: List data structure is defined in list.rs module with COW support.
 
 use crate::memory::ShardId;
-use super::list::ListDataCow;
+use super::list::ListStoreCow;
 use super::zset::ZSetData;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -80,8 +80,8 @@ pub struct ShardStore {
     /// Hash data (key -> (field -> value))
     pub hashes: HashMap<Vec<u8>, HashMap<Vec<u8>, Vec<u8>>>,
 
-    /// List data (key -> ListDataCow with COW support)
-    pub lists: HashMap<Vec<u8>, ListDataCow>,
+    /// List data (ListStoreCow with COW support at HashMap level)
+    pub lists: ListStoreCow,
 
     /// Set data (key -> set)
     pub sets: HashMap<Vec<u8>, HashSet<Vec<u8>>>,
@@ -127,7 +127,7 @@ impl ShardStore {
         Self {
             shard_id,
             hashes: HashMap::new(),
-            lists: HashMap::new(),
+            lists: ListStoreCow::new(),
             sets: HashMap::new(),
             zsets: HashMap::new(),
             metadata: ShardMetadata::default(),
@@ -136,7 +136,7 @@ impl ShardStore {
 
     /// Get total key count across all data types
     pub fn key_count(&self) -> usize {
-        self.hashes.len() + self.lists.len() + self.sets.len() + self.zsets.len()
+        self.hashes.len() + self.lists.key_count() + self.sets.len() + self.zsets.len()
     }
 
     /// Check if key exists in any data type
@@ -165,7 +165,7 @@ impl ShardStore {
     /// Delete key from any data type
     pub fn del(&mut self, key: &[u8]) -> bool {
         self.hashes.remove(key).is_some()
-            || self.lists.remove(key).is_some()
+            || self.lists.remove(key)
             || self.sets.remove(key).is_some()
             || self.zsets.remove(key).is_some()
     }
@@ -174,7 +174,7 @@ impl ShardStore {
     pub fn keys(&self) -> Vec<Vec<u8>> {
         let mut keys = Vec::new();
         keys.extend(self.hashes.keys().cloned());
-        keys.extend(self.lists.keys().cloned());
+        keys.extend(self.lists.keys());
         keys.extend(self.sets.keys().cloned());
         keys.extend(self.zsets.keys().cloned());
         keys
@@ -183,7 +183,7 @@ impl ShardStore {
     /// Clear all data
     pub fn clear(&mut self) {
         self.hashes.clear();
-        self.lists.clear();
+        self.lists.clear_all();
         self.sets.clear();
         self.zsets.clear();
     }
@@ -279,8 +279,11 @@ impl ShardStore {
                 .collect(),
             lists: self
                 .lists
-                .iter()
-                .map(|(k, l)| (k.clone(), l.to_vec()))
+                .keys()
+                .into_iter()
+                .filter_map(|k| {
+                    self.lists.get_list(&k).map(|list| (k, list.into_iter().collect()))
+                })
                 .collect(),
             sets: self
                 .sets
@@ -319,7 +322,11 @@ impl ShardStore {
         for (k, items) in snapshot.lists {
             use std::collections::VecDeque;
             let list_data: VecDeque<Vec<u8>> = items.into_iter().collect();
-            self.lists.insert(k, ListDataCow::from_data(list_data));
+            // Push all items to the list
+            let key = k.clone();
+            for item in list_data {
+                self.lists.push_back(key.clone(), item);
+            }
         }
 
         // Restore sets
@@ -585,7 +592,7 @@ impl ShardedHybridStore {
             shard_id,
             string_count,
             hash_count: shard.hashes.len(),
-            list_count: shard.lists.len(),
+            list_count: shard.lists.key_count(),
             set_count: shard.sets.len(),
             zset_count: shard.zsets.len(),
             apply_index: shard.metadata.apply_index,
@@ -650,10 +657,7 @@ mod tests {
         assert_eq!(store.key_type(b"hash1"), Some("hash"));
 
         // List
-        use crate::hybrid::list::ListDataCow;
-        let mut list = ListDataCow::new();
-        list.push_back(b"item1".to_vec());
-        store.lists.insert(b"list1".to_vec(), list);
+        store.lists.push_back(b"list1".to_vec(), b"item1".to_vec());
         assert_eq!(store.key_type(b"list1"), Some("list"));
 
         assert_eq!(store.key_count(), 2);

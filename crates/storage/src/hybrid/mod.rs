@@ -50,7 +50,7 @@ mod store;
 mod stream_store;
 mod zset;
 
-pub use list::{ListData, ListDataCow};
+pub use list::{ListData, ListStoreCow};
 pub use sharded_rocksdb::ShardedRocksDB;
 pub use shard_store::{
     ShardStore, ShardSnapshot, ShardedHybridStore, ShardStats, StringStore, StringSnapshot,
