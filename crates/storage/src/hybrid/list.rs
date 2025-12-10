@@ -126,7 +126,16 @@ impl ListStoreCow {
         // Write lock is released here, no need to replace base
     }
 
-    /// Get list for key (read operation, merges COW cache + base)
+    /// Get list for key (returns a copy - only use when modification is needed)
+    ///
+    /// ⚠️ WARNING: This method copies the entire list!
+    /// For read-only operations, use optimized methods instead:
+    /// - `len(key)` - get length without copy
+    /// - `get(key, index)` - get element without copy
+    /// - `range(key, start, end)` - get range without copy
+    ///
+    /// This method should only be used when you need to modify the list
+    /// (e.g., in push/pop/set operations).
     pub fn get_list(&self, key: &[u8]) -> Option<ListData> {
         if self.is_cow_mode() {
             // Check if removed
@@ -174,9 +183,28 @@ impl ListStoreCow {
         base.contains_key(key)
     }
 
-    /// Get list length for key (read operation)
+    /// Get list length for key (read operation, no copy)
     pub fn len(&self, key: &[u8]) -> Option<usize> {
-        self.get_list(key).map(|list| list.len())
+        if self.is_cow_mode() {
+            // Check if removed
+            if let Some(ref removed) = self.lists_removed {
+                if removed.contains(key) {
+                    return None;
+                }
+            }
+
+            // Check COW cache first (if exists)
+            if let Some(ref updated) = self.lists_updated {
+                if let Some(list) = updated.get(key) {
+                    return Some(list.len());
+                }
+            }
+            // If not in updated, fall through to base
+        }
+
+        // Fall back to base (read lock)
+        let base = self.base.read();
+        base.get(key).map(|list| list.len())
     }
 
     /// Push element to front of list (incremental COW: only records change)
@@ -231,7 +259,10 @@ impl ListStoreCow {
                 self.lists_removed.as_mut().unwrap().insert(key.to_vec());
                 self.lists_updated.as_mut().unwrap().remove(key);
             } else {
-                self.lists_updated.as_mut().unwrap().insert(key.to_vec(), new_list);
+                self.lists_updated
+                    .as_mut()
+                    .unwrap()
+                    .insert(key.to_vec(), new_list);
             }
             result
         } else {
@@ -253,7 +284,10 @@ impl ListStoreCow {
                 self.lists_removed.as_mut().unwrap().insert(key.to_vec());
                 self.lists_updated.as_mut().unwrap().remove(key);
             } else {
-                self.lists_updated.as_mut().unwrap().insert(key.to_vec(), new_list);
+                self.lists_updated
+                    .as_mut()
+                    .unwrap()
+                    .insert(key.to_vec(), new_list);
             }
             result
         } else {
@@ -263,9 +297,28 @@ impl ListStoreCow {
         }
     }
 
-    /// Get element at index (read operation)
+    /// Get element at index (read operation, no copy)
     pub fn get(&self, key: &[u8], index: usize) -> Option<Vec<u8>> {
-        self.get_list(key)?.get(index).cloned()
+        if self.is_cow_mode() {
+            // Check if removed
+            if let Some(ref removed) = self.lists_removed {
+                if removed.contains(key) {
+                    return None;
+                }
+            }
+
+            // Check COW cache first (if exists)
+            if let Some(ref updated) = self.lists_updated {
+                if let Some(list) = updated.get(key) {
+                    return list.get(index).cloned();
+                }
+            }
+            // If not in updated, fall through to base
+        }
+
+        // Fall back to base (read lock)
+        let base = self.base.read();
+        base.get(key)?.get(index).cloned()
     }
 
     /// Set element at index (incremental COW: only records change)
@@ -278,7 +331,10 @@ impl ListStoreCow {
                 }
                 let mut new_list = current;
                 new_list[index] = value;
-                self.lists_updated.as_mut().unwrap().insert(key.clone(), new_list);
+                self.lists_updated
+                    .as_mut()
+                    .unwrap()
+                    .insert(key.clone(), new_list);
                 // Remove from removed cache if present
                 if let Some(ref mut removed) = self.lists_removed {
                     removed.remove(&key);
@@ -300,16 +356,40 @@ impl ListStoreCow {
         }
     }
 
-    /// Get range of elements [start, end] (read operation)
+    /// Get range of elements [start, end] (read operation, no copy)
     pub fn range(&self, key: &[u8], start: usize, end: usize) -> Option<Vec<Vec<u8>>> {
-        let list = self.get_list(key)?;
-        Some(
+        if self.is_cow_mode() {
+            // Check if removed
+            if let Some(ref removed) = self.lists_removed {
+                if removed.contains(key) {
+                    return None;
+                }
+            }
+
+            // Check COW cache first (if exists)
+            if let Some(ref updated) = self.lists_updated {
+                if let Some(list) = updated.get(key) {
+                    return Some(
+                        list.iter()
+                            .skip(start)
+                            .take(end.saturating_sub(start).saturating_add(1))
+                            .cloned()
+                            .collect(),
+                    );
+                }
+            }
+            // If not in updated, fall through to base
+        }
+
+        // Fall back to base (read lock)
+        let base = self.base.read();
+        base.get(key).map(|list| {
             list.iter()
                 .skip(start)
                 .take(end.saturating_sub(start).saturating_add(1))
                 .cloned()
-                .collect(),
-        )
+                .collect()
+        })
     }
 
     /// Clear list for key (incremental COW: only records change)
@@ -537,7 +617,10 @@ mod tests {
         // Snapshot still has old data
         let snapshot_data = snapshot.read();
         assert_eq!(snapshot_data.get(b"list1".as_slice()).unwrap().len(), 3);
-        assert_eq!(snapshot_data.get(b"list1".as_slice()).unwrap().get(0), Some(&b"a".to_vec()));
+        assert_eq!(
+            snapshot_data.get(b"list1".as_slice()).unwrap().get(0),
+            Some(&b"a".to_vec())
+        );
         drop(snapshot_data);
 
         // Merge: applies only changes to base (O(M) where M=3, not O(N))
