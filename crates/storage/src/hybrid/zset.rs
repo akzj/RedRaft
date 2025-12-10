@@ -13,6 +13,7 @@
 //! This module provides the core data structure for sorted sets,
 //! without implementing Redis API traits.
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -202,13 +203,13 @@ impl Default for ZSetData {
 /// - `make_snapshot()`: Only clones Arc (increases ref count), NO data copy
 /// - `add()`/`remove()`: Records changes in small COW cache (only changed items), NO full copy
 /// - Read operations: Merges COW cache + base data (O(1) lookup)
-/// - `merge_cow()`: Applies only changed items to base (O(M) where M = changes, not total data)
+/// - `merge_cow()`: Applies only changed items to base via RwLock (O(M) where M = changes, not total data)
 ///
 /// This avoids full data copy even for 1000 billion items when only 3 items change.
 #[derive(Debug, Clone)]
 pub struct ZSetDataCow {
-    /// Base data (shared via Arc, never copied)
-    base: Arc<ZSetData>,
+    /// Base data (shared via Arc<RwLock<>>, can be directly modified without clone)
+    base: Arc<RwLock<ZSetData>>,
 
     /// COW cache: Updated/added members (only changed items)
     scores_updated: Option<HashMap<Vec<u8>, f64>>,
@@ -221,7 +222,7 @@ impl ZSetDataCow {
     /// Create a new empty ZSet with COW support
     pub fn new() -> Self {
         Self {
-            base: Arc::new(ZSetData::new()),
+            base: Arc::new(RwLock::new(ZSetData::new())),
             scores_updated: None,
             scores_removed: None,
         }
@@ -230,7 +231,7 @@ impl ZSetDataCow {
     /// Create from existing ZSetData
     pub fn from_data(data: ZSetData) -> Self {
         Self {
-            base: Arc::new(data),
+            base: Arc::new(RwLock::new(data)),
             scores_updated: None,
             scores_removed: None,
         }
@@ -245,7 +246,7 @@ impl ZSetDataCow {
     ///
     /// Returns a cloned Arc that shares the same base data.
     /// Write operations will record changes in COW cache instead of copying data.
-    pub fn make_snapshot(&mut self) -> Arc<ZSetData> {
+    pub fn make_snapshot(&mut self) -> Arc<RwLock<ZSetData>> {
         if self.is_cow_mode() {
             // Already in COW mode, just return existing base
             return Arc::clone(&self.base);
@@ -262,25 +263,24 @@ impl ZSetDataCow {
     /// Merge COW changes back to base (applies only changed items)
     ///
     /// This is called when snapshot is no longer needed.
-    /// Only changed items are applied, not full data copy.
+    /// Only changed items are applied via RwLock, not full data copy.
     pub fn merge_cow(&mut self) {
         if !self.is_cow_mode() {
             return;
         }
 
-        // We need to modify base, but it's shared via Arc
-        // So we need to create a new ZSetData with changes applied
-        let mut new_data = (*self.base).clone();
-
         let updated = self.scores_updated.take();
         let removed = self.scores_removed.take();
+
+        // ✅ Get write lock and directly modify base (NO clone!)
+        let mut base = self.base.write();
 
         // Apply removals (only if not in updated - updated takes precedence)
         if let Some(ref removed) = removed {
             for member in removed.keys() {
                 // Only remove if not being updated
                 if updated.as_ref().map_or(true, |u| !u.contains_key(member)) {
-                    new_data.remove(member);
+                    base.remove(member);
                 }
             }
         }
@@ -288,12 +288,11 @@ impl ZSetDataCow {
         // Apply updates/additions (this handles both new and updated members)
         if let Some(ref updated) = updated {
             for (member, score) in updated {
-                new_data.add(member.clone(), *score);
+                base.add(member.clone(), *score);
             }
         }
 
-        // Replace base with new data
-        self.base = Arc::new(new_data);
+        // Write lock is released here, no need to replace base
     }
 
     /// Add or update a member with score (incremental COW: only records change)
@@ -303,11 +302,16 @@ impl ZSetDataCow {
             let updated = self.scores_updated.as_mut().unwrap();
             let removed = self.scores_removed.as_mut().unwrap();
 
-            // Check if member exists in base
-            if let Some(old_score) = self.base.scores.get(&member) {
+            // Check if member exists in base (read lock)
+            let old_score_opt = {
+                let base = self.base.read();
+                base.scores.get(&member).copied()
+            }; // Read lock released here
+
+            if let Some(old_score) = old_score_opt {
                 // Member exists in base, record old score for removal tracking
                 // (so reads know the old value is gone)
-                removed.insert(member.clone(), *old_score);
+                removed.insert(member.clone(), old_score);
             }
             // If member was previously removed, we're re-adding it, so remove from removed cache
             else if removed.contains_key(&member) {
@@ -317,11 +321,9 @@ impl ZSetDataCow {
             // Record update (overwrites if already in updated)
             updated.insert(member, score);
         } else {
-            // No snapshot: directly modify base
-            // But base is Arc, so we need to create new one
-            let mut new_data = (*self.base).clone();
-            new_data.add(member, score);
-            self.base = Arc::new(new_data);
+            // No snapshot: directly modify base via write lock
+            let mut base = self.base.write();
+            base.add(member, score);
         }
     }
 
@@ -332,12 +334,17 @@ impl ZSetDataCow {
             let updated = self.scores_updated.as_mut().unwrap();
             let removed = self.scores_removed.as_mut().unwrap();
 
-            // Check if member exists in base
-            if let Some(score) = self.base.scores.get(member) {
+            // Check if member exists in base (read lock)
+            let score_opt = {
+                let base = self.base.read();
+                base.scores.get(member).copied()
+            }; // Read lock released here
+
+            if let Some(score) = score_opt {
                 // Remove from updated cache if present
                 updated.remove(member);
                 // Record removal
-                removed.insert(member.to_vec(), *score);
+                removed.insert(member.to_vec(), score);
                 true
             } else if updated.contains_key(member) {
                 // Member was added in COW cache, just remove it
@@ -347,11 +354,9 @@ impl ZSetDataCow {
                 false
             }
         } else {
-            // No snapshot: directly modify base
-            let mut new_data = (*self.base).clone();
-            let result = new_data.remove(member);
-            self.base = Arc::new(new_data);
-            result
+            // No snapshot: directly modify base via write lock
+            let mut base = self.base.write();
+            base.remove(member)
         }
     }
 
@@ -373,8 +378,9 @@ impl ZSetDataCow {
             }
         }
 
-        // Fall back to base
-        self.base.get_score(member)
+        // Fall back to base (read lock)
+        let base = self.base.read();
+        base.get_score(member)
     }
 
     /// Check if member exists (merges COW cache + base)
@@ -384,7 +390,10 @@ impl ZSetDataCow {
 
     /// Get member count (approximate, includes COW changes)
     pub fn len(&self) -> usize {
-        let base_len = self.base.len();
+        let base = self.base.read();
+        let base_len = base.len();
+        drop(base);
+        
         if self.is_cow_mode() {
             let updated = self.scores_updated.as_ref().unwrap();
             let removed = self.scores_removed.as_ref().unwrap();
@@ -406,13 +415,16 @@ impl ZSetDataCow {
         if self.is_cow_mode() {
             // In COW mode: clear caches and mark all base members as removed
             self.scores_updated = Some(HashMap::new());
+            let base = self.base.read();
             let mut removed = HashMap::new();
-            for (member, score) in &self.base.scores {
+            for (member, score) in &base.scores {
                 removed.insert(member.clone(), *score);
             }
+            drop(base);
             self.scores_removed = Some(removed);
         } else {
-            self.base = Arc::new(ZSetData::new());
+            let mut base = self.base.write();
+            base.clear();
         }
     }
 
@@ -420,18 +432,20 @@ impl ZSetDataCow {
     pub fn members(&self) -> Vec<Vec<u8>> {
         let mut members = HashSet::new();
 
-        // Add base members (excluding removed)
+        // Add base members (excluding removed) - read lock
+        let base = self.base.read();
         if let Some(ref removed) = self.scores_removed {
-            for member in self.base.scores.keys() {
+            for member in base.scores.keys() {
                 if !removed.contains_key(member) {
                     members.insert(member.clone());
                 }
             }
         } else {
-            for member in self.base.scores.keys() {
+            for member in base.scores.keys() {
                 members.insert(member.clone());
             }
         }
+        drop(base);
 
         // Add updated/added members
         if let Some(ref updated) = self.scores_updated {
@@ -448,8 +462,9 @@ impl ZSetDataCow {
         let mut result = Vec::new();
         let removed = self.scores_removed.as_ref();
 
-        // Add from base (excluding removed)
-        for (member, score) in self.base.range_by_score(min, max) {
+        // Add from base (excluding removed) - read lock
+        let base = self.base.read();
+        for (member, score) in base.range_by_score(min, max) {
             if let Some(ref removed) = removed {
                 if !removed.contains_key(&member) {
                     result.push((member, score));
@@ -458,6 +473,7 @@ impl ZSetDataCow {
                 result.push((member, score));
             }
         }
+        drop(base);
 
         // Add from COW cache
         if let Some(ref updated) = self.scores_updated {
@@ -478,11 +494,11 @@ impl ZSetDataCow {
         // Get all members and sort
         let mut all = self.range_by_score(f64::NEG_INFINITY, f64::INFINITY);
         all.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        
+
         if start >= all.len() {
             return Vec::new();
         }
-        
+
         let end = end.min(all.len() - 1);
         all[start..=end].to_vec()
     }
@@ -493,7 +509,7 @@ impl ZSetDataCow {
         let all = self.range_by_score(f64::NEG_INFINITY, f64::INFINITY);
         let mut sorted = all;
         sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        
+
         sorted.iter().position(|(m, _)| m == member)
     }
 
@@ -503,7 +519,7 @@ impl ZSetDataCow {
         let all = self.range_by_score(f64::NEG_INFINITY, f64::INFINITY);
         let mut sorted = all;
         sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        
+
         sorted.iter().position(|(m, _)| m == member)
     }
 
@@ -523,7 +539,6 @@ impl Default for ZSetDataCow {
         Self::new()
     }
 }
-
 
 /// Ordered float for BTreeMap key
 ///
@@ -677,11 +692,13 @@ mod tests {
         assert_eq!(cow.ref_count(), 2);
         assert_eq!(Arc::strong_count(&snapshot), 2);
 
-        // Snapshot should have same data
-        assert_eq!(snapshot.len(), 3);
-        assert_eq!(snapshot.get_score(b"a"), Some(10.0));
-        assert_eq!(snapshot.get_score(b"b"), Some(20.0));
-        assert_eq!(snapshot.get_score(b"c"), Some(30.0));
+        // Snapshot should have same data (via read lock)
+        let snapshot_data = snapshot.read();
+        assert_eq!(snapshot_data.len(), 3);
+        assert_eq!(snapshot_data.get_score(b"a"), Some(10.0));
+        assert_eq!(snapshot_data.get_score(b"b"), Some(20.0));
+        assert_eq!(snapshot_data.get_score(b"c"), Some(30.0));
+        drop(snapshot_data);
 
         // Original should still work
         assert_eq!(cow.len(), 3);
@@ -710,8 +727,10 @@ mod tests {
         assert_eq!(cow.get_score(b"c"), Some(30.0));
 
         // Snapshot should have old data (unchanged, from base)
-        assert_eq!(snapshot.len(), 2);
-        assert_eq!(snapshot.get_score(b"c"), None);
+        let snapshot_data = snapshot.read();
+        assert_eq!(snapshot_data.len(), 2);
+        assert_eq!(snapshot_data.get_score(b"c"), None);
+        drop(snapshot_data);
     }
 
     #[test]
@@ -746,14 +765,18 @@ mod tests {
         cow.add(b"b".to_vec(), 20.0);
         assert_eq!(cow.ref_count(), 3); // Ref count unchanged (no copy!)
         assert!(cow.is_in_cow_mode()); // Still in COW mode
-        
+
         // Snapshots still share the same base Arc (ref count = 3)
         assert_eq!(Arc::strong_count(&snapshot1), 3); // cow + snapshot1 + snapshot2
         assert_eq!(Arc::strong_count(&snapshot2), 3); // cow + snapshot1 + snapshot2
 
         // All snapshots should have old data (from base)
-        assert_eq!(snapshot1.len(), 1);
-        assert_eq!(snapshot2.len(), 1);
+        let snapshot1_data = snapshot1.read();
+        let snapshot2_data = snapshot2.read();
+        assert_eq!(snapshot1_data.len(), 1);
+        assert_eq!(snapshot2_data.len(), 1);
+        drop(snapshot1_data);
+        drop(snapshot2_data);
 
         // Original should have new data (via COW cache)
         assert_eq!(cow.len(), 2);
@@ -803,14 +826,17 @@ mod tests {
         assert_eq!(cow.get_score(b"d"), Some(40.0));
 
         // Snapshot still has old data
-        assert_eq!(snapshot.len(), 3);
-        assert_eq!(snapshot.get_score(b"a"), Some(10.0));
-        assert_eq!(snapshot.get_score(b"b"), Some(20.0));
+        let snapshot_data = snapshot.read();
+        assert_eq!(snapshot_data.len(), 3);
+        assert_eq!(snapshot_data.get_score(b"a"), Some(10.0));
+        assert_eq!(snapshot_data.get_score(b"b"), Some(20.0));
+        drop(snapshot_data);
 
         // Merge: applies only changes to base (O(M) where M=3, not O(N))
         cow.merge_cow();
         assert!(!cow.is_in_cow_mode());
-        assert_eq!(cow.ref_count(), 1); // Snapshot dropped, or we have new base
+        // Ref count is still 2 because snapshot still exists (this is correct)
+        assert_eq!(cow.ref_count(), 2);
 
         // After merge: changes are in base
         assert_eq!(cow.len(), 3);
