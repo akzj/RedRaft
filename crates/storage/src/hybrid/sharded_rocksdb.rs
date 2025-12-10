@@ -26,6 +26,12 @@ mod key_prefix {
     pub const STRING: u8 = b's';
     pub const HASH: u8 = b'h';
     pub const HASH_META: u8 = b'H';
+    pub const APPLY_INDEX: u8 = b'@'; // Special prefix for apply_index
+}
+
+/// Build apply_index key for shard
+fn apply_index_key() -> Vec<u8> {
+    vec![key_prefix::APPLY_INDEX, b':', b'a', b'p', b'p', b'l', b'y', b'_', b'i', b'n', b'd', b'e', b'x']
 }
 
 /// Build string key
@@ -231,10 +237,63 @@ impl ShardedRocksDB {
         }
     }
 
-    /// Get apply index for shard
+    /// Get apply index for shard (from cache, fallback to DB)
     pub fn get_shard_apply_index(&self, shard_id: ShardId) -> Option<u64> {
+        // Try cache first
         let metadata = self.shard_metadata.read();
-        metadata.get(&shard_id).and_then(|m| m.apply_index)
+        if let Some(index) = metadata.get(&shard_id).and_then(|m| m.apply_index) {
+            return Some(index);
+        }
+        drop(metadata);
+
+        // Fallback to DB
+        self.get_apply_index_from_db(shard_id).ok().flatten()
+    }
+
+    /// Get apply_index from RocksDB (not from cache)
+    fn get_apply_index_from_db(&self, shard_id: ShardId) -> Result<Option<u64>, String> {
+        let cf = self.get_cf(shard_id).ok_or_else(|| format!("Shard {} not found", shard_id))?;
+        let index_key = apply_index_key();
+        
+        match self.db.get_cf(cf, &index_key) {
+            Ok(Some(bytes)) => {
+                if bytes.len() == 8 {
+                    let index = u64::from_le_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3],
+                        bytes[4], bytes[5], bytes[6], bytes[7],
+                    ]);
+                    Ok(Some(index))
+                } else {
+                    Ok(None)
+                }
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!("Failed to read apply_index: {}", e)),
+        }
+    }
+
+    /// Atomically update apply_index in RocksDB (without data write)
+    pub fn update_apply_index(&self, shard_id: ShardId, apply_index: u64) -> Result<(), String> {
+        let cf = self.get_or_create_cf(shard_id)?;
+        let index_key = apply_index_key();
+        
+        // Check for duplicate commit
+        let current_index = self.get_apply_index_from_db(shard_id)?;
+        if let Some(current) = current_index {
+            if apply_index <= current {
+                // Already applied, skip (idempotent)
+                return Ok(());
+            }
+        }
+
+        // Write apply_index
+        self.db
+            .put_cf_opt(cf, &index_key, apply_index.to_le_bytes().as_slice(), &self.write_opts)
+            .map_err(|e| format!("Failed to update apply_index: {}", e))?;
+
+        // Update in-memory cache
+        self.set_shard_apply_index(shard_id, apply_index);
+        Ok(())
     }
 
     /// Get shard metadata
@@ -265,11 +324,55 @@ impl ShardedRocksDB {
 
     /// SET: Set string value in specific shard
     pub fn set(&self, shard_id: ShardId, key: &[u8], value: Vec<u8>) -> Result<(), String> {
+        self.set_with_index(shard_id, key, value, None)
+    }
+
+    /// SET with apply_index: Atomically set value and update apply_index
+    ///
+    /// This ensures that apply_index is updated atomically with the data write,
+    /// preventing duplicate commits. If apply_index is provided and is <= current
+    /// apply_index, the write is skipped (idempotent).
+    pub fn set_with_index(
+        &self,
+        shard_id: ShardId,
+        key: &[u8],
+        value: Vec<u8>,
+        apply_index: Option<u64>,
+    ) -> Result<(), String> {
         let cf = self.get_or_create_cf(shard_id)?;
         let db_key = string_key(key);
-        self.db
-            .put_cf_opt(cf, &db_key, &value, &self.write_opts)
-            .map_err(|e| format!("RocksDB SET error: {}", e))
+
+        // If apply_index is provided, check for duplicate commit
+        if let Some(new_index) = apply_index {
+            let current_index = self.get_apply_index_from_db(shard_id)?;
+            if let Some(current) = current_index {
+                if new_index <= current {
+                    // Already applied, skip (idempotent)
+                    return Ok(());
+                }
+            }
+
+            // Atomic write: data + apply_index in single batch
+            let mut batch = WriteBatch::default();
+            batch.put_cf(cf, &db_key, &value);
+            
+            let index_key = apply_index_key();
+            batch.put_cf(cf, &index_key, new_index.to_le_bytes().as_slice());
+            
+            self.db
+                .write_opt(batch, &self.write_opts)
+                .map_err(|e| format!("RocksDB SET (with index) error: {}", e))?;
+
+            // Update in-memory cache
+            self.set_shard_apply_index(shard_id, new_index);
+        } else {
+            // Normal write without apply_index
+            self.db
+                .put_cf_opt(cf, &db_key, &value, &self.write_opts)
+                .map_err(|e| format!("RocksDB SET error: {}", e))?;
+        }
+
+        Ok(())
     }
 
     /// SETNX: Set if not exists

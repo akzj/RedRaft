@@ -342,7 +342,8 @@ impl SetDataCow {
             drop(base);
             
             // Final count: base (excluding removed) + updated (excluding those already in base)
-            base_not_removed + updated.len() - updated_in_base
+            // Use saturating_sub to prevent underflow
+            base_not_removed + updated.len().saturating_sub(updated_in_base)
         } else {
             let base = self.base.read();
             let len = base.len();

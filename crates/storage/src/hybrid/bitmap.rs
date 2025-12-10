@@ -1115,5 +1115,297 @@ mod tests {
         assert_eq!(store.getbit(b"bitmap1", 100), Some(true));
         assert_eq!(store.getbit(b"bitmap1", 0), Some(false));
     }
+
+    // ========== Additional COW Tests (similar to set.rs patterns) ==========
+
+    #[test]
+    fn test_bitmap_data_cow_clear_in_cow_mode() {
+        let mut store = BitmapStoreCow::new();
+        
+        // Add initial data
+        store.setbit(b"bitmap1".to_vec(), 0, true);
+        store.setbit(b"bitmap1".to_vec(), 1, true);
+        store.setbit(b"bitmap2".to_vec(), 5, true);
+        
+        // Create snapshot
+        store.make_snapshot();
+        assert!(store.is_cow_mode());
+        
+        // Clear bitmaps in COW mode
+        assert!(store.clear(b"bitmap1"));
+        assert!(store.clear(b"bitmap2"));
+        
+        // Verify cleared state
+        assert!(!store.contains_key(b"bitmap1"));
+        assert!(!store.contains_key(b"bitmap2"));
+        assert_eq!(store.len(b"bitmap1"), None);
+        assert_eq!(store.len(b"bitmap2"), None);
+        
+        // Verify keys() returns empty
+        let keys = store.keys();
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn test_bitmap_data_cow_multiple_snapshots() {
+        use std::sync::Arc;
+        use std::collections::{HashMap, HashSet};
+        
+        let mut store1 = BitmapStoreCow::new();
+        
+        // Add data to store1
+        store1.setbit(b"bitmap1".to_vec(), 0, true);
+        store1.setbit(b"bitmap1".to_vec(), 1, true);
+        store1.setbit(b"bitmap2".to_vec(), 5, true);
+        
+        // Create snapshot and get reference
+        let _snapshot = store1.make_snapshot();
+        assert_eq!(store1.ref_count(), 2);
+        
+        // Create store2 from same base (simulating multiple snapshots)
+        let mut store2 = BitmapStoreCow {
+            base: Arc::clone(&store1.base),
+            bitmaps_updated: Some(HashMap::new()),
+            bitmaps_removed: Some(HashSet::new()),
+        };
+        
+        // Both should share the same base
+        assert_eq!(store1.ref_count(), 3); // store1.base + snapshot + store2
+        assert!(store2.is_cow_mode());
+        
+        // Make independent changes
+        store1.setbit(b"bitmap1".to_vec(), 2, true); // Add to bitmap1
+        store2.setbit(b"bitmap2".to_vec(), 6, true); // Add to bitmap2
+        store2.clear(b"bitmap1"); // Remove bitmap1 in store2
+        
+        // Verify independent states
+        assert_eq!(store1.bitcount(b"bitmap1"), Some(3)); // bits 0, 1, 2
+        assert_eq!(store1.bitcount(b"bitmap2"), Some(1)); // bit 5
+        assert!(store1.contains_key(b"bitmap1"));
+        
+        assert_eq!(store2.bitcount(b"bitmap1"), None); // cleared
+        assert_eq!(store2.bitcount(b"bitmap2"), Some(2)); // bits 5, 6
+        assert!(!store2.contains_key(b"bitmap1"));
+    }
+
+    #[test]
+    fn test_bitmap_data_cow_edge_cases() {
+        let mut store = BitmapStoreCow::new();
+        
+        // Test empty key
+        store.setbit(vec![], 0, true);
+        assert!(store.contains_key(&[]));
+        assert_eq!(store.len(&[]), Some(1));
+        assert_eq!(store.getbit(&[], 0), Some(true));
+        
+        // Test large bitmap
+        let large_offset = 1024 * 1024; // 1MB worth of bits
+        store.setbit(b"large".to_vec(), large_offset, true);
+        assert!(store.contains_key(b"large"));
+        assert_eq!(store.len(b"large"), Some(131073)); // 1MB/8 + 1 bytes
+        assert_eq!(store.getbit(b"large", large_offset), Some(true));
+        
+        // Test binary data in key
+        let binary_key = vec![0, 1, 2, 255, 254, 253];
+        store.setbit(binary_key.clone(), 10, true);
+        assert!(store.contains_key(&binary_key));
+        assert_eq!(store.getbit(&binary_key, 10), Some(true));
+        
+        // Test with snapshot
+        store.make_snapshot();
+        store.setbit(binary_key.clone(), 11, true);
+        assert_eq!(store.bitcount(&binary_key), Some(2));
+    }
+
+    #[test]
+    fn test_bitmap_data_cow_concurrent_read_write() {
+        use std::sync::Arc;
+        use std::thread;
+        use parking_lot::RwLock;
+        
+        let mut store = BitmapStoreCow::new();
+        
+        // Add initial data
+        for i in 0..100 {
+            store.setbit(b"shared".to_vec(), i * 8, true);
+        }
+        
+        // Create snapshot
+        store.make_snapshot();
+        let store_arc = Arc::new(RwLock::new(store));
+        
+        // Spawn reader threads
+        let mut handles = vec![];
+        
+        for _ in 0..3 {
+            let store_clone = Arc::clone(&store_arc);
+            let handle = thread::spawn(move || {
+                for j in 0..20 {
+                    let store = store_clone.read();
+                    let _len = store.len(b"shared");
+                    let _bit = store.getbit(b"shared", j * 8);
+                    let _contains = store.contains_key(b"shared");
+                    let _count = store.bitcount(b"shared");
+                }
+            });
+            handles.push(handle);
+        }
+        
+        // Spawn writer thread
+        let store_clone = Arc::clone(&store_arc);
+        let writer_handle = thread::spawn(move || {
+            let mut store = store_clone.write();
+            for i in 100..110 {
+                store.setbit(b"shared".to_vec(), i * 8, true);
+            }
+        });
+        
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        writer_handle.join().unwrap();
+        
+        // Verify final state
+        let store = store_arc.read();
+        assert_eq!(store.bitcount(b"shared"), Some(110));
+    }
+
+    #[test]
+    fn test_bitmap_data_cow_multiple_merges() {
+        let mut store = BitmapStoreCow::new();
+        
+        // First cycle: add data and merge
+        store.setbit(b"bitmap1".to_vec(), 0, true);
+        store.make_snapshot();
+        store.setbit(b"bitmap1".to_vec(), 1, true);
+        store.merge_cow();
+        
+        // Second cycle: modify and merge again
+        store.make_snapshot();
+        store.setbit(b"bitmap1".to_vec(), 2, true);
+        store.clear(b"bitmap1");
+        store.merge_cow();
+        
+        // Verify final state
+        assert_eq!(store.bitcount(b"bitmap1"), None); // cleared
+        assert!(!store.contains_key(b"bitmap1"));
+    }
+
+    #[test]
+    fn test_bitmap_store_cow_from_data() {
+        use std::collections::HashMap;
+        
+        let mut data = HashMap::new();
+        let mut bitmap1 = Vec::new();
+        // Manually set bits in bitmap
+        let byte_index = 0 / 8;
+        let bit_index = 0 % 8;
+        if byte_index >= bitmap1.len() {
+            bitmap1.resize(byte_index + 1, 0);
+        }
+        bitmap1[byte_index] |= 1 << (7 - bit_index); // Set bit 0
+        
+        let byte_index = 7 / 8;
+        let bit_index = 7 % 8;
+        if byte_index >= bitmap1.len() {
+            bitmap1.resize(byte_index + 1, 0);
+        }
+        bitmap1[byte_index] |= 1 << (7 - bit_index); // Set bit 7
+        
+        data.insert(b"bitmap1".to_vec(), bitmap1);
+        
+        let mut store = BitmapStoreCow::from_data(data);
+        
+        // Verify initial data
+        assert_eq!(store.bitcount(b"bitmap1"), Some(2));
+        assert_eq!(store.getbit(b"bitmap1", 0), Some(true));
+        assert_eq!(store.getbit(b"bitmap1", 7), Some(true));
+        
+        // Create snapshot and modify
+        store.make_snapshot();
+        store.setbit(b"bitmap1".to_vec(), 3, true);
+        
+        // Verify changes
+        assert_eq!(store.bitcount(b"bitmap1"), Some(3));
+        assert_eq!(store.getbit(b"bitmap1", 3), Some(true));
+    }
+
+    #[test]
+    fn test_bitmap_store_cow_clear_operations() {
+        let mut store = BitmapStoreCow::new();
+        
+        // Add some data
+        store.setbit(b"bitmap1".to_vec(), 0, true);
+        store.setbit(b"bitmap1".to_vec(), 1, true);
+        store.setbit(b"bitmap2".to_vec(), 5, true);
+        
+        // Create snapshot
+        store.make_snapshot();
+        
+        // Test clear operations
+        assert!(store.clear(b"bitmap1"));
+        assert!(!store.clear(b"nonexistent"));
+        
+        // Verify state
+        assert!(!store.contains_key(b"bitmap1"));
+        assert!(store.contains_key(b"bitmap2"));
+        assert_eq!(store.len(b"bitmap1"), None);
+        assert_eq!(store.len(b"bitmap2"), Some(1));
+        
+        // Test merge
+        store.merge_cow();
+        assert!(!store.contains_key(b"bitmap1"));
+        assert!(store.contains_key(b"bitmap2"));
+    }
+
+    #[test]
+    fn test_bitmap_store_cow_bitop_with_cow() {
+        let mut store = BitmapStoreCow::new();
+        
+        // Create base bitmaps
+        store.setbit(b"bitmap1".to_vec(), 0, true);
+        store.setbit(b"bitmap1".to_vec(), 1, true);
+        store.setbit(b"bitmap2".to_vec(), 1, true);
+        store.setbit(b"bitmap2".to_vec(), 2, true);
+        
+        // Create snapshot
+        store.make_snapshot();
+        
+        // Modify one bitmap in COW mode
+        store.setbit(b"bitmap1".to_vec(), 3, true);
+        
+        // Perform bitop with COW-modified bitmap
+        let result_len = store.bitop("AND", b"result".to_vec(), vec![b"bitmap1".to_vec(), b"bitmap2".to_vec()]);
+        assert_eq!(result_len, Some(1));
+        
+        // Verify result uses COW-modified bitmap1
+        assert_eq!(store.getbit(b"result", 0), Some(false));
+        assert_eq!(store.getbit(b"result", 1), Some(true)); // Both have bit 1
+        assert_eq!(store.getbit(b"result", 2), Some(false));
+        assert_eq!(store.getbit(b"result", 3), Some(false)); // bitmap2 doesn't have bit 3
+    }
+
+    #[test]
+    fn test_bitmap_store_cow_bitcount_with_cow() {
+        let mut store = BitmapStoreCow::new();
+        
+        // Create base bitmap
+        store.setbit(b"bitmap1".to_vec(), 0, true);
+        store.setbit(b"bitmap1".to_vec(), 1, true);
+        store.setbit(b"bitmap1".to_vec(), 8, true);
+        
+        // Create snapshot
+        store.make_snapshot();
+        
+        // Modify bitmap in COW mode
+        store.setbit(b"bitmap1".to_vec(), 2, true);
+        store.setbit(b"bitmap1".to_vec(), 9, false); // Clear this bit (bit 9 = 1st bit of 2nd byte)
+        
+        // Verify bitcount uses COW-modified data
+        assert_eq!(store.bitcount(b"bitmap1"), Some(4)); // bits 0, 1, 2, 8 (bit 9 cleared, bit 8 still set)
+        assert_eq!(store.bitcount_range(b"bitmap1", 0, 7), Some(3)); // bits 0, 1, 2
+        assert_eq!(store.bitcount_range(b"bitmap1", 8, 15), Some(1)); // bit 8 still set
+    }
 }
 
