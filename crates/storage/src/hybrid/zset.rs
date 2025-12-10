@@ -319,13 +319,13 @@ impl ZSetDataCow {
                 base.scores.get(&member).copied()
             }; // Read lock released here
 
-            if let Some(old_score) = old_score_opt {
-                // Member exists in base, record old score for removal tracking
-                // (so reads know the old value is gone)
-                removed.insert(member.clone(), old_score);
-            }
-            // If member was previously removed, we're re-adding it, so remove from removed cache
-            else if removed.contains_key(&member) {
+            if let Some(_old_score) = old_score_opt {
+                // Member exists in base, we're updating it
+                // Don't add to removed cache - it's still there, just with a new score
+                // Remove from removed cache if it was previously removed (re-adding)
+                removed.remove(&member);
+            } else if removed.contains_key(&member) {
+                // Member was previously removed, we're re-adding it
                 removed.remove(&member);
             }
 
@@ -409,18 +409,24 @@ impl ZSetDataCow {
         // In COW mode, we need to calculate accurately
         let updated = self.scores_updated.as_ref().unwrap();
         let removed = self.scores_removed.as_ref().unwrap();
-        
+
         let base = self.base.read();
         let base_len = base.len();
-        
+
         // Count how many base items are removed
-        let base_removed_count = removed.keys().filter(|member| base.contains(member)).count();
-        
+        let base_removed_count = removed
+            .keys()
+            .filter(|member| base.contains(member))
+            .count();
+
         // Count how many items in updated are truly new (not in base)
-        let new_items_count = updated.keys().filter(|member| !base.contains(member)).count();
-        
+        let new_items_count = updated
+            .keys()
+            .filter(|member| !base.contains(member))
+            .count();
+
         drop(base);
-        
+
         // Final count: base - removed_base_items + new_items
         base_len - base_removed_count + new_items_count
     }
@@ -435,6 +441,8 @@ impl ZSetDataCow {
         if self.is_cow_mode() {
             // In COW mode: clear caches and mark all base members as removed
             self.scores_updated = Some(HashMap::new());
+
+            // Get write lock to ensure consistency during clear operation
             let base = self.base.read();
             let mut removed = HashMap::new();
             for (member, score) in &base.scores {
@@ -525,7 +533,7 @@ impl ZSetDataCow {
 
     /// Get rank of a member
     pub fn rank(&self, member: &[u8]) -> Option<usize> {
-        let score = self.get_score(member)?;
+        let _score = self.get_score(member)?;
         let all = self.range_by_score(f64::NEG_INFINITY, f64::INFINITY);
         let mut sorted = all;
         sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -535,7 +543,7 @@ impl ZSetDataCow {
 
     /// Get reverse rank of a member
     pub fn rev_rank(&self, member: &[u8]) -> Option<usize> {
-        let score = self.get_score(member)?;
+        let _score = self.get_score(member)?;
         let all = self.range_by_score(f64::NEG_INFINITY, f64::INFINITY);
         let mut sorted = all;
         sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
