@@ -44,6 +44,7 @@
 //! - Per-shard locking enables atomic snapshot generation
 
 mod list;
+mod set;
 mod sharded_rocksdb;
 mod shard_store;
 mod store;
@@ -51,6 +52,7 @@ mod stream_store;
 mod zset;
 
 pub use list::{ListData, ListStoreCow};
+pub use set::{SetData, SetDataCow, SetStoreCow};
 pub use sharded_rocksdb::ShardedRocksDB;
 pub use shard_store::{
     ShardStore, ShardSnapshot, ShardedHybridStore, ShardStats, StringStore, StringSnapshot,
