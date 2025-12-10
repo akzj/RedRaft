@@ -259,6 +259,17 @@ impl ZSetDataCow {
         // ✅ Only clone Arc (O(1)), NO data copy
         Arc::clone(&self.base)
     }
+    /// Create a snapshot (only increases reference count, NO data copy)
+    ///
+    /// Returns a cloned Arc that shares the same base data.
+    /// Write operations will record changes in COW cache instead of copying data.
+    pub fn make_cow(&mut self) -> ZSetDataCow {
+        ZSetDataCow {
+            base: Arc::clone(&self.base),
+            scores_updated: Some(HashMap::new()),
+            scores_removed: Some(HashMap::new()),
+        }
+    }
 
     /// Merge COW changes back to base (applies only changed items)
     ///
@@ -844,5 +855,437 @@ mod tests {
         assert_eq!(cow.get_score(b"b"), None);
         assert_eq!(cow.get_score(b"c"), Some(30.0));
         assert_eq!(cow.get_score(b"d"), Some(40.0));
+    }
+}
+
+/// ZSet Store with Incremental Copy-on-Write (COW) support
+///
+/// True incremental COW semantics at HashMap level:
+/// - `make_snapshot()`: Only clones Arc (increases ref count), NO data copy
+/// - Write operations: Use `ZSetDataCow::make_cow()` to create COW instances (NO full copy)
+/// - Read operations: Merges COW cache + base data (O(1) lookup)
+/// - `merge_cow()`: Applies only changed ZSets to base (O(M) where M = changes, not total data)
+///
+/// Note: ZSetDataCow is created via `make_cow()` when modified (required for consistency),
+/// but only for changed ZSets. This avoids full HashMap copy even for 1000 billion ZSets
+/// when only 3 ZSets change.
+#[derive(Debug, Clone)]
+pub struct ZSetStoreCow {
+    /// Base data (shared via Arc<RwLock<>>, can be directly modified without clone)
+    base: Arc<RwLock<HashMap<Vec<u8>, ZSetDataCow>>>,
+
+    /// COW cache: Updated/added ZSets (only changed ZSets)
+    /// ZSetDataCow is created via make_cow() here (required for consistency)
+    zsets_updated: Option<HashMap<Vec<u8>, ZSetDataCow>>,
+
+    /// COW cache: Removed ZSet keys
+    zsets_removed: Option<HashSet<Vec<u8>>>,
+}
+
+impl ZSetStoreCow {
+    /// Create a new empty ZSetStore with COW support
+    pub fn new() -> Self {
+        Self {
+            base: Arc::new(RwLock::new(HashMap::new())),
+            zsets_updated: None,
+            zsets_removed: None,
+        }
+    }
+
+    /// Create from existing HashMap
+    pub fn from_data(data: HashMap<Vec<u8>, ZSetDataCow>) -> Self {
+        Self {
+            base: Arc::new(RwLock::new(data)),
+            zsets_updated: None,
+            zsets_removed: None,
+        }
+    }
+
+    /// Check if in COW mode (has snapshot)
+    fn is_cow_mode(&self) -> bool {
+        self.zsets_updated.is_some()
+    }
+
+    /// Create a snapshot (only increases reference count, NO data copy)
+    ///
+    /// Returns a cloned Arc that shares the same base data.
+    /// Write operations will use `make_cow()` to create COW instances instead of copying data.
+    pub fn make_snapshot(&mut self) -> Arc<RwLock<HashMap<Vec<u8>, ZSetDataCow>>> {
+        if self.is_cow_mode() {
+            // Already in COW mode, just return existing base
+            return Arc::clone(&self.base);
+        }
+
+        // Enter COW mode: initialize caches
+        self.zsets_updated = Some(HashMap::new());
+        self.zsets_removed = Some(HashSet::new());
+
+        // ✅ Only clone Arc (O(1)), NO data copy
+        Arc::clone(&self.base)
+    }
+
+    /// Merge COW changes back to base (applies only changed ZSets)
+    ///
+    /// This is called when snapshot is no longer needed.
+    /// Only changed ZSets are applied via RwLock, not full data copy.
+    pub fn merge_cow(&mut self) {
+        if !self.is_cow_mode() {
+            return;
+        }
+
+        let updated = self.zsets_updated.take();
+        let removed = self.zsets_removed.take();
+
+        // Collect updated keys before processing (for removal check)
+        let updated_keys: HashSet<Vec<u8>> = updated
+            .as_ref()
+            .map(|u| u.keys().cloned().collect())
+            .unwrap_or_default();
+
+        // ✅ Get write lock and directly modify base (NO clone!)
+        let mut base = self.base.write();
+
+        // Apply updates/additions first (updated takes precedence over removed)
+        // This handles both new and updated ZSets
+        if let Some(updated) = updated {
+            for (key, mut zset_cow) in updated {
+                // Merge the ZSetDataCow's changes to its base first
+                if zset_cow.is_in_cow_mode() {
+                    zset_cow.merge_cow();
+                }
+                
+                // Now zset_cow's base has the merged data
+                // We need to extract the data from zset_cow's base and create a new ZSetDataCow
+                // Since we can't directly access the internal data, we'll replace the base entry
+                // with a new ZSetDataCow that shares the same base Arc
+                let merged_zset = {
+                    // Clone the base Arc (only increases ref count, no data copy)
+                    let base_arc = Arc::clone(&zset_cow.base);
+                    // Create new ZSetDataCow with the merged base
+                    ZSetDataCow {
+                        base: base_arc,
+                        scores_updated: None,
+                        scores_removed: None,
+                    }
+                };
+                
+                // Replace or insert the merged ZSetDataCow
+                base.insert(key, merged_zset);
+            }
+        }
+
+        // Apply removals (only if not in updated - updated takes precedence)
+        if let Some(ref removed) = removed {
+            for key in removed {
+                // Only remove if not being updated (updated already applied above)
+                if !updated_keys.contains(key) {
+                    base.remove(key);
+                }
+            }
+        }
+
+        // Write lock is released here, no need to replace base
+    }
+
+    /// Get ZSetDataCow for key (returns reference - for read operations)
+    ///
+    /// Returns a reference to the ZSetDataCow if it exists.
+    /// For modifications, use `get_zset_mut()` instead.
+    ///
+    /// Note: This method can only return references from COW cache, not from base
+    /// (due to lock lifetime constraints). For base lookups, use other methods.
+    pub fn get_zset(&self, key: &[u8]) -> Option<&ZSetDataCow> {
+        if self.is_cow_mode() {
+            // Check COW cache first (updated takes precedence over removed)
+            if let Some(ref updated) = self.zsets_updated {
+                if let Some(zset) = updated.get(key) {
+                    return Some(zset);
+                }
+            }
+
+            // Check if removed (only if not in updated)
+            if let Some(ref removed) = self.zsets_removed {
+                if removed.contains(key) {
+                    return None;
+                }
+            }
+            // If not in updated and not removed, we can't return a reference from base
+            // (due to lock lifetime), so return None
+            // Callers should use other methods like get_score(), contains(), etc.
+            return None;
+        }
+
+        // No COW mode: can't return reference from base (lock lifetime)
+        None
+    }
+
+    /// Get mutable ZSetDataCow for key (creates COW instance if needed)
+    ///
+    /// This method:
+    /// 1. Checks if ZSet is already in COW cache
+    /// 2. If yes, returns mutable reference (no additional copy!)
+    /// 3. If no, uses `make_cow()` to create COW instance (no full copy!)
+    pub fn get_zset_mut(&mut self, key: &[u8]) -> Option<&mut ZSetDataCow> {
+        if self.is_cow_mode() {
+            let updated = self.zsets_updated.as_mut().unwrap();
+            let removed = self.zsets_removed.as_mut().unwrap();
+
+            // Check if already in COW cache (already has COW instance)
+            if updated.contains_key(key) {
+                // Already has COW instance: return mutable reference (no additional copy!)
+                return updated.get_mut(key);
+            }
+
+            // Not in COW cache: create COW instance via make_cow() (no full copy!)
+            let zset_cow = {
+                // Check if removed
+                if removed.contains(key) {
+                    // Create new ZSetDataCow for removed key
+                    ZSetDataCow::new()
+                } else {
+                    // Get from base and create COW instance
+                    let base = self.base.read();
+                    if let Some(base_zset) = base.get(key) {
+                        // Clone the ZSetDataCow struct (only clones Arc, NO data copy!)
+                        // Then call make_cow() to create COW instance (NO full copy!)
+                        let mut base_zset_clone = base_zset.clone();
+                        base_zset_clone.make_cow()
+                    } else {
+                        // Create new ZSetDataCow
+                        ZSetDataCow::new()
+                    }
+                }
+            };
+            updated.insert(key.to_vec(), zset_cow);
+            
+            // Remove from removed cache if present
+            removed.remove(key);
+            
+            // Return mutable reference to the newly inserted ZSetDataCow
+            updated.get_mut(key)
+        } else {
+            // No snapshot: cannot return mutable reference from lock
+            // Callers should use add(), remove(), etc. methods instead
+            // Or create a snapshot first to enable COW mode
+            None
+        }
+    }
+
+    /// Check if key exists (read operation, merges COW cache + base)
+    pub fn contains_key(&self, key: &[u8]) -> bool {
+        if self.is_cow_mode() {
+            // Check COW cache first (updated takes precedence over removed)
+            if let Some(ref updated) = self.zsets_updated {
+                if updated.contains_key(key) {
+                    return true;
+                }
+            }
+
+            // Check if removed (only if not in updated)
+            if let Some(ref removed) = self.zsets_removed {
+                if removed.contains(key) {
+                    return false;
+                }
+            }
+            // If not in updated and not removed, fall through to base
+        }
+
+        // Fall back to base (read lock)
+        let base = self.base.read();
+        base.contains_key(key)
+    }
+
+    /// Add or update a member with score in a ZSet (incremental COW: only records change)
+    pub fn add(&mut self, key: Vec<u8>, member: Vec<u8>, score: f64) {
+        if let Some(zset) = self.get_zset_mut(&key) {
+            zset.add(member, score);
+        } else if !self.is_cow_mode() {
+            // No snapshot and key doesn't exist: create new ZSetDataCow
+            let mut base = self.base.write();
+            let zset = base.entry(key).or_insert_with(|| ZSetDataCow::new());
+            zset.add(member, score);
+        }
+    }
+
+    /// Remove a member from a ZSet (incremental COW: only records change)
+    pub fn remove(&mut self, key: &[u8], member: &[u8]) -> bool {
+        if let Some(zset) = self.get_zset_mut(key) {
+            zset.remove(member)
+        } else if !self.is_cow_mode() {
+            // No snapshot: directly modify base via write lock
+            let mut base = self.base.write();
+            if let Some(zset) = base.get_mut(key) {
+                zset.remove(member)
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Get score for a member in a ZSet (read operation, no copy)
+    pub fn get_score(&self, key: &[u8], member: &[u8]) -> Option<f64> {
+        if self.is_cow_mode() {
+            // Check COW cache first (updated takes precedence over removed)
+            if let Some(ref updated) = self.zsets_updated {
+                if let Some(zset) = updated.get(key) {
+                    return zset.get_score(member);
+                }
+            }
+
+            // Check if removed (only if not in updated)
+            if let Some(ref removed) = self.zsets_removed {
+                if removed.contains(key) {
+                    return None;
+                }
+            }
+            // If not in updated and not removed, fall through to base
+        }
+
+        // Fall back to base (read lock)
+        let base = self.base.read();
+        base.get(key)?.get_score(member)
+    }
+
+    /// Check if member exists in a ZSet (read operation, no copy)
+    pub fn contains(&self, key: &[u8], member: &[u8]) -> bool {
+        if self.is_cow_mode() {
+            // Check COW cache first (updated takes precedence over removed)
+            if let Some(ref updated) = self.zsets_updated {
+                if let Some(zset) = updated.get(key) {
+                    return zset.contains(member);
+                }
+            }
+
+            // Check if removed (only if not in updated)
+            if let Some(ref removed) = self.zsets_removed {
+                if removed.contains(key) {
+                    return false;
+                }
+            }
+            // If not in updated and not removed, fall through to base
+        }
+
+        // Fall back to base (read lock)
+        let base = self.base.read();
+        base.get(key).map_or(false, |zset| zset.contains(member))
+    }
+
+    /// Get member count for a ZSet (read operation, no copy)
+    pub fn len(&self, key: &[u8]) -> Option<usize> {
+        if self.is_cow_mode() {
+            // Check COW cache first (updated takes precedence over removed)
+            if let Some(ref updated) = self.zsets_updated {
+                if let Some(zset) = updated.get(key) {
+                    return Some(zset.len());
+                }
+            }
+
+            // Check if removed (only if not in updated)
+            if let Some(ref removed) = self.zsets_removed {
+                if removed.contains(key) {
+                    return None;
+                }
+            }
+            // If not in updated and not removed, fall through to base
+        }
+
+        // Fall back to base (read lock)
+        let base = self.base.read();
+        base.get(key).map(|zset| zset.len())
+    }
+
+    /// Clear ZSet for key (incremental COW: only records change)
+    pub fn clear(&mut self, key: &[u8]) -> bool {
+        if self.is_cow_mode() {
+            let updated = self.zsets_updated.as_mut().unwrap();
+            let removed = self.zsets_removed.as_mut().unwrap();
+
+            // Check if already removed
+            if removed.contains(key) {
+                return true; // Already removed
+            }
+
+            // Check if exists in updated or base
+            let exists = updated.contains_key(key) || {
+                let base = self.base.read();
+                base.contains_key(key)
+            };
+
+            if exists {
+                // Mark as removed
+                removed.insert(key.to_vec());
+                updated.remove(key); // Remove from updated if present
+                true
+            } else {
+                false
+            }
+        } else {
+            // No snapshot: directly modify base via write lock
+            let mut base = self.base.write();
+            base.remove(key).is_some()
+        }
+    }
+
+    /// Remove ZSet for key (incremental COW: only records change)
+    pub fn remove_zset(&mut self, key: &[u8]) -> bool {
+        self.clear(key)
+    }
+
+    /// Get all keys (read operation)
+    pub fn keys(&self) -> Vec<Vec<u8>> {
+        let mut keys = HashSet::new();
+
+        if self.is_cow_mode() {
+            // Add keys from base (excluding removed)
+            let base = self.base.read();
+            if let Some(ref removed) = self.zsets_removed {
+                for key in base.keys() {
+                    if !removed.contains(key) {
+                        keys.insert(key.clone());
+                    }
+                }
+            } else {
+                for key in base.keys() {
+                    keys.insert(key.clone());
+                }
+            }
+            drop(base);
+
+            // Add keys from COW cache (updated takes precedence)
+            if let Some(ref updated) = self.zsets_updated {
+                for key in updated.keys() {
+                    keys.insert(key.clone());
+                }
+            }
+        } else {
+            // Fall back to base (read lock)
+            let base = self.base.read();
+            keys = base.keys().cloned().collect();
+        }
+
+        keys.into_iter().collect()
+    }
+
+    /// Get key count (read operation)
+    pub fn key_count(&self) -> usize {
+        self.keys().len()
+    }
+
+    /// Get reference count (for testing)
+    pub fn ref_count(&self) -> usize {
+        Arc::strong_count(&self.base)
+    }
+
+    /// Check if in COW mode (for testing)
+    pub fn is_in_cow_mode(&self) -> bool {
+        self.is_cow_mode()
+    }
+}
+
+impl Default for ZSetStoreCow {
+    fn default() -> Self {
+        Self::new()
     }
 }

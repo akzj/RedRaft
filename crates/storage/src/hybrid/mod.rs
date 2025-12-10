@@ -57,7 +57,7 @@ pub use shard_store::{
 };
 pub use store::{HybridSnapshot, HybridStore};
 pub use stream_store::StreamStore;
-pub use zset::{OrderedFloat, ZSetData};
+pub use zset::{OrderedFloat, ZSetData, ZSetDataCow, ZSetStoreCow};
 
 /// Data type for routing to correct storage backend
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
