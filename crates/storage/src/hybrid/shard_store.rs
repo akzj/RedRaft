@@ -4,11 +4,13 @@
 //! enabling atomic snapshot generation at the shard level.
 //!
 //! Note: String data is stored separately in StringStore (not in ShardStore).
+//! Note: ZSet data structure is defined in zset.rs module.
 
 use crate::memory::ShardId;
+use super::zset::ZSetData;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -82,46 +84,11 @@ pub struct ShardStore {
     /// Set data (key -> set)
     pub sets: HashMap<Vec<u8>, HashSet<Vec<u8>>>,
 
-    /// ZSet data (key -> (member -> score, score -> members))
+    /// ZSet data (key -> ZSetData)
     pub zsets: HashMap<Vec<u8>, ZSetData>,
 
     /// Metadata
     pub metadata: ShardMetadata,
-}
-
-/// ZSet internal data structure
-#[derive(Debug, Clone, Default)]
-pub struct ZSetData {
-    /// member -> score
-    pub scores: HashMap<Vec<u8>, f64>,
-    /// score -> members (for range queries)
-    pub by_score: BTreeMap<OrderedFloat, HashSet<Vec<u8>>>,
-}
-
-/// Ordered float for BTreeMap key
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct OrderedFloat(pub f64);
-
-impl Eq for OrderedFloat {}
-
-impl PartialOrd for OrderedFloat {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for OrderedFloat {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0
-            .partial_cmp(&other.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    }
-}
-
-impl std::hash::Hash for OrderedFloat {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.to_bits().hash(state);
-    }
 }
 
 /// Shard metadata
@@ -358,13 +325,9 @@ impl ShardStore {
 
         // Restore zsets
         for (k, members) in snapshot.zsets {
-            let mut zset = ZSetData::default();
+            let mut zset = ZSetData::new();
             for (member, score) in members {
-                zset.scores.insert(member.clone(), score);
-                zset.by_score
-                    .entry(OrderedFloat(score))
-                    .or_default()
-                    .insert(member);
+                zset.add(member, score);
             }
             self.zsets.insert(k, zset);
         }
