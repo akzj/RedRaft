@@ -1,29 +1,37 @@
-//! ZSet (Sorted Set) Data Structure
+//! ZSet (Sorted Set) Data Structure with Copy-on-Write (COW)
 //!
-//! Independent ZSet storage implementation.
+//! Independent ZSet storage implementation with true Copy-on-Write semantics.
+//! - Snapshot: Only increases reference count, no data copy
+//! - Write: Only copies data when snapshot exists (reference count > 1)
+//! - Read: Direct access, no overhead
+//!
 //! This module provides the core data structure for sorted sets,
 //! without implementing Redis API traits.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+};
 
-/// ZSet internal data structure
+/// ZSet data structure
 ///
 /// A sorted set maintains:
 /// - member -> score mapping (for O(1) score lookup)
 /// - score -> members mapping (for range queries)
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZSetData {
-    /// member -> score mapping
     pub scores: HashMap<Vec<u8>, f64>,
-    /// score -> members mapping (for range queries)
     pub by_score: BTreeMap<OrderedFloat, HashSet<Vec<u8>>>,
 }
 
 impl ZSetData {
     /// Create a new empty ZSet
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            scores: HashMap::new(),
+            by_score: BTreeMap::new(),
+        }
     }
 
     /// Add or update a member with score
@@ -154,28 +162,21 @@ impl ZSetData {
     }
 
     /// Get reverse rank of a member (0-based, returns None if not found)
-    ///
-    /// Reverse rank means: rank from highest score to lowest.
-    /// Member with highest score has rev_rank 0.
     pub fn rev_rank(&self, member: &[u8]) -> Option<usize> {
         let score = self.scores.get(member)?;
         let score_key = OrderedFloat(*score);
 
-        // Count members with higher scores
         let mut higher_count = 0;
         for (key, members) in self.by_score.iter().rev() {
             if *key > score_key {
                 higher_count += members.len();
             } else if *key == score_key {
-                // Count members with same score that come before this member
-                // Since HashSet is unordered, we use lexicographic order as tie-breaker
                 let mut same_score_before = 0;
                 for m in members {
                     if m.as_slice() < member {
                         same_score_before += 1;
                     }
                 }
-                // Reverse rank = higher_count + same_score_before
                 return Some(higher_count + same_score_before);
             }
         }
@@ -183,6 +184,129 @@ impl ZSetData {
         None
     }
 }
+
+impl Default for ZSetData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// ZSet with Copy-on-Write (COW) support
+///
+/// True COW semantics:
+/// - `make_snapshot()`: Only clones Arc (increases ref count), no data copy
+/// - `add()`/`remove()`: Uses `Arc::make_mut()` to copy only when needed
+/// - Read operations: Direct access, zero overhead
+#[derive(Debug, Clone)]
+pub struct ZSetDataCow {
+    /// Shared data (Arc for COW)
+    /// When reference count > 1, write operations will copy the data
+    data: Arc<ZSetData>,
+}
+
+impl ZSetDataCow {
+    /// Create a new empty ZSet with COW support
+    pub fn new() -> Self {
+        Self {
+            data: Arc::new(ZSetData::new()),
+        }
+    }
+
+    /// Create from existing ZSetData
+    pub fn from_data(data: ZSetData) -> Self {
+        Self {
+            data: Arc::new(data),
+        }
+    }
+
+    /// Create a snapshot (only increases reference count, no data copy)
+    ///
+    /// Returns a cloned Arc that shares the same data.
+    /// The data will only be copied when a write operation occurs.
+    pub fn make_snapshot(&self) -> Arc<ZSetData> {
+        // ✅ Only clone Arc (cheap), no data copy
+        Arc::clone(&self.data)
+    }
+
+    /// Get reference to inner data (for read operations)
+    pub fn as_ref(&self) -> &ZSetData {
+        &self.data
+    }
+
+    /// Add or update a member with score (COW: copies only if needed)
+    pub fn add(&mut self, member: Vec<u8>, score: f64) {
+        // ✅ Arc::make_mut() copies data only if reference count > 1
+        // If no snapshot exists (ref count == 1), no copy happens
+        Arc::make_mut(&mut self.data).add(member, score);
+    }
+
+    /// Remove a member (COW: copies only if needed)
+    pub fn remove(&mut self, member: &[u8]) -> bool {
+        Arc::make_mut(&mut self.data).remove(member)
+    }
+
+    /// Get score for a member (read operation, no copy)
+    pub fn get_score(&self, member: &[u8]) -> Option<f64> {
+        self.data.get_score(member)
+    }
+
+    /// Check if member exists (read operation, no copy)
+    pub fn contains(&self, member: &[u8]) -> bool {
+        self.data.contains(member)
+    }
+
+    /// Get member count (read operation, no copy)
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Check if empty (read operation, no copy)
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Clear all data (COW: copies only if needed)
+    pub fn clear(&mut self) {
+        Arc::make_mut(&mut self.data).clear();
+    }
+
+    /// Get all members (read operation, no copy)
+    pub fn members(&self) -> Vec<Vec<u8>> {
+        self.data.members()
+    }
+
+    /// Get members in score range (read operation, no copy)
+    pub fn range_by_score(&self, min: f64, max: f64) -> Vec<(Vec<u8>, f64)> {
+        self.data.range_by_score(min, max)
+    }
+
+    /// Get members in rank range (read operation, no copy)
+    pub fn range_by_rank(&self, start: usize, end: usize) -> Vec<(Vec<u8>, f64)> {
+        self.data.range_by_rank(start, end)
+    }
+
+    /// Get rank of a member (read operation, no copy)
+    pub fn rank(&self, member: &[u8]) -> Option<usize> {
+        self.data.rank(member)
+    }
+
+    /// Get reverse rank of a member (read operation, no copy)
+    pub fn rev_rank(&self, member: &[u8]) -> Option<usize> {
+        self.data.rev_rank(member)
+    }
+
+    /// Get reference count (for debugging)
+    pub fn ref_count(&self) -> usize {
+        Arc::strong_count(&self.data)
+    }
+}
+
+impl Default for ZSetDataCow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 
 /// Ordered float for BTreeMap key
 ///
@@ -295,5 +419,141 @@ mod tests {
         let keys: Vec<f64> = map.keys().map(|k| k.0).collect();
         assert_eq!(keys, vec![10.0, 15.0, 20.0]);
     }
-}
 
+    #[test]
+    fn test_cow_basic_operations() {
+        let mut cow = ZSetDataCow::new();
+
+        // Add members
+        cow.add(b"member1".to_vec(), 10.0);
+        cow.add(b"member2".to_vec(), 20.0);
+        cow.add(b"member3".to_vec(), 15.0);
+
+        assert_eq!(cow.len(), 3);
+        assert!(cow.contains(b"member1"));
+        assert_eq!(cow.get_score(b"member1"), Some(10.0));
+
+        // Update score
+        cow.add(b"member1".to_vec(), 25.0);
+        assert_eq!(cow.get_score(b"member1"), Some(25.0));
+
+        // Remove member
+        assert!(cow.remove(b"member2"));
+        assert!(!cow.contains(b"member2"));
+        assert_eq!(cow.len(), 2);
+    }
+
+    #[test]
+    fn test_cow_snapshot_no_copy() {
+        let mut cow = ZSetDataCow::new();
+        cow.add(b"a".to_vec(), 10.0);
+        cow.add(b"b".to_vec(), 20.0);
+        cow.add(b"c".to_vec(), 30.0);
+
+        // Before snapshot: ref count should be 1
+        assert_eq!(cow.ref_count(), 1);
+
+        // Create snapshot (only increases ref count, no copy)
+        let snapshot = cow.make_snapshot();
+
+        // After snapshot: ref count should be 2
+        assert_eq!(cow.ref_count(), 2);
+        assert_eq!(Arc::strong_count(&snapshot), 2);
+
+        // Snapshot should have same data
+        assert_eq!(snapshot.len(), 3);
+        assert_eq!(snapshot.get_score(b"a"), Some(10.0));
+        assert_eq!(snapshot.get_score(b"b"), Some(20.0));
+        assert_eq!(snapshot.get_score(b"c"), Some(30.0));
+
+        // Original should still work
+        assert_eq!(cow.len(), 3);
+        assert_eq!(cow.get_score(b"a"), Some(10.0));
+    }
+
+    #[test]
+    fn test_cow_write_after_snapshot_copies() {
+        let mut cow = ZSetDataCow::new();
+        cow.add(b"a".to_vec(), 10.0);
+        cow.add(b"b".to_vec(), 20.0);
+
+        // Create snapshot
+        let snapshot = cow.make_snapshot();
+        assert_eq!(cow.ref_count(), 2);
+
+        // Write operation should copy data (ref count back to 1)
+        cow.add(b"c".to_vec(), 30.0);
+        assert_eq!(cow.ref_count(), 1); // Data was copied
+        assert_eq!(Arc::strong_count(&snapshot), 1); // Snapshot still has old data
+
+        // Original should have new data
+        assert_eq!(cow.len(), 3);
+        assert_eq!(cow.get_score(b"c"), Some(30.0));
+
+        // Snapshot should have old data (unchanged)
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot.get_score(b"c"), None);
+    }
+
+    #[test]
+    fn test_cow_write_without_snapshot_no_copy() {
+        let mut cow = ZSetDataCow::new();
+        cow.add(b"a".to_vec(), 10.0);
+
+        // No snapshot, ref count is 1
+        assert_eq!(cow.ref_count(), 1);
+
+        // Write operation should NOT copy (ref count stays 1)
+        cow.add(b"b".to_vec(), 20.0);
+        assert_eq!(cow.ref_count(), 1); // No copy happened
+
+        // Another write
+        cow.add(b"c".to_vec(), 30.0);
+        assert_eq!(cow.ref_count(), 1); // Still no copy
+    }
+
+    #[test]
+    fn test_cow_multiple_snapshots() {
+        let mut cow = ZSetDataCow::new();
+        cow.add(b"a".to_vec(), 10.0);
+
+        // Create multiple snapshots (they share the same Arc)
+        let snapshot1 = cow.make_snapshot();
+        let snapshot2 = cow.make_snapshot();
+        assert_eq!(cow.ref_count(), 3); // cow + snapshot1 + snapshot2
+
+        // Write should copy (cow gets new Arc, ref count back to 1)
+        cow.add(b"b".to_vec(), 20.0);
+        assert_eq!(cow.ref_count(), 1); // New Arc for cow
+        
+        // Snapshots still share the old Arc (ref count = 2)
+        assert_eq!(Arc::strong_count(&snapshot1), 2); // snapshot1 + snapshot2
+        assert_eq!(Arc::strong_count(&snapshot2), 2); // snapshot1 + snapshot2
+
+        // All snapshots should have old data
+        assert_eq!(snapshot1.len(), 1);
+        assert_eq!(snapshot2.len(), 1);
+
+        // Original should have new data
+        assert_eq!(cow.len(), 2);
+    }
+
+    #[test]
+    fn test_cow_read_operations_no_overhead() {
+        let mut cow = ZSetDataCow::new();
+        cow.add(b"a".to_vec(), 10.0);
+        cow.add(b"b".to_vec(), 20.0);
+
+        // Create snapshot
+        let _snapshot = cow.make_snapshot();
+
+        // Read operations should work without copying
+        assert_eq!(cow.get_score(b"a"), Some(10.0));
+        assert_eq!(cow.get_score(b"b"), Some(20.0));
+        assert!(cow.contains(b"a"));
+        assert_eq!(cow.len(), 2);
+
+        // Ref count should still be 2 (no copy happened)
+        assert_eq!(cow.ref_count(), 2);
+    }
+}
