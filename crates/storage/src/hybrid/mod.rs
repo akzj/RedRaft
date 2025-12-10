@@ -5,11 +5,25 @@
 //! - **Memory**: In-memory storage for List, Set, ZSet (with HashMap sharding)
 //! - **StreamStore**: Disk-based storage for Stream (future)
 //!
-//! ## Storage Path
+//! ## Architecture Options
 //!
-//! All storage backends follow the same path structure:
+//! ### Option 1: HybridStore (Legacy)
+//! Separate backends with independent shard management.
 //! ```text
-//! shard_id -> key -> value
+//! HybridStore
+//! ├── ShardedRocksDB (manages all RocksDB shards)
+//! ├── MemoryStore (manages all memory shards)
+//! └── StreamStore (manages all stream shards)
+//! ```
+//!
+//! ### Option 2: ShardedHybridStore (Recommended)
+//! Per-shard locking for atomic snapshot generation.
+//! ```text
+//! ShardedHybridStore
+//! └── RwLock<HashMap<ShardId, Arc<RwLock<ShardStore>>>>
+//!     ├── Shard 0: ShardStore { strings, hashes, lists, sets, zsets }
+//!     ├── Shard 1: ShardStore { ... }
+//!     └── ...
 //! ```
 //!
 //! ## Data Type Routing
@@ -27,14 +41,17 @@
 //!
 //! - Uses CRC16 hash to calculate slot (0-16383)
 //! - Slot maps to shard_id based on shard_count
-//! - RocksDB uses Column Families for shard isolation
-//! - Memory uses HashMap<ShardId, ShardData>
+//! - Per-shard locking enables atomic snapshot generation
 
 mod sharded_rocksdb;
+mod shard_store;
 mod store;
 mod stream_store;
 
 pub use sharded_rocksdb::ShardedRocksDB;
+pub use shard_store::{
+    ShardStore, ShardSnapshot, ShardedHybridStore, ShardStats, StringStore, StringSnapshot, ZSetData,
+};
 pub use store::{HybridSnapshot, HybridStore};
 pub use stream_store::StreamStore;
 

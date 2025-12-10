@@ -63,7 +63,7 @@ impl HybridStore {
     /// Create a memory-only HybridStore (no persistence)
     pub fn memory_only(shard_count: u32) -> Self {
         let shard_count = shard_count.max(1);
-        
+
         // Create a temp directory for RocksDB (will be deleted on drop)
         let temp_path = format!("/tmp/hybrid_store_temp_{}", std::process::id());
         let rocksdb = ShardedRocksDB::new(&temp_path, shard_count)
@@ -610,10 +610,7 @@ mod tests {
         let store = create_temp_store();
 
         store.hset(b"myhash", b"field1".to_vec(), b"value1".to_vec());
-        assert_eq!(
-            store.hget(b"myhash", b"field1"),
-            Some(b"value1".to_vec())
-        );
+        assert_eq!(store.hget(b"myhash", b"field1"), Some(b"value1".to_vec()));
 
         store.hmset(
             b"myhash",
@@ -672,7 +669,7 @@ mod tests {
 
         // Restore again (should work without clearing)
         store.restore_from_snapshot(&snapshot).unwrap();
-        
+
         // Memory data should still be there
         assert_eq!(store.llen(b"list1"), 1);
         assert!(store.sismember(b"set1", b"x"));
@@ -680,4 +677,3 @@ mod tests {
         cleanup_store(&store);
     }
 }
-
