@@ -105,21 +105,22 @@ impl ListStoreCow {
         // ✅ Get write lock and directly modify base (NO clone!)
         let mut base = self.base.write();
 
-        // Apply removals (only if not in updated - updated takes precedence)
-        if let Some(ref removed) = removed {
-            for key in removed {
-                // Only remove if not being updated
-                if updated.as_ref().map_or(true, |u| !u.contains_key(key)) {
-                    base.remove(key);
-                }
-            }
-        }
-
-        // Apply updates/additions (this handles both new and updated lists)
+        // Apply updates/additions first (updated takes precedence over removed)
+        // This handles both new and updated lists
         if let Some(ref updated) = updated {
             for (key, list_data) in updated {
                 // ListData is copied here (required for consistency)
                 base.insert(key.clone(), list_data.clone());
+            }
+        }
+
+        // Apply removals (only if not in updated - updated takes precedence)
+        if let Some(ref removed) = removed {
+            for key in removed {
+                // Only remove if not being updated (updated already applied above)
+                if updated.as_ref().map_or(true, |u| !u.contains_key(key)) {
+                    base.remove(key);
+                }
             }
         }
 
@@ -138,20 +139,20 @@ impl ListStoreCow {
     /// (e.g., in push/pop/set operations).
     pub fn get_list(&self, key: &[u8]) -> Option<ListData> {
         if self.is_cow_mode() {
-            // Check if removed
-            if let Some(ref removed) = self.lists_removed {
-                if removed.contains(key) {
-                    return None;
-                }
-            }
-
-            // Check COW cache first (if exists)
+            // Check COW cache first (updated takes precedence over removed)
             if let Some(ref updated) = self.lists_updated {
                 if let Some(list) = updated.get(key) {
                     return Some(list.clone());
                 }
             }
-            // If not in updated, fall through to base
+
+            // Check if removed (only if not in updated)
+            if let Some(ref removed) = self.lists_removed {
+                if removed.contains(key) {
+                    return None;
+                }
+            }
+            // If not in updated and not removed, fall through to base
         }
 
         // Fall back to base (read lock)
@@ -162,20 +163,20 @@ impl ListStoreCow {
     /// Check if key exists (read operation, merges COW cache + base)
     pub fn contains_key(&self, key: &[u8]) -> bool {
         if self.is_cow_mode() {
-            // Check if removed
-            if let Some(ref removed) = self.lists_removed {
-                if removed.contains(key) {
-                    return false;
-                }
-            }
-
-            // Check COW cache first (if exists)
+            // Check COW cache first (updated takes precedence over removed)
             if let Some(ref updated) = self.lists_updated {
                 if updated.contains_key(key) {
                     return true;
                 }
             }
-            // If not in updated, fall through to base
+
+            // Check if removed (only if not in updated)
+            if let Some(ref removed) = self.lists_removed {
+                if removed.contains(key) {
+                    return false;
+                }
+            }
+            // If not in updated and not removed, fall through to base
         }
 
         // Fall back to base (read lock)
@@ -186,20 +187,20 @@ impl ListStoreCow {
     /// Get list length for key (read operation, no copy)
     pub fn len(&self, key: &[u8]) -> Option<usize> {
         if self.is_cow_mode() {
-            // Check if removed
-            if let Some(ref removed) = self.lists_removed {
-                if removed.contains(key) {
-                    return None;
-                }
-            }
-
-            // Check COW cache first (if exists)
+            // Check COW cache first (updated takes precedence over removed)
             if let Some(ref updated) = self.lists_updated {
                 if let Some(list) = updated.get(key) {
                     return Some(list.len());
                 }
             }
-            // If not in updated, fall through to base
+
+            // Check if removed (only if not in updated)
+            if let Some(ref removed) = self.lists_removed {
+                if removed.contains(key) {
+                    return None;
+                }
+            }
+            // If not in updated and not removed, fall through to base
         }
 
         // Fall back to base (read lock)
@@ -212,7 +213,7 @@ impl ListStoreCow {
         if self.is_cow_mode() {
             let updated = self.lists_updated.as_mut().unwrap();
             let removed = self.lists_removed.as_mut().unwrap();
-            
+
             // Check if already in COW cache (already copied)
             if let Some(list) = updated.get_mut(&key) {
                 // Already copied: directly modify (no additional copy!)
@@ -232,7 +233,7 @@ impl ListStoreCow {
                 list.push_front(value);
                 updated.insert(key.clone(), list);
             }
-            
+
             // Remove from removed cache if present
             removed.remove(&key);
         } else {
@@ -247,7 +248,7 @@ impl ListStoreCow {
         if self.is_cow_mode() {
             let updated = self.lists_updated.as_mut().unwrap();
             let removed = self.lists_removed.as_mut().unwrap();
-            
+
             // Check if already in COW cache (already copied)
             if let Some(list) = updated.get_mut(&key) {
                 // Already copied: directly modify (no additional copy!)
@@ -267,7 +268,7 @@ impl ListStoreCow {
                 list.push_back(value);
                 updated.insert(key.clone(), list);
             }
-            
+
             // Remove from removed cache if present
             removed.remove(&key);
         } else {
@@ -282,7 +283,7 @@ impl ListStoreCow {
         if self.is_cow_mode() {
             let updated = self.lists_updated.as_mut().unwrap();
             let removed = self.lists_removed.as_mut().unwrap();
-            
+
             // Check if already in COW cache (already copied)
             if let Some(list) = updated.get_mut(key) {
                 // Already copied: directly modify (no additional copy!)
@@ -308,6 +309,7 @@ impl ListStoreCow {
                 if list.is_empty() {
                     // If list becomes empty, remove it
                     removed.insert(key.to_vec());
+                    updated.remove(key);
                 } else {
                     updated.insert(key.to_vec(), list);
                 }
@@ -325,7 +327,7 @@ impl ListStoreCow {
         if self.is_cow_mode() {
             let updated = self.lists_updated.as_mut().unwrap();
             let removed = self.lists_removed.as_mut().unwrap();
-            
+
             // Check if already in COW cache (already copied)
             if let Some(list) = updated.get_mut(key) {
                 // Already copied: directly modify (no additional copy!)
@@ -366,20 +368,20 @@ impl ListStoreCow {
     /// Get element at index (read operation, no copy)
     pub fn get(&self, key: &[u8], index: usize) -> Option<Vec<u8>> {
         if self.is_cow_mode() {
-            // Check if removed
-            if let Some(ref removed) = self.lists_removed {
-                if removed.contains(key) {
-                    return None;
-                }
-            }
-
-            // Check COW cache first (if exists)
+            // Check COW cache first (updated takes precedence over removed)
             if let Some(ref updated) = self.lists_updated {
                 if let Some(list) = updated.get(key) {
                     return list.get(index).cloned();
                 }
             }
-            // If not in updated, fall through to base
+
+            // Check if removed (only if not in updated)
+            if let Some(ref removed) = self.lists_removed {
+                if removed.contains(key) {
+                    return None;
+                }
+            }
+            // If not in updated and not removed, fall through to base
         }
 
         // Fall back to base (read lock)
@@ -392,7 +394,7 @@ impl ListStoreCow {
         if self.is_cow_mode() {
             let updated = self.lists_updated.as_mut().unwrap();
             let removed = self.lists_removed.as_mut().unwrap();
-            
+
             // Check if already in COW cache (already copied)
             if let Some(list) = updated.get_mut(&key) {
                 // Already copied: directly modify (no additional copy!)
@@ -441,14 +443,7 @@ impl ListStoreCow {
     /// Get range of elements [start, end] (read operation, no copy)
     pub fn range(&self, key: &[u8], start: usize, end: usize) -> Option<Vec<Vec<u8>>> {
         if self.is_cow_mode() {
-            // Check if removed
-            if let Some(ref removed) = self.lists_removed {
-                if removed.contains(key) {
-                    return None;
-                }
-            }
-
-            // Check COW cache first (if exists)
+            // Check COW cache first (updated takes precedence over removed)
             if let Some(ref updated) = self.lists_updated {
                 if let Some(list) = updated.get(key) {
                     return Some(
@@ -460,7 +455,14 @@ impl ListStoreCow {
                     );
                 }
             }
-            // If not in updated, fall through to base
+
+            // Check if removed (only if not in updated)
+            if let Some(ref removed) = self.lists_removed {
+                if removed.contains(key) {
+                    return None;
+                }
+            }
+            // If not in updated and not removed, fall through to base
         }
 
         // Fall back to base (read lock)
@@ -477,10 +479,24 @@ impl ListStoreCow {
     /// Clear list for key (incremental COW: only records change)
     pub fn clear(&mut self, key: &[u8]) -> bool {
         if self.is_cow_mode() {
-            // COW mode: mark as removed
-            if self.contains_key(key) {
-                self.lists_removed.as_mut().unwrap().insert(key.to_vec());
-                self.lists_updated.as_mut().unwrap().remove(key);
+            let updated = self.lists_updated.as_mut().unwrap();
+            let removed = self.lists_removed.as_mut().unwrap();
+
+            // Check if already removed
+            if removed.contains(key) {
+                return true; // Already removed
+            }
+
+            // Check if exists in updated or base
+            let exists = updated.contains_key(key) || {
+                let base = self.base.read();
+                base.contains_key(key)
+            };
+
+            if exists {
+                // Mark as removed
+                removed.insert(key.to_vec());
+                updated.remove(key); // Remove from updated if present
                 true
             } else {
                 false
@@ -564,7 +580,6 @@ impl ListStoreCow {
     pub fn is_in_cow_mode(&self) -> bool {
         self.is_cow_mode()
     }
-
 }
 
 impl Default for ListStoreCow {
@@ -755,5 +770,60 @@ mod tests {
         assert_eq!(store.len(b"list1"), Some(2));
         // list2 should be unchanged (from base)
         assert_eq!(store.len(b"list2"), Some(2));
+    }
+
+    #[test]
+    fn test_list_store_updated_overrides_removed() {
+        let mut store = ListStoreCow::new();
+        store.push_back(b"list1".to_vec(), b"a".to_vec());
+        store.push_back(b"list1".to_vec(), b"b".to_vec());
+
+        // Create snapshot
+        let _snapshot = store.make_snapshot();
+
+        // Remove list1 (adds to removed cache)
+        assert!(store.clear(b"list1"));
+        assert!(!store.contains_key(b"list1"));
+        assert_eq!(store.len(b"list1"), None);
+
+        // Re-add list1 (adds to updated cache, should override removed)
+        store.push_back(b"list1".to_vec(), b"c".to_vec());
+        assert!(store.contains_key(b"list1")); // Should exist (updated overrides removed)
+        assert_eq!(store.len(b"list1"), Some(1));
+        assert_eq!(store.get(b"list1", 0), Some(b"c".to_vec()));
+
+        // Merge: updated should take precedence
+        store.merge_cow();
+        assert!(store.contains_key(b"list1")); // Should still exist after merge
+        assert_eq!(store.len(b"list1"), Some(1));
+        assert_eq!(store.get(b"list1", 0), Some(b"c".to_vec()));
+    }
+
+    #[test]
+    fn test_list_store_merge_updated_overrides_removed() {
+        let mut store = ListStoreCow::new();
+        store.push_back(b"list1".to_vec(), b"a".to_vec());
+        store.push_back(b"list2".to_vec(), b"x".to_vec());
+
+        // Create snapshot
+        let _snapshot = store.make_snapshot();
+
+        // Remove list1
+        assert!(store.clear(b"list1"));
+        assert!(!store.contains_key(b"list1"));
+
+        // Re-add list1 (should override removed)
+        store.push_back(b"list1".to_vec(), b"b".to_vec());
+        assert!(store.contains_key(b"list1"));
+
+        // Merge: updated should take precedence over removed
+        store.merge_cow();
+        assert!(store.contains_key(b"list1")); // Should exist (updated overrides removed)
+        assert_eq!(store.len(b"list1"), Some(1));
+        assert_eq!(store.get(b"list1", 0), Some(b"b".to_vec()));
+
+        // list2 should still exist
+        assert!(store.contains_key(b"list2"));
+        assert_eq!(store.len(b"list2"), Some(1));
     }
 }
