@@ -9,7 +9,7 @@
 //!
 //! All backends follow: shard_id -> key -> value
 
-use super::sharded_rocksdb::ShardedRocksDB;
+use crate::rocksdb::ShardedRocksDB;
 use super::stream_store::StreamStore;
 use super::DataType;
 use crate::memory::{slot_for_key, MemoryStore, ShardId};

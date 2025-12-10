@@ -56,13 +56,15 @@
 //! store.set(b"key".to_vec(), b"value".to_vec());
 //! ```
 //!
-//! # Example (RocksDBStore - Standalone)
+//! # Example (ShardedRocksDB - Standalone)
 //!
 //! ```rust,ignore
-//! use storage::{RocksDBStore, RedisStore};
+//! use storage::{ShardedRocksDB, StringStore};
 //!
-//! let store = RocksDBStore::new("/tmp/mydb").unwrap();
-//! store.set(b"key".to_vec(), b"value".to_vec());
+//! // Create sharded RocksDB with 16 shards
+//! let store = ShardedRocksDB::new("/tmp/mydb", 16).unwrap();
+//! let shard_id = store.shard_for_key(b"key");
+//! store.set(shard_id, b"key", b"value".to_vec()).unwrap();
 //! ```
 
 pub mod hybrid;
@@ -71,7 +73,7 @@ pub mod rocksdb;
 mod traits;
 
 // Hybrid storage (recommended)
-pub use hybrid::{DataType, HybridSnapshot, HybridStore, ShardedRocksDB, StreamStore};
+pub use hybrid::{DataType, HybridSnapshot, HybridStore, StreamStore};
 
 // Individual stores
 pub use memory::{
@@ -89,7 +91,7 @@ pub use memory::{
     ZSetData,
     TOTAL_SLOTS,
 };
-pub use rocksdb::RocksDBStore;
+pub use rocksdb::{ShardMetadata, ShardedRocksDB};
 
 // Traits (organized by data structure)
 pub use traits::{
