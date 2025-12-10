@@ -606,258 +606,6 @@ impl Ord for OrderedFloat {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_zset_basic_operations() {
-        let mut zset = ZSetData::new();
-
-        // Add members
-        zset.add(b"member1".to_vec(), 10.0);
-        zset.add(b"member2".to_vec(), 20.0);
-        zset.add(b"member3".to_vec(), 15.0);
-
-        assert_eq!(zset.len(), 3);
-        assert!(zset.contains(b"member1"));
-        assert_eq!(zset.get_score(b"member1"), Some(10.0));
-
-        // Update score
-        zset.add(b"member1".to_vec(), 25.0);
-        assert_eq!(zset.get_score(b"member1"), Some(25.0));
-
-        // Remove member
-        assert!(zset.remove(b"member2"));
-        assert!(!zset.contains(b"member2"));
-        assert_eq!(zset.len(), 2);
-    }
-
-    #[test]
-    fn test_zset_range_queries() {
-        let mut zset = ZSetData::new();
-        zset.add(b"a".to_vec(), 10.0);
-        zset.add(b"b".to_vec(), 20.0);
-        zset.add(b"c".to_vec(), 30.0);
-        zset.add(b"d".to_vec(), 40.0);
-
-        // Range by score
-        let result = zset.range_by_score(15.0, 35.0);
-        assert_eq!(result.len(), 2);
-        assert!(result.iter().any(|(m, _)| m == b"b"));
-        assert!(result.iter().any(|(m, _)| m == b"c"));
-
-        // Range by rank
-        let result = zset.range_by_rank(1, 2);
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
-    fn test_ordered_float() {
-        let mut map = BTreeMap::new();
-        map.insert(OrderedFloat(10.0), "a");
-        map.insert(OrderedFloat(20.0), "b");
-        map.insert(OrderedFloat(15.0), "c");
-
-        let keys: Vec<f64> = map.keys().map(|k| k.0).collect();
-        assert_eq!(keys, vec![10.0, 15.0, 20.0]);
-    }
-
-    #[test]
-    fn test_cow_basic_operations() {
-        let mut cow = ZSetDataCow::new();
-
-        // Add members
-        cow.add(b"member1".to_vec(), 10.0);
-        cow.add(b"member2".to_vec(), 20.0);
-        cow.add(b"member3".to_vec(), 15.0);
-
-        assert_eq!(cow.len(), 3);
-        assert!(cow.contains(b"member1"));
-        assert_eq!(cow.get_score(b"member1"), Some(10.0));
-
-        // Update score
-        cow.add(b"member1".to_vec(), 25.0);
-        assert_eq!(cow.get_score(b"member1"), Some(25.0));
-
-        // Remove member
-        assert!(cow.remove(b"member2"));
-        assert!(!cow.contains(b"member2"));
-        assert_eq!(cow.len(), 2);
-    }
-
-    #[test]
-    fn test_cow_snapshot_no_copy() {
-        let mut cow = ZSetDataCow::new();
-        cow.add(b"a".to_vec(), 10.0);
-        cow.add(b"b".to_vec(), 20.0);
-        cow.add(b"c".to_vec(), 30.0);
-
-        // Before snapshot: ref count should be 1
-        assert_eq!(cow.ref_count(), 1);
-
-        // Create snapshot (only increases ref count, no copy)
-        let snapshot = cow.make_snapshot();
-
-        // After snapshot: ref count should be 2
-        assert_eq!(cow.ref_count(), 2);
-        assert_eq!(Arc::strong_count(&snapshot), 2);
-
-        // Snapshot should have same data (via read lock)
-        let snapshot_data = snapshot.read();
-        assert_eq!(snapshot_data.len(), 3);
-        assert_eq!(snapshot_data.get_score(b"a"), Some(10.0));
-        assert_eq!(snapshot_data.get_score(b"b"), Some(20.0));
-        assert_eq!(snapshot_data.get_score(b"c"), Some(30.0));
-        drop(snapshot_data);
-
-        // Original should still work
-        assert_eq!(cow.len(), 3);
-        assert_eq!(cow.get_score(b"a"), Some(10.0));
-    }
-
-    #[test]
-    fn test_cow_write_after_snapshot_copies() {
-        let mut cow = ZSetDataCow::new();
-        cow.add(b"a".to_vec(), 10.0);
-        cow.add(b"b".to_vec(), 20.0);
-
-        // Create snapshot
-        let snapshot = cow.make_snapshot();
-        assert_eq!(cow.ref_count(), 2);
-        assert!(cow.is_in_cow_mode()); // Should be in COW mode
-
-        // Write operation records change in COW cache (NO data copy)
-        cow.add(b"c".to_vec(), 30.0);
-        assert_eq!(cow.ref_count(), 2); // Ref count unchanged (no copy!)
-        assert_eq!(Arc::strong_count(&snapshot), 2); // Snapshot still shares base
-        assert!(cow.is_in_cow_mode()); // Still in COW mode
-
-        // Original should have new data (via COW cache)
-        assert_eq!(cow.len(), 3);
-        assert_eq!(cow.get_score(b"c"), Some(30.0));
-
-        // Snapshot should have old data (unchanged, from base)
-        let snapshot_data = snapshot.read();
-        assert_eq!(snapshot_data.len(), 2);
-        assert_eq!(snapshot_data.get_score(b"c"), None);
-        drop(snapshot_data);
-    }
-
-    #[test]
-    fn test_cow_write_without_snapshot_no_copy() {
-        let mut cow = ZSetDataCow::new();
-        cow.add(b"a".to_vec(), 10.0);
-
-        // No snapshot, ref count is 1
-        assert_eq!(cow.ref_count(), 1);
-
-        // Write operation should NOT copy (ref count stays 1)
-        cow.add(b"b".to_vec(), 20.0);
-        assert_eq!(cow.ref_count(), 1); // No copy happened
-
-        // Another write
-        cow.add(b"c".to_vec(), 30.0);
-        assert_eq!(cow.ref_count(), 1); // Still no copy
-    }
-
-    #[test]
-    fn test_cow_multiple_snapshots() {
-        let mut cow = ZSetDataCow::new();
-        cow.add(b"a".to_vec(), 10.0);
-
-        // Create multiple snapshots (they share the same Arc)
-        let snapshot1 = cow.make_snapshot();
-        let snapshot2 = cow.make_snapshot();
-        assert_eq!(cow.ref_count(), 3); // cow + snapshot1 + snapshot2
-        assert!(cow.is_in_cow_mode()); // Should be in COW mode
-
-        // Write records change in COW cache (NO data copy)
-        cow.add(b"b".to_vec(), 20.0);
-        assert_eq!(cow.ref_count(), 3); // Ref count unchanged (no copy!)
-        assert!(cow.is_in_cow_mode()); // Still in COW mode
-
-        // Snapshots still share the same base Arc (ref count = 3)
-        assert_eq!(Arc::strong_count(&snapshot1), 3); // cow + snapshot1 + snapshot2
-        assert_eq!(Arc::strong_count(&snapshot2), 3); // cow + snapshot1 + snapshot2
-
-        // All snapshots should have old data (from base)
-        let snapshot1_data = snapshot1.read();
-        let snapshot2_data = snapshot2.read();
-        assert_eq!(snapshot1_data.len(), 1);
-        assert_eq!(snapshot2_data.len(), 1);
-        drop(snapshot1_data);
-        drop(snapshot2_data);
-
-        // Original should have new data (via COW cache)
-        assert_eq!(cow.len(), 2);
-        assert_eq!(cow.get_score(b"b"), Some(20.0));
-    }
-
-    #[test]
-    fn test_cow_read_operations_no_overhead() {
-        let mut cow = ZSetDataCow::new();
-        cow.add(b"a".to_vec(), 10.0);
-        cow.add(b"b".to_vec(), 20.0);
-
-        // Create snapshot
-        let _snapshot = cow.make_snapshot();
-
-        // Read operations should work without copying
-        assert_eq!(cow.get_score(b"a"), Some(10.0));
-        assert_eq!(cow.get_score(b"b"), Some(20.0));
-        assert!(cow.contains(b"a"));
-        assert_eq!(cow.len(), 2);
-
-        // Ref count should still be 2 (no copy happened)
-        assert_eq!(cow.ref_count(), 2);
-    }
-
-    #[test]
-    fn test_cow_merge_applies_only_changes() {
-        let mut cow = ZSetDataCow::new();
-        cow.add(b"a".to_vec(), 10.0);
-        cow.add(b"b".to_vec(), 20.0);
-        cow.add(b"c".to_vec(), 30.0);
-
-        // Create snapshot
-        let snapshot = cow.make_snapshot();
-        assert_eq!(cow.ref_count(), 2);
-
-        // Make changes (only 3 changes, not full copy)
-        cow.add(b"d".to_vec(), 40.0); // Add new
-        cow.add(b"a".to_vec(), 15.0); // Update existing
-        cow.remove(b"b"); // Remove existing
-
-        // Before merge: changes are in COW cache
-        assert!(cow.is_in_cow_mode());
-        assert_eq!(cow.len(), 3); // a(15), c(30), d(40)
-        assert_eq!(cow.get_score(b"a"), Some(15.0));
-        assert_eq!(cow.get_score(b"b"), None);
-        assert_eq!(cow.get_score(b"d"), Some(40.0));
-
-        // Snapshot still has old data
-        let snapshot_data = snapshot.read();
-        assert_eq!(snapshot_data.len(), 3);
-        assert_eq!(snapshot_data.get_score(b"a"), Some(10.0));
-        assert_eq!(snapshot_data.get_score(b"b"), Some(20.0));
-        drop(snapshot_data);
-
-        // Merge: applies only changes to base (O(M) where M=3, not O(N))
-        cow.merge_cow();
-        assert!(!cow.is_in_cow_mode());
-        // Ref count is still 2 because snapshot still exists (this is correct)
-        assert_eq!(cow.ref_count(), 2);
-
-        // After merge: changes are in base
-        assert_eq!(cow.len(), 3);
-        assert_eq!(cow.get_score(b"a"), Some(15.0));
-        assert_eq!(cow.get_score(b"b"), None);
-        assert_eq!(cow.get_score(b"c"), Some(30.0));
-        assert_eq!(cow.get_score(b"d"), Some(40.0));
-    }
-}
-
 /// ZSet Store with Incremental Copy-on-Write (COW) support
 ///
 /// True incremental COW semantics at HashMap level:
@@ -1287,5 +1035,257 @@ impl ZSetStoreCow {
 impl Default for ZSetStoreCow {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_zset_basic_operations() {
+        let mut zset = ZSetData::new();
+
+        // Add members
+        zset.add(b"member1".to_vec(), 10.0);
+        zset.add(b"member2".to_vec(), 20.0);
+        zset.add(b"member3".to_vec(), 15.0);
+
+        assert_eq!(zset.len(), 3);
+        assert!(zset.contains(b"member1"));
+        assert_eq!(zset.get_score(b"member1"), Some(10.0));
+
+        // Update score
+        zset.add(b"member1".to_vec(), 25.0);
+        assert_eq!(zset.get_score(b"member1"), Some(25.0));
+
+        // Remove member
+        assert!(zset.remove(b"member2"));
+        assert!(!zset.contains(b"member2"));
+        assert_eq!(zset.len(), 2);
+    }
+
+    #[test]
+    fn test_zset_range_queries() {
+        let mut zset = ZSetData::new();
+        zset.add(b"a".to_vec(), 10.0);
+        zset.add(b"b".to_vec(), 20.0);
+        zset.add(b"c".to_vec(), 30.0);
+        zset.add(b"d".to_vec(), 40.0);
+
+        // Range by score
+        let result = zset.range_by_score(15.0, 35.0);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().any(|(m, _)| m == b"b"));
+        assert!(result.iter().any(|(m, _)| m == b"c"));
+
+        // Range by rank
+        let result = zset.range_by_rank(1, 2);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_ordered_float() {
+        let mut map = BTreeMap::new();
+        map.insert(OrderedFloat(10.0), "a");
+        map.insert(OrderedFloat(20.0), "b");
+        map.insert(OrderedFloat(15.0), "c");
+
+        let keys: Vec<f64> = map.keys().map(|k| k.0).collect();
+        assert_eq!(keys, vec![10.0, 15.0, 20.0]);
+    }
+
+    #[test]
+    fn test_cow_basic_operations() {
+        let mut cow = ZSetDataCow::new();
+
+        // Add members
+        cow.add(b"member1".to_vec(), 10.0);
+        cow.add(b"member2".to_vec(), 20.0);
+        cow.add(b"member3".to_vec(), 15.0);
+
+        assert_eq!(cow.len(), 3);
+        assert!(cow.contains(b"member1"));
+        assert_eq!(cow.get_score(b"member1"), Some(10.0));
+
+        // Update score
+        cow.add(b"member1".to_vec(), 25.0);
+        assert_eq!(cow.get_score(b"member1"), Some(25.0));
+
+        // Remove member
+        assert!(cow.remove(b"member2"));
+        assert!(!cow.contains(b"member2"));
+        assert_eq!(cow.len(), 2);
+    }
+
+    #[test]
+    fn test_cow_snapshot_no_copy() {
+        let mut cow = ZSetDataCow::new();
+        cow.add(b"a".to_vec(), 10.0);
+        cow.add(b"b".to_vec(), 20.0);
+        cow.add(b"c".to_vec(), 30.0);
+
+        // Before snapshot: ref count should be 1
+        assert_eq!(cow.ref_count(), 1);
+
+        // Create snapshot (only increases ref count, no copy)
+        let snapshot = cow.make_snapshot();
+
+        // After snapshot: ref count should be 2
+        assert_eq!(cow.ref_count(), 2);
+        assert_eq!(Arc::strong_count(&snapshot), 2);
+
+        // Snapshot should have same data (via read lock)
+        let snapshot_data = snapshot.read();
+        assert_eq!(snapshot_data.len(), 3);
+        assert_eq!(snapshot_data.get_score(b"a"), Some(10.0));
+        assert_eq!(snapshot_data.get_score(b"b"), Some(20.0));
+        assert_eq!(snapshot_data.get_score(b"c"), Some(30.0));
+        drop(snapshot_data);
+
+        // Original should still work
+        assert_eq!(cow.len(), 3);
+        assert_eq!(cow.get_score(b"a"), Some(10.0));
+    }
+
+    #[test]
+    fn test_cow_write_after_snapshot_copies() {
+        let mut cow = ZSetDataCow::new();
+        cow.add(b"a".to_vec(), 10.0);
+        cow.add(b"b".to_vec(), 20.0);
+
+        // Create snapshot
+        let snapshot = cow.make_snapshot();
+        assert_eq!(cow.ref_count(), 2);
+        assert!(cow.is_in_cow_mode()); // Should be in COW mode
+
+        // Write operation records change in COW cache (NO data copy)
+        cow.add(b"c".to_vec(), 30.0);
+        assert_eq!(cow.ref_count(), 2); // Ref count unchanged (no copy!)
+        assert_eq!(Arc::strong_count(&snapshot), 2); // Snapshot still shares base
+        assert!(cow.is_in_cow_mode()); // Still in COW mode
+
+        // Original should have new data (via COW cache)
+        assert_eq!(cow.len(), 3);
+        assert_eq!(cow.get_score(b"c"), Some(30.0));
+
+        // Snapshot should have old data (unchanged, from base)
+        let snapshot_data = snapshot.read();
+        assert_eq!(snapshot_data.len(), 2);
+        assert_eq!(snapshot_data.get_score(b"c"), None);
+        drop(snapshot_data);
+    }
+
+    #[test]
+    fn test_cow_write_without_snapshot_no_copy() {
+        let mut cow = ZSetDataCow::new();
+        cow.add(b"a".to_vec(), 10.0);
+
+        // No snapshot, ref count is 1
+        assert_eq!(cow.ref_count(), 1);
+
+        // Write operation should NOT copy (ref count stays 1)
+        cow.add(b"b".to_vec(), 20.0);
+        assert_eq!(cow.ref_count(), 1); // No copy happened
+
+        // Another write
+        cow.add(b"c".to_vec(), 30.0);
+        assert_eq!(cow.ref_count(), 1); // Still no copy
+    }
+
+    #[test]
+    fn test_cow_multiple_snapshots() {
+        let mut cow = ZSetDataCow::new();
+        cow.add(b"a".to_vec(), 10.0);
+
+        // Create multiple snapshots (they share the same Arc)
+        let snapshot1 = cow.make_snapshot();
+        let snapshot2 = cow.make_snapshot();
+        assert_eq!(cow.ref_count(), 3); // cow + snapshot1 + snapshot2
+        assert!(cow.is_in_cow_mode()); // Should be in COW mode
+
+        // Write records change in COW cache (NO data copy)
+        cow.add(b"b".to_vec(), 20.0);
+        assert_eq!(cow.ref_count(), 3); // Ref count unchanged (no copy!)
+        assert!(cow.is_in_cow_mode()); // Still in COW mode
+
+        // Snapshots still share the same base Arc (ref count = 3)
+        assert_eq!(Arc::strong_count(&snapshot1), 3); // cow + snapshot1 + snapshot2
+        assert_eq!(Arc::strong_count(&snapshot2), 3); // cow + snapshot1 + snapshot2
+
+        // All snapshots should have old data (from base)
+        let snapshot1_data = snapshot1.read();
+        let snapshot2_data = snapshot2.read();
+        assert_eq!(snapshot1_data.len(), 1);
+        assert_eq!(snapshot2_data.len(), 1);
+        drop(snapshot1_data);
+        drop(snapshot2_data);
+
+        // Original should have new data (via COW cache)
+        assert_eq!(cow.len(), 2);
+        assert_eq!(cow.get_score(b"b"), Some(20.0));
+    }
+
+    #[test]
+    fn test_cow_read_operations_no_overhead() {
+        let mut cow = ZSetDataCow::new();
+        cow.add(b"a".to_vec(), 10.0);
+        cow.add(b"b".to_vec(), 20.0);
+
+        // Create snapshot
+        let _snapshot = cow.make_snapshot();
+
+        // Read operations should work without copying
+        assert_eq!(cow.get_score(b"a"), Some(10.0));
+        assert_eq!(cow.get_score(b"b"), Some(20.0));
+        assert!(cow.contains(b"a"));
+        assert_eq!(cow.len(), 2);
+
+        // Ref count should still be 2 (no copy happened)
+        assert_eq!(cow.ref_count(), 2);
+    }
+
+    #[test]
+    fn test_cow_merge_applies_only_changes() {
+        let mut cow = ZSetDataCow::new();
+        cow.add(b"a".to_vec(), 10.0);
+        cow.add(b"b".to_vec(), 20.0);
+        cow.add(b"c".to_vec(), 30.0);
+
+        // Create snapshot
+        let snapshot = cow.make_snapshot();
+        assert_eq!(cow.ref_count(), 2);
+
+        // Make changes (only 3 changes, not full copy)
+        cow.add(b"d".to_vec(), 40.0); // Add new
+        cow.add(b"a".to_vec(), 15.0); // Update existing
+        cow.remove(b"b"); // Remove existing
+
+        // Before merge: changes are in COW cache
+        assert!(cow.is_in_cow_mode());
+        assert_eq!(cow.len(), 3); // a(15), c(30), d(40)
+        assert_eq!(cow.get_score(b"a"), Some(15.0));
+        assert_eq!(cow.get_score(b"b"), None);
+        assert_eq!(cow.get_score(b"d"), Some(40.0));
+
+        // Snapshot still has old data
+        let snapshot_data = snapshot.read();
+        assert_eq!(snapshot_data.len(), 3);
+        assert_eq!(snapshot_data.get_score(b"a"), Some(10.0));
+        assert_eq!(snapshot_data.get_score(b"b"), Some(20.0));
+        drop(snapshot_data);
+
+        // Merge: applies only changes to base (O(M) where M=3, not O(N))
+        cow.merge_cow();
+        assert!(!cow.is_in_cow_mode());
+        // Ref count is still 2 because snapshot still exists (this is correct)
+        assert_eq!(cow.ref_count(), 2);
+
+        // After merge: changes are in base
+        assert_eq!(cow.len(), 3);
+        assert_eq!(cow.get_score(b"a"), Some(15.0));
+        assert_eq!(cow.get_score(b"b"), None);
+        assert_eq!(cow.get_score(b"c"), Some(30.0));
+        assert_eq!(cow.get_score(b"d"), Some(40.0));
     }
 }
