@@ -320,18 +320,34 @@ impl SetDataCow {
 
     /// Get member count (approximate, includes COW changes)
     pub fn len(&self) -> usize {
-        let base = self.base.read();
-        let base_len = base.len();
-        drop(base);
-
         if self.is_cow_mode() {
             let updated = self.members_updated.as_ref().unwrap();
             let removed = self.members_removed.as_ref().unwrap();
-            // Base count - removed + updated (new items)
-            let new_items = updated.len() - removed.len();
-            base_len + new_items
+            
+            // Count members in base that are not removed
+            let base = self.base.read();
+            let base_not_removed = base.members.iter()
+                .filter(|m| !removed.contains(*m))
+                .count();
+            drop(base);
+            
+            // Count new members in updated (that are not in base)
+            // Since updated takes precedence over removed, we add all updated members
+            // But we need to subtract members that were already in base
+            // (they were updated, not new)
+            let base = self.base.read();
+            let updated_in_base = updated.iter()
+                .filter(|m| base.members.contains(*m))
+                .count();
+            drop(base);
+            
+            // Final count: base (excluding removed) + updated (excluding those already in base)
+            base_not_removed + updated.len() - updated_in_base
         } else {
-            base_len
+            let base = self.base.read();
+            let len = base.len();
+            drop(base);
+            len
         }
     }
 
@@ -1437,11 +1453,11 @@ mod tests {
         set1.add(create_test_member("member2"));
         
         // Create snapshot and share between sets
-        set1.make_snapshot();
+        let _snapshot = set1.make_snapshot(); // Save snapshot to keep ref_count
         let mut set2 = set1.make_cow();
         
         // Both should share the same base
-        assert_eq!(set1.ref_count(), 3); // set1.base + set1.snapshot + set2
+        assert_eq!(set1.ref_count(), 3); // set1.base + snapshot + set2
         assert!(set2.is_in_cow_mode());
         
         // Make independent changes
@@ -1563,13 +1579,10 @@ mod tests {
         // Test initial state
         assert!(!store.is_cow_mode());
         
-        // Test get_set_mut creates new set
-        let set1 = store.get_set_mut(b"set1");
-        assert!(set1.is_some());
-        
-        let set1_mut = set1.unwrap();
-        assert!(set1_mut.add(create_test_member("member1")));
-        assert!(set1_mut.contains(b"member1"));
+        // Test add creates new set
+        assert!(store.add(create_test_member("set1"), create_test_member("member1")));
+        assert!(store.contains(b"set1", b"member1"));
+        assert_eq!(store.len(b"set1"), Some(1));
     }
 
     #[test]
@@ -1577,33 +1590,26 @@ mod tests {
         let mut store = SetStoreCow::new();
         
         // Create a set and add data
-        let set1 = store.get_set_mut(b"set1").unwrap();
-        set1.add(create_test_member("member1"));
-        set1.add(create_test_member("member2"));
+        store.add(create_test_member("set1"), create_test_member("member1"));
+        store.add(create_test_member("set1"), create_test_member("member2"));
         
         // Create snapshot
         store.make_snapshot();
         assert!(store.is_cow_mode());
         
         // Modify existing set in COW mode
-        let set1_mut = store.get_set_mut(b"set1").unwrap();
-        set1_mut.add(create_test_member("member3"));
-        set1_mut.remove(b"member1");
+        store.add(create_test_member("set1"), create_test_member("member3"));
+        store.remove(b"set1", b"member1");
         
         // Create new set in COW mode
-        let set2 = store.get_set_mut(b"set2").unwrap();
-        set2.add(create_test_member("member4"));
+        store.add(create_test_member("set2"), create_test_member("member4"));
         
         // Verify changes
-        let set1_check = store.get_set(b"set1");
-        assert!(set1_check.is_some());
-        assert!(set1_check.unwrap().contains(b"member2"));
-        assert!(set1_check.unwrap().contains(b"member3"));
-        assert!(!set1_check.unwrap().contains(b"member1"));
+        assert!(store.contains(b"set1", b"member2"));
+        assert!(store.contains(b"set1", b"member3"));
+        assert!(!store.contains(b"set1", b"member1"));
         
-        let set2_check = store.get_set(b"set2");
-        assert!(set2_check.is_some());
-        assert!(set2_check.unwrap().contains(b"member4"));
+        assert!(store.contains(b"set2", b"member4"));
     }
 
     #[test]
@@ -1611,34 +1617,26 @@ mod tests {
         let mut store = SetStoreCow::new();
         
         // Create initial sets
-        let set1 = store.get_set_mut(b"set1").unwrap();
-        set1.add(create_test_member("member1"));
-        
-        let set2 = store.get_set_mut(b"set2").unwrap();
-        set2.add(create_test_member("member2"));
+        store.add(create_test_member("set1"), create_test_member("member1"));
+        store.add(create_test_member("set2"), create_test_member("member2"));
         
         // Create snapshot
         store.make_snapshot();
         
         // Make changes in COW mode
-        let set1_mut = store.get_set_mut(b"set1").unwrap();
-        set1_mut.add(create_test_member("member3"));
+        store.add(create_test_member("set1"), create_test_member("member3"));
         
         // Create new set
-        let set3 = store.get_set_mut(b"set3").unwrap();
-        set3.add(create_test_member("member4"));
+        store.add(create_test_member("set3"), create_test_member("member4"));
         
         // Merge changes
         store.merge_cow();
         assert!(!store.is_cow_mode());
         
         // Verify merged state persists
-        let set1_check = store.get_set_mut(b"set1").unwrap();
-        assert!(set1_check.contains(b"member1"));
-        assert!(set1_check.contains(b"member3"));
-        
-        let set3_check = store.get_set_mut(b"set3").unwrap();
-        assert!(set3_check.contains(b"member4"));
+        assert!(store.contains(b"set1", b"member1"));
+        assert!(store.contains(b"set1", b"member3"));
+        assert!(store.contains(b"set3", b"member4"));
     }
 
     #[test]
@@ -1646,19 +1644,15 @@ mod tests {
         let mut store = SetStoreCow::new();
         
         // Create a set
-        let set1 = store.get_set_mut(b"set1").unwrap();
-        set1.add(create_test_member("member1"));
+        store.add(create_test_member("set1"), create_test_member("member1"));
         
         // Create snapshot
         store.make_snapshot();
         
-        // Remove set in COW mode (this would be done by removing all references)
-        // Note: The current implementation doesn't have explicit set removal,
-        // but we can test that the set data is properly managed
-        
-        let set1_mut = store.get_set_mut(b"set1").unwrap();
-        set1_mut.clear();
-        assert!(set1_mut.is_empty());
+        // Remove set in COW mode
+        assert!(store.clear(b"set1"));
+        assert_eq!(store.len(b"set1"), None);
+        assert!(!store.contains(b"set1", b"member1"));
     }
 
     #[test]
@@ -1671,7 +1665,7 @@ mod tests {
         let mut store = SetStoreCow::from_data(data);
         
         // Verify data is accessible
-        let set = store.get_set_mut(b"set1").unwrap();
-        assert!(set.contains(b"member1"));
+        assert!(store.contains(b"set1", b"member1"));
+        assert_eq!(store.len(b"set1"), Some(1));
     }
 }
