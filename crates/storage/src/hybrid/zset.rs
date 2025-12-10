@@ -393,7 +393,7 @@ impl ZSetDataCow {
         let base = self.base.read();
         let base_len = base.len();
         drop(base);
-        
+
         if self.is_cow_mode() {
             let updated = self.scores_updated.as_ref().unwrap();
             let removed = self.scores_removed.as_ref().unwrap();

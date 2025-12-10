@@ -5,12 +5,14 @@
 //!
 //! Note: String data is stored separately in StringStore (not in ShardStore).
 //! Note: ZSet data structure is defined in zset.rs module.
+//! Note: List data structure is defined in list.rs module with COW support.
 
 use crate::memory::ShardId;
+use super::list::ListDataCow;
 use super::zset::ZSetData;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -78,8 +80,8 @@ pub struct ShardStore {
     /// Hash data (key -> (field -> value))
     pub hashes: HashMap<Vec<u8>, HashMap<Vec<u8>, Vec<u8>>>,
 
-    /// List data (key -> deque)
-    pub lists: HashMap<Vec<u8>, VecDeque<Vec<u8>>>,
+    /// List data (key -> ListDataCow with COW support)
+    pub lists: HashMap<Vec<u8>, ListDataCow>,
 
     /// Set data (key -> set)
     pub sets: HashMap<Vec<u8>, HashSet<Vec<u8>>>,
@@ -278,7 +280,7 @@ impl ShardStore {
             lists: self
                 .lists
                 .iter()
-                .map(|(k, l)| (k.clone(), l.iter().cloned().collect()))
+                .map(|(k, l)| (k.clone(), l.to_vec()))
                 .collect(),
             sets: self
                 .sets
@@ -315,7 +317,9 @@ impl ShardStore {
 
         // Restore lists
         for (k, items) in snapshot.lists {
-            self.lists.insert(k, items.into_iter().collect());
+            use std::collections::VecDeque;
+            let list_data: VecDeque<Vec<u8>> = items.into_iter().collect();
+            self.lists.insert(k, ListDataCow::from_data(list_data));
         }
 
         // Restore sets
@@ -646,9 +650,10 @@ mod tests {
         assert_eq!(store.key_type(b"hash1"), Some("hash"));
 
         // List
-        store
-            .lists
-            .insert(b"list1".to_vec(), VecDeque::from(vec![b"item1".to_vec()]));
+        use crate::hybrid::list::ListDataCow;
+        let mut list = ListDataCow::new();
+        list.push_back(b"item1".to_vec());
+        store.lists.insert(b"list1".to_vec(), list);
         assert_eq!(store.key_type(b"list1"), Some("list"));
 
         assert_eq!(store.key_count(), 2);

@@ -43,12 +43,14 @@
 //! - Slot maps to shard_id based on shard_count
 //! - Per-shard locking enables atomic snapshot generation
 
+mod list;
 mod sharded_rocksdb;
 mod shard_store;
 mod store;
 mod stream_store;
 mod zset;
 
+pub use list::{ListData, ListDataCow};
 pub use sharded_rocksdb::ShardedRocksDB;
 pub use shard_store::{
     ShardStore, ShardSnapshot, ShardedHybridStore, ShardStats, StringStore, StringSnapshot,
