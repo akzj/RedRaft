@@ -210,16 +210,31 @@ impl ListStoreCow {
     /// Push element to front of list (incremental COW: only records change)
     pub fn push_front(&mut self, key: Vec<u8>, value: Vec<u8>) {
         if self.is_cow_mode() {
-            // COW mode: get current list, modify, and record
-            let key_clone = key.clone();
-            let current = self.get_list(&key).unwrap_or_default();
-            let mut new_list = current;
-            new_list.push_front(value);
-            self.lists_updated.as_mut().unwrap().insert(key, new_list);
-            // Remove from removed cache if present
-            if let Some(ref mut removed) = self.lists_removed {
-                removed.remove(&key_clone);
+            let updated = self.lists_updated.as_mut().unwrap();
+            let removed = self.lists_removed.as_mut().unwrap();
+            
+            // Check if already in COW cache (already copied)
+            if let Some(list) = updated.get_mut(&key) {
+                // Already copied: directly modify (no additional copy!)
+                list.push_front(value);
+            } else {
+                // Not in COW cache: copy from base once, then modify
+                let mut list = {
+                    // Check if removed
+                    if removed.contains(&key) {
+                        VecDeque::new()
+                    } else {
+                        // Copy from base (first modification)
+                        let base = self.base.read();
+                        base.get(&key).cloned().unwrap_or_default()
+                    }
+                };
+                list.push_front(value);
+                updated.insert(key.clone(), list);
             }
+            
+            // Remove from removed cache if present
+            removed.remove(&key);
         } else {
             // No snapshot: directly modify base via write lock
             let mut base = self.base.write();
@@ -230,16 +245,31 @@ impl ListStoreCow {
     /// Push element to back of list (incremental COW: only records change)
     pub fn push_back(&mut self, key: Vec<u8>, value: Vec<u8>) {
         if self.is_cow_mode() {
-            // COW mode: get current list, modify, and record
-            let key_clone = key.clone();
-            let current = self.get_list(&key).unwrap_or_default();
-            let mut new_list = current;
-            new_list.push_back(value);
-            self.lists_updated.as_mut().unwrap().insert(key, new_list);
-            // Remove from removed cache if present
-            if let Some(ref mut removed) = self.lists_removed {
-                removed.remove(&key_clone);
+            let updated = self.lists_updated.as_mut().unwrap();
+            let removed = self.lists_removed.as_mut().unwrap();
+            
+            // Check if already in COW cache (already copied)
+            if let Some(list) = updated.get_mut(&key) {
+                // Already copied: directly modify (no additional copy!)
+                list.push_back(value);
+            } else {
+                // Not in COW cache: copy from base once, then modify
+                let mut list = {
+                    // Check if removed
+                    if removed.contains(&key) {
+                        VecDeque::new()
+                    } else {
+                        // Copy from base (first modification)
+                        let base = self.base.read();
+                        base.get(&key).cloned().unwrap_or_default()
+                    }
+                };
+                list.push_back(value);
+                updated.insert(key.clone(), list);
             }
+            
+            // Remove from removed cache if present
+            removed.remove(&key);
         } else {
             // No snapshot: directly modify base via write lock
             let mut base = self.base.write();
@@ -250,21 +280,39 @@ impl ListStoreCow {
     /// Pop element from front of list (incremental COW: only records change)
     pub fn pop_front(&mut self, key: &[u8]) -> Option<Vec<u8>> {
         if self.is_cow_mode() {
-            // COW mode: get current list, modify, and record
-            let current = self.get_list(key)?;
-            let mut new_list = current;
-            let result = new_list.pop_front();
-            if new_list.is_empty() {
-                // If list becomes empty, remove it
-                self.lists_removed.as_mut().unwrap().insert(key.to_vec());
-                self.lists_updated.as_mut().unwrap().remove(key);
+            let updated = self.lists_updated.as_mut().unwrap();
+            let removed = self.lists_removed.as_mut().unwrap();
+            
+            // Check if already in COW cache (already copied)
+            if let Some(list) = updated.get_mut(key) {
+                // Already copied: directly modify (no additional copy!)
+                let result = list.pop_front();
+                if list.is_empty() {
+                    // If list becomes empty, remove it
+                    removed.insert(key.to_vec());
+                    updated.remove(key);
+                }
+                result
             } else {
-                self.lists_updated
-                    .as_mut()
-                    .unwrap()
-                    .insert(key.to_vec(), new_list);
+                // Not in COW cache: copy from base once, then modify
+                let mut list = {
+                    // Check if removed
+                    if removed.contains(key) {
+                        return None;
+                    }
+                    // Copy from base (first modification)
+                    let base = self.base.read();
+                    base.get(key)?.clone()
+                };
+                let result = list.pop_front();
+                if list.is_empty() {
+                    // If list becomes empty, remove it
+                    removed.insert(key.to_vec());
+                } else {
+                    updated.insert(key.to_vec(), list);
+                }
+                result
             }
-            result
         } else {
             // No snapshot: directly modify base via write lock
             let mut base = self.base.write();
@@ -275,21 +323,39 @@ impl ListStoreCow {
     /// Pop element from back of list (incremental COW: only records change)
     pub fn pop_back(&mut self, key: &[u8]) -> Option<Vec<u8>> {
         if self.is_cow_mode() {
-            // COW mode: get current list, modify, and record
-            let current = self.get_list(key)?;
-            let mut new_list = current;
-            let result = new_list.pop_back();
-            if new_list.is_empty() {
-                // If list becomes empty, remove it
-                self.lists_removed.as_mut().unwrap().insert(key.to_vec());
-                self.lists_updated.as_mut().unwrap().remove(key);
+            let updated = self.lists_updated.as_mut().unwrap();
+            let removed = self.lists_removed.as_mut().unwrap();
+            
+            // Check if already in COW cache (already copied)
+            if let Some(list) = updated.get_mut(key) {
+                // Already copied: directly modify (no additional copy!)
+                let result = list.pop_back();
+                if list.is_empty() {
+                    // If list becomes empty, remove it
+                    removed.insert(key.to_vec());
+                    updated.remove(key);
+                }
+                result
             } else {
-                self.lists_updated
-                    .as_mut()
-                    .unwrap()
-                    .insert(key.to_vec(), new_list);
+                // Not in COW cache: copy from base once, then modify
+                let mut list = {
+                    // Check if removed
+                    if removed.contains(key) {
+                        return None;
+                    }
+                    // Copy from base (first modification)
+                    let base = self.base.read();
+                    base.get(key)?.clone()
+                };
+                let result = list.pop_back();
+                if list.is_empty() {
+                    // If list becomes empty, remove it
+                    removed.insert(key.to_vec());
+                } else {
+                    updated.insert(key.to_vec(), list);
+                }
+                result
             }
-            result
         } else {
             // No snapshot: directly modify base via write lock
             let mut base = self.base.write();
@@ -324,24 +390,40 @@ impl ListStoreCow {
     /// Set element at index (incremental COW: only records change)
     pub fn set(&mut self, key: Vec<u8>, index: usize, value: Vec<u8>) -> bool {
         if self.is_cow_mode() {
-            // COW mode: get current list, modify, and record
-            if let Some(current) = self.get_list(&key) {
-                if index >= current.len() {
+            let updated = self.lists_updated.as_mut().unwrap();
+            let removed = self.lists_removed.as_mut().unwrap();
+            
+            // Check if already in COW cache (already copied)
+            if let Some(list) = updated.get_mut(&key) {
+                // Already copied: directly modify (no additional copy!)
+                if index >= list.len() {
                     return false;
                 }
-                let mut new_list = current;
-                new_list[index] = value;
-                self.lists_updated
-                    .as_mut()
-                    .unwrap()
-                    .insert(key.clone(), new_list);
-                // Remove from removed cache if present
-                if let Some(ref mut removed) = self.lists_removed {
-                    removed.remove(&key);
-                }
+                list[index] = value;
                 true
             } else {
-                false
+                // Not in COW cache: copy from base once, then modify
+                // Check if removed
+                if removed.contains(&key) {
+                    return false;
+                }
+                // Copy from base (first modification)
+                let mut list = {
+                    let base = self.base.read();
+                    if let Some(list) = base.get(&key).cloned() {
+                        list
+                    } else {
+                        return false;
+                    }
+                };
+                if index >= list.len() {
+                    return false;
+                }
+                list[index] = value;
+                updated.insert(key.clone(), list);
+                // Remove from removed cache if present
+                removed.remove(&key);
+                true
             }
         } else {
             // No snapshot: directly modify base via write lock
@@ -482,6 +564,7 @@ impl ListStoreCow {
     pub fn is_in_cow_mode(&self) -> bool {
         self.is_cow_mode()
     }
+
 }
 
 impl Default for ListStoreCow {
