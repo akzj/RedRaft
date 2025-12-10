@@ -701,7 +701,7 @@ impl ZSetStoreCow {
                 if zset_cow.is_in_cow_mode() {
                     zset_cow.merge_cow();
                 }
-                
+
                 // Now zset_cow's base has the merged data
                 // We need to extract the data from zset_cow's base and create a new ZSetDataCow
                 // Since we can't directly access the internal data, we'll replace the base entry
@@ -716,7 +716,7 @@ impl ZSetStoreCow {
                         scores_removed: None,
                     }
                 };
-                
+
                 // Replace or insert the merged ZSetDataCow
                 base.insert(key, merged_zset);
             }
@@ -805,10 +805,10 @@ impl ZSetStoreCow {
                 }
             };
             updated.insert(key.to_vec(), zset_cow);
-            
+
             // Remove from removed cache if present
             removed.remove(key);
-            
+
             // Return mutable reference to the newly inserted ZSetDataCow
             updated.get_mut(key)
         } else {
@@ -1287,5 +1287,311 @@ mod tests {
         assert_eq!(cow.get_score(b"b"), None);
         assert_eq!(cow.get_score(b"c"), Some(30.0));
         assert_eq!(cow.get_score(b"d"), Some(40.0));
+    }
+
+    // ========== ZSetStoreCow Tests ==========
+
+    #[test]
+    fn test_zset_store_basic_operations() {
+        let mut store = ZSetStoreCow::new();
+
+        // Add members to ZSet
+        store.add(b"zset1".to_vec(), b"member1".to_vec(), 10.0);
+        store.add(b"zset1".to_vec(), b"member2".to_vec(), 20.0);
+        store.add(b"zset1".to_vec(), b"member3".to_vec(), 15.0);
+
+        assert_eq!(store.len(b"zset1"), Some(3));
+        assert!(store.contains(b"zset1", b"member1"));
+        assert_eq!(store.get_score(b"zset1", b"member1"), Some(10.0));
+
+        // Update score
+        store.add(b"zset1".to_vec(), b"member1".to_vec(), 25.0);
+        assert_eq!(store.get_score(b"zset1", b"member1"), Some(25.0));
+
+        // Remove member
+        assert!(store.remove(b"zset1", b"member2"));
+        assert!(!store.contains(b"zset1", b"member2"));
+        assert_eq!(store.len(b"zset1"), Some(2));
+    }
+
+    #[test]
+    fn test_zset_store_snapshot_no_copy() {
+        let mut store = ZSetStoreCow::new();
+        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
+        store.add(b"zset1".to_vec(), b"b".to_vec(), 20.0);
+        store.add(b"zset1".to_vec(), b"c".to_vec(), 30.0);
+
+        // Before snapshot: ref count should be 1
+        assert_eq!(store.ref_count(), 1);
+
+        // Create snapshot (only increases ref count, no copy)
+        let snapshot = store.make_snapshot();
+
+        // After snapshot: ref count should be 2
+        assert_eq!(store.ref_count(), 2);
+        assert_eq!(Arc::strong_count(&snapshot), 2);
+
+        // Snapshot should have same data
+        let snapshot_data = snapshot.read();
+        assert_eq!(snapshot_data.len(), 1);
+        assert_eq!(
+            snapshot_data
+                .get(b"zset1".as_slice())
+                .unwrap()
+                .get_score(b"a"),
+            Some(10.0)
+        );
+        drop(snapshot_data);
+
+        // Original should still work
+        assert_eq!(store.len(b"zset1"), Some(3));
+        assert_eq!(store.get_score(b"zset1", b"a"), Some(10.0));
+    }
+
+    #[test]
+    fn test_zset_store_write_after_snapshot_no_copy() {
+        let mut store = ZSetStoreCow::new();
+        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
+        store.add(b"zset1".to_vec(), b"b".to_vec(), 20.0);
+
+        // Create snapshot
+        let snapshot = store.make_snapshot();
+        assert_eq!(store.ref_count(), 2);
+        assert!(store.is_in_cow_mode());
+
+        // Write operation records change in COW cache (NO data copy)
+        store.add(b"zset1".to_vec(), b"c".to_vec(), 30.0);
+        assert_eq!(store.ref_count(), 2); // Ref count unchanged (no copy!)
+        assert_eq!(Arc::strong_count(&snapshot), 2);
+        assert!(store.is_in_cow_mode());
+
+        // Original should have new data (via COW cache)
+        assert_eq!(store.len(b"zset1"), Some(3));
+        assert_eq!(store.get_score(b"zset1", b"c"), Some(30.0));
+
+        // Snapshot should have old data (unchanged, from base)
+        let snapshot_data = snapshot.read();
+        let base_zset = snapshot_data.get(b"zset1".as_slice()).unwrap();
+        assert_eq!(base_zset.len(), 2);
+        assert_eq!(base_zset.get_score(b"c"), None);
+        drop(snapshot_data);
+    }
+
+    #[test]
+    fn test_zset_store_write_without_snapshot_no_copy() {
+        let mut store = ZSetStoreCow::new();
+        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
+
+        // No snapshot, ref count is 1
+        assert_eq!(store.ref_count(), 1);
+
+        // Write operation should NOT copy (ref count stays 1)
+        store.add(b"zset1".to_vec(), b"b".to_vec(), 20.0);
+        assert_eq!(store.ref_count(), 1); // No copy happened
+
+        // Another write
+        store.add(b"zset1".to_vec(), b"c".to_vec(), 30.0);
+        assert_eq!(store.ref_count(), 1); // Still no copy
+    }
+
+    #[test]
+    fn test_zset_store_merge_applies_only_changes() {
+        let mut store = ZSetStoreCow::new();
+        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
+        store.add(b"zset1".to_vec(), b"b".to_vec(), 20.0);
+        store.add(b"zset1".to_vec(), b"c".to_vec(), 30.0);
+
+        // Create snapshot
+        let snapshot = store.make_snapshot();
+        assert_eq!(store.ref_count(), 2);
+
+        // Make changes (only 3 operations, not full copy)
+        store.add(b"zset1".to_vec(), b"d".to_vec(), 40.0); // Add new
+        store.add(b"zset1".to_vec(), b"a".to_vec(), 15.0); // Update existing
+        store.remove(b"zset1", b"b"); // Remove existing
+
+        // Before merge: changes are in COW cache
+        assert!(store.is_in_cow_mode());
+        assert_eq!(store.len(b"zset1"), Some(3)); // a(15), c(30), d(40)
+        assert_eq!(store.get_score(b"zset1", b"a"), Some(15.0));
+        assert_eq!(store.get_score(b"zset1", b"b"), None);
+        assert_eq!(store.get_score(b"zset1", b"d"), Some(40.0));
+
+        // Snapshot still has old data
+        let snapshot_data = snapshot.read();
+        let base_zset = snapshot_data.get(b"zset1".as_slice()).unwrap();
+        assert_eq!(base_zset.len(), 3);
+        assert_eq!(base_zset.get_score(b"a"), Some(10.0));
+        assert_eq!(base_zset.get_score(b"b"), Some(20.0));
+        drop(snapshot_data);
+
+        // Merge: applies only changes to base (O(M) where M=3, not O(N))
+        store.merge_cow();
+        assert!(!store.is_in_cow_mode());
+        // Ref count is still 2 because snapshot still exists (this is correct)
+        assert_eq!(store.ref_count(), 2);
+
+        // After merge: changes are in base
+        assert_eq!(store.len(b"zset1"), Some(3));
+        assert_eq!(store.get_score(b"zset1", b"a"), Some(15.0));
+        assert_eq!(store.get_score(b"zset1", b"b"), None);
+        assert_eq!(store.get_score(b"zset1", b"c"), Some(30.0));
+        assert_eq!(store.get_score(b"zset1", b"d"), Some(40.0));
+    }
+
+    #[test]
+    fn test_zset_store_multiple_keys() {
+        let mut store = ZSetStoreCow::new();
+        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
+        store.add(b"zset2".to_vec(), b"x".to_vec(), 20.0);
+        store.add(b"zset2".to_vec(), b"y".to_vec(), 30.0);
+
+        assert_eq!(store.key_count(), 2);
+        assert_eq!(store.len(b"zset1"), Some(1));
+        assert_eq!(store.len(b"zset2"), Some(2));
+
+        // Create snapshot
+        let _snapshot = store.make_snapshot();
+
+        // Modify only zset1
+        store.add(b"zset1".to_vec(), b"b".to_vec(), 25.0);
+
+        // zset1 should be updated
+        assert_eq!(store.len(b"zset1"), Some(2));
+        // zset2 should be unchanged (from base)
+        assert_eq!(store.len(b"zset2"), Some(2));
+    }
+
+    #[test]
+    fn test_zset_store_updated_overrides_removed() {
+        let mut store = ZSetStoreCow::new();
+        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
+        store.add(b"zset1".to_vec(), b"b".to_vec(), 20.0);
+
+        // Create snapshot
+        let _snapshot = store.make_snapshot();
+
+        // Remove zset1 (adds to removed cache)
+        assert!(store.clear(b"zset1"));
+        assert!(!store.contains_key(b"zset1"));
+        assert_eq!(store.len(b"zset1"), None);
+
+        // Re-add zset1 (adds to updated cache, should override removed)
+        store.add(b"zset1".to_vec(), b"c".to_vec(), 30.0);
+        assert!(store.contains_key(b"zset1")); // Should exist (updated overrides removed)
+        assert_eq!(store.len(b"zset1"), Some(1));
+        assert_eq!(store.get_score(b"zset1", b"c"), Some(30.0));
+
+        // Merge: updated should take precedence
+        store.merge_cow();
+        assert!(store.contains_key(b"zset1")); // Should still exist after merge
+        assert_eq!(store.len(b"zset1"), Some(1));
+        assert_eq!(store.get_score(b"zset1", b"c"), Some(30.0));
+    }
+
+    #[test]
+    fn test_zset_store_merge_updated_overrides_removed() {
+        let mut store = ZSetStoreCow::new();
+        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
+        store.add(b"zset2".to_vec(), b"x".to_vec(), 20.0);
+
+        // Create snapshot
+        let _snapshot = store.make_snapshot();
+
+        // Remove zset1
+        assert!(store.clear(b"zset1"));
+        assert!(!store.contains_key(b"zset1"));
+
+        // Re-add zset1 (should override removed)
+        store.add(b"zset1".to_vec(), b"b".to_vec(), 25.0);
+        assert!(store.contains_key(b"zset1"));
+
+        // Merge: updated should take precedence over removed
+        store.merge_cow();
+        assert!(store.contains_key(b"zset1")); // Should exist (updated overrides removed)
+        assert_eq!(store.len(b"zset1"), Some(1));
+        assert_eq!(store.get_score(b"zset1", b"b"), Some(25.0));
+
+        // zset2 should still exist
+        assert!(store.contains_key(b"zset2"));
+        assert_eq!(store.len(b"zset2"), Some(1));
+    }
+
+    #[test]
+    fn test_zset_store_keys() {
+        let mut store = ZSetStoreCow::new();
+        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
+        store.add(b"zset2".to_vec(), b"x".to_vec(), 20.0);
+        store.add(b"zset3".to_vec(), b"y".to_vec(), 30.0);
+
+        let keys = store.keys();
+        assert_eq!(keys.len(), 3);
+        assert!(keys.contains(&b"zset1".to_vec()));
+        assert!(keys.contains(&b"zset2".to_vec()));
+        assert!(keys.contains(&b"zset3".to_vec()));
+
+        // Create snapshot and remove zset2
+        let _snapshot = store.make_snapshot();
+        assert!(store.clear(b"zset2"));
+
+        // Keys should exclude removed zset2
+        let keys = store.keys();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&b"zset1".to_vec()));
+        assert!(!keys.contains(&b"zset2".to_vec()));
+        assert!(keys.contains(&b"zset3".to_vec()));
+    }
+
+    #[test]
+    fn test_zset_store_clear() {
+        let mut store = ZSetStoreCow::new();
+        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
+        store.add(b"zset1".to_vec(), b"b".to_vec(), 20.0);
+
+        // Clear zset1
+        assert!(store.clear(b"zset1"));
+        assert!(!store.contains_key(b"zset1"));
+        assert_eq!(store.len(b"zset1"), None);
+        assert!(!store.contains(b"zset1", b"a"));
+
+        // Clear non-existent zset
+        assert!(!store.clear(b"nonexistent"));
+    }
+
+    #[test]
+    fn test_zset_store_from_data() {
+        let mut data = HashMap::new();
+        let mut zset1 = ZSetDataCow::new();
+        zset1.add(b"a".to_vec(), 10.0);
+        zset1.add(b"b".to_vec(), 20.0);
+        data.insert(b"zset1".to_vec(), zset1);
+
+        let store = ZSetStoreCow::from_data(data);
+        assert_eq!(store.key_count(), 1);
+        assert_eq!(store.len(b"zset1"), Some(2));
+        assert_eq!(store.get_score(b"zset1", b"a"), Some(10.0));
+        assert_eq!(store.get_score(b"zset1", b"b"), Some(20.0));
+    }
+
+    #[test]
+    fn test_zset_store_multiple_writes_same_zset() {
+        let mut store = ZSetStoreCow::new();
+        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
+
+        // Create snapshot
+        let _snapshot = store.make_snapshot();
+
+        // Multiple writes to same zset (should reuse COW instance)
+        store.add(b"zset1".to_vec(), b"b".to_vec(), 20.0);
+        store.add(b"zset1".to_vec(), b"c".to_vec(), 30.0);
+        store.add(b"zset1".to_vec(), b"a".to_vec(), 15.0); // Update
+
+        assert_eq!(store.len(b"zset1"), Some(3));
+        assert_eq!(store.get_score(b"zset1", b"a"), Some(15.0));
+        assert_eq!(store.get_score(b"zset1", b"b"), Some(20.0));
+        assert_eq!(store.get_score(b"zset1", b"c"), Some(30.0));
+
+        // Ref count should still be 2 (no full copy!)
+        assert_eq!(store.ref_count(), 2);
     }
 }
