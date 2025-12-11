@@ -21,10 +21,12 @@ use bytes::Bytes;
 use crate::memory::store::{DataCow, MemStoreCow};
 use crate::traits::{StoreError, StoreResult};
 
+use serde::{Deserialize, Serialize};
+
 /// Set data structure
 ///
 /// A set maintains a collection of unique members.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetData {
     pub members: HashSet<Bytes>,
 }
@@ -416,6 +418,11 @@ impl SetDataCow {
     /// Check if in COW mode (for debugging)
     pub fn is_in_cow_mode(&self) -> bool {
         self.is_cow_mode()
+    }
+
+    /// Get base data for serialization (read lock)
+    pub fn get_base_for_serialization(&self) -> parking_lot::RwLockReadGuard<'_, SetData> {
+        self.base.read()
     }
 }
 

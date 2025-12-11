@@ -21,4 +21,4 @@ pub use set::{SetData, SetDataCow};
 pub use zset::{OrderedFloat, ZSetData, ZSetDataCow};
 
 pub use pubsub::PubSubStore;
-pub use store::{ShardMetadata, ShardStore};
+pub use store::{DataCow, MemStoreCow, ShardMetadata, ShardStore};

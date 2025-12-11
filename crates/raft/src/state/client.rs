@@ -71,7 +71,8 @@ impl RaftState {
                             &self.id,
                             request_id,
                             Err(ClientError::Conflict(anyhow::anyhow!(
-                                "Request already in progress at index {}", index
+                                "Request already in progress at index {}",
+                                index
                             ))),
                         )
                         .await,
@@ -81,7 +82,7 @@ impl RaftState {
                 .await;
             return;
         }
-        
+
         // Clean up expired client requests
         self.cleanup_expired_client_requests().await;
 
@@ -143,7 +144,8 @@ impl RaftState {
         // Record mapping between client request and log index
         self.client_requests.insert(request_id, index);
         self.client_requests_revert.insert(index, request_id);
-        self.client_request_timestamps.insert(request_id, Instant::now());
+        self.client_request_timestamps
+            .insert(request_id, Instant::now());
 
         // Immediately sync logs
         info!(
@@ -404,7 +406,7 @@ impl RaftState {
                     None,
                 )
                 .await;
-            
+
             // Clean up all related mappings
             self.client_requests.remove(&req_id);
             self.client_requests_revert.remove(&log_index);
@@ -429,20 +431,16 @@ impl RaftState {
             if let Some(index) = self.client_requests.remove(&req_id) {
                 self.client_requests_revert.remove(&index);
                 self.client_request_timestamps.remove(&req_id);
-                
+
                 warn!(
                     "Node {} cleaning up expired client request {} at index {}",
                     self.id, req_id, index
                 );
-                
+
                 self.error_handler
                     .handle_void(
                         self.callbacks
-                            .client_response(
-                                &self.id,
-                                req_id,
-                                Err(ClientError::Timeout),
-                            )
+                            .client_response(&self.id, req_id, Err(ClientError::Timeout))
                             .await,
                         "client_response",
                         None,
@@ -452,4 +450,3 @@ impl RaftState {
         }
     }
 }
-

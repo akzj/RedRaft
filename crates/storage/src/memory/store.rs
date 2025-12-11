@@ -145,6 +145,35 @@ impl DataCow {
             DataCow::List(_) | DataCow::Bitmap(_) => {}
         }
     }
+
+    /// Serialize base data for snapshot
+    /// 
+    /// Extracts base data from COW structure and serializes it
+    pub fn serialize_base(&self) -> Result<Vec<u8>, String> {
+        use bincode::serde::encode_to_vec;
+        use bincode::config::standard;
+        
+        match self {
+            DataCow::List(list) => {
+                encode_to_vec(list, standard())
+                    .map_err(|e| format!("Failed to serialize ListData: {}", e))
+            }
+            DataCow::Set(set_cow) => {
+                let base = set_cow.get_base_for_serialization();
+                encode_to_vec(&*base, standard())
+                    .map_err(|e| format!("Failed to serialize SetData: {}", e))
+            }
+            DataCow::ZSet(zset_cow) => {
+                let base = zset_cow.get_base_for_serialization();
+                encode_to_vec(&*base, standard())
+                    .map_err(|e| format!("Failed to serialize ZSetData: {}", e))
+            }
+            DataCow::Bitmap(bitmap) => {
+                encode_to_vec(bitmap, standard())
+                    .map_err(|e| format!("Failed to serialize BitmapData: {}", e))
+            }
+        }
+    }
 }
 
 /// Unified Store with Incremental Copy-on-Write (COW) support

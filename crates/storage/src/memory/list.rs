@@ -24,6 +24,8 @@ use crate::memory::store::{DataCow, MemStoreCow};
 use crate::traits::{StoreError, StoreResult};
 
 /// List data structure (VecDeque for O(1) head/tail operations)
+/// 
+/// Note: VecDeque<Bytes> is serializable because Bytes implements Serialize/Deserialize
 pub type ListData = VecDeque<Bytes>;
 
 impl MemStoreCow {

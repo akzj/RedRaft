@@ -21,12 +21,14 @@ use std::{
 
 use bytes::Bytes;
 
+use serde::{Deserialize, Serialize};
+
 /// ZSet data structure
 ///
 /// A sorted set maintains:
 /// - member -> score mapping (for O(1) score lookup)
 /// - score -> members mapping (for range queries)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZSetData {
     pub scores: HashMap<Bytes, f64>,
     pub by_score: BTreeMap<OrderedFloat, HashSet<Bytes>>,
@@ -569,6 +571,11 @@ impl ZSetDataCow {
     pub fn is_in_cow_mode(&self) -> bool {
         self.is_cow_mode()
     }
+
+    /// Get base data for serialization (read lock)
+    pub fn get_base_for_serialization(&self) -> parking_lot::RwLockReadGuard<'_, ZSetData> {
+        self.base.read()
+    }
 }
 
 impl Default for ZSetDataCow {
@@ -581,7 +588,7 @@ impl Default for ZSetDataCow {
 ///
 /// Wraps f64 to make it usable as a BTreeMap key.
 /// Handles NaN and infinity by treating them as equal.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct OrderedFloat(pub f64);
 
 impl PartialEq for OrderedFloat {
