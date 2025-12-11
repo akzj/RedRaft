@@ -1880,6 +1880,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
+ "bytes",
  "ordered-float",
  "parking_lot",
  "rand",

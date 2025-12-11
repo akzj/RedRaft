@@ -3,7 +3,7 @@
 //! Provides snapshot creation and restoration for individual shards.
 
 use crate::rocksdb::ShardedRocksDB;
-use crate::memory::ShardId;
+use crate::shard::ShardId;
 use rocksdb::WriteBatch;
 
 impl ShardedRocksDB {

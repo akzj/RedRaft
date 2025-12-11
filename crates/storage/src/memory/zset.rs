@@ -14,21 +14,22 @@
 //! without implementing Redis API traits.
 
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
+
+use bytes::Bytes;
 
 /// ZSet data structure
 ///
 /// A sorted set maintains:
 /// - member -> score mapping (for O(1) score lookup)
 /// - score -> members mapping (for range queries)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ZSetData {
-    pub scores: HashMap<Vec<u8>, f64>,
-    pub by_score: BTreeMap<OrderedFloat, HashSet<Vec<u8>>>,
+    pub scores: HashMap<Bytes, f64>,
+    pub by_score: BTreeMap<OrderedFloat, HashSet<Bytes>>,
 }
 
 impl ZSetData {
@@ -41,7 +42,7 @@ impl ZSetData {
     }
 
     /// Add or update a member with score
-    pub fn add(&mut self, member: Vec<u8>, score: f64) {
+    pub fn add(&mut self, member: Bytes, score: f64) {
         // Remove old score if member exists
         if let Some(old_score) = self.scores.remove(&member) {
             let old_key = OrderedFloat(old_score);
@@ -54,11 +55,12 @@ impl ZSetData {
         }
 
         // Add new score
-        self.scores.insert(member.clone(), score);
+        let member_clone = member.clone();
+        self.scores.insert(member_clone.clone(), score);
         self.by_score
             .entry(OrderedFloat(score))
             .or_default()
-            .insert(member);
+            .insert(member_clone);
     }
 
     /// Remove a member
@@ -104,12 +106,12 @@ impl ZSetData {
     }
 
     /// Get all members
-    pub fn members(&self) -> Vec<Vec<u8>> {
+    pub fn members(&self) -> Vec<Bytes> {
         self.scores.keys().cloned().collect()
     }
 
     /// Get members in score range [min, max] (inclusive)
-    pub fn range_by_score(&self, min: f64, max: f64) -> Vec<(Vec<u8>, f64)> {
+    pub fn range_by_score(&self, min: f64, max: f64) -> Vec<(Bytes, f64)> {
         let mut result = Vec::new();
         let min_key = OrderedFloat(min);
         let max_key = OrderedFloat(max);
@@ -125,7 +127,7 @@ impl ZSetData {
     }
 
     /// Get members in rank range [start, end] (0-based)
-    pub fn range_by_rank(&self, start: usize, end: usize) -> Vec<(Vec<u8>, f64)> {
+    pub fn range_by_rank(&self, start: usize, end: usize) -> Vec<(Bytes, f64)> {
         let mut result = Vec::new();
         let mut rank = 0;
 
@@ -156,7 +158,7 @@ impl ZSetData {
                 rank += members.len();
             } else if *key == score_key {
                 for m in members {
-                    if m == member {
+                    if m.as_ref() == member {
                         return Some(rank);
                     }
                     rank += 1;
@@ -179,7 +181,7 @@ impl ZSetData {
             } else if *key == score_key {
                 let mut same_score_before = 0;
                 for m in members {
-                    if m.as_slice() < member {
+                    if m.as_ref() < member {
                         same_score_before += 1;
                     }
                 }
@@ -212,10 +214,10 @@ pub struct ZSetDataCow {
     base: Arc<RwLock<ZSetData>>,
 
     /// COW cache: Updated/added members (only changed items)
-    scores_updated: Option<HashMap<Vec<u8>, f64>>,
+    scores_updated: Option<HashMap<Bytes, f64>>,
 
     /// COW cache: Removed members with their old scores (for cleanup)
-    scores_removed: Option<HashMap<Vec<u8>, f64>>,
+    scores_removed: Option<HashMap<Bytes, f64>>,
 }
 
 impl ZSetDataCow {
@@ -290,8 +292,8 @@ impl ZSetDataCow {
         if let Some(ref removed) = removed {
             for member in removed.keys() {
                 // Only remove if not being updated
-                if updated.as_ref().map_or(true, |u| !u.contains_key(member)) {
-                    base.remove(member);
+                if updated.as_ref().map_or(true, |u| !u.iter().any(|(m, _)| m.as_ref() == member.as_ref())) {
+                    base.remove(member.as_ref());
                 }
             }
         }
@@ -307,7 +309,7 @@ impl ZSetDataCow {
     }
 
     /// Add or update a member with score (incremental COW: only records change)
-    pub fn add(&mut self, member: Vec<u8>, score: f64) {
+    pub fn add(&mut self, member: Bytes, score: f64) {
         if self.is_cow_mode() {
             // COW mode: record change in cache, don't modify base
             let updated = self.scores_updated.as_mut().unwrap();
@@ -316,17 +318,20 @@ impl ZSetDataCow {
             // Check if member exists in base (read lock)
             let old_score_opt = {
                 let base = self.base.read();
-                base.scores.get(&member).copied()
+                base.scores.get(member.as_ref()).copied()
             }; // Read lock released here
 
             if let Some(_old_score) = old_score_opt {
                 // Member exists in base, we're updating it
                 // Don't add to removed cache - it's still there, just with a new score
                 // Remove from removed cache if it was previously removed (re-adding)
-                removed.remove(&member);
-            } else if removed.contains_key(&member) {
+                removed.remove(member.as_ref());
+            } else if removed.iter().any(|(m, _)| m.as_ref() == member.as_ref()) {
                 // Member was previously removed, we're re-adding it
-                removed.remove(&member);
+                // Find and remove the matching member
+                if let Some(member_to_remove) = removed.iter().find(|(m, _)| m.as_ref() == member.as_ref()).map(|(m, _)| m.clone()) {
+                    removed.remove(&member_to_remove);
+                }
             }
 
             // Record update (overwrites if already in updated)
@@ -353,13 +358,17 @@ impl ZSetDataCow {
 
             if let Some(score) = score_opt {
                 // Remove from updated cache if present
-                updated.remove(member);
+                if let Some(member_to_remove) = updated.iter().find(|(m, _)| m.as_ref() == member).map(|(m, _)| m.clone()) {
+                    updated.remove(&member_to_remove);
+                }
                 // Record removal
-                removed.insert(member.to_vec(), score);
+                removed.insert(Bytes::copy_from_slice(member), score);
                 true
-            } else if updated.contains_key(member) {
+            } else if updated.iter().any(|(m, _)| m.as_ref() == member) {
                 // Member was added in COW cache, just remove it
-                updated.remove(member);
+                if let Some(member_to_remove) = updated.iter().find(|(m, _)| m.as_ref() == member).map(|(m, _)| m.clone()) {
+                    updated.remove(&member_to_remove);
+                }
                 true
             } else {
                 false
@@ -376,14 +385,14 @@ impl ZSetDataCow {
         if self.is_cow_mode() {
             // Check COW cache first (updated takes precedence over removed)
             if let Some(ref updated) = self.scores_updated {
-                if let Some(&score) = updated.get(member) {
+                if let Some((_, &score)) = updated.iter().find(|(m, _)| m.as_ref() == member) {
                     return Some(score);
                 }
             }
 
             // Check if removed (only if not in updated)
             if let Some(ref removed) = self.scores_removed {
-                if removed.contains_key(member) {
+                if removed.iter().any(|(m, _)| m.as_ref() == member) {
                     return None;
                 }
             }
@@ -457,14 +466,14 @@ impl ZSetDataCow {
     }
 
     /// Get all members (merges COW cache + base)
-    pub fn members(&self) -> Vec<Vec<u8>> {
+    pub fn members(&self) -> Vec<Bytes> {
         let mut members = HashSet::new();
 
         // Add base members (excluding removed) - read lock
         let base = self.base.read();
         if let Some(ref removed) = self.scores_removed {
             for member in base.scores.keys() {
-                if !removed.contains_key(member) {
+                if !removed.iter().any(|(m, _)| m.as_ref() == member.as_ref()) {
                     members.insert(member.clone());
                 }
             }
@@ -486,7 +495,7 @@ impl ZSetDataCow {
     }
 
     /// Get members in score range (merges COW cache + base)
-    pub fn range_by_score(&self, min: f64, max: f64) -> Vec<(Vec<u8>, f64)> {
+    pub fn range_by_score(&self, min: f64, max: f64) -> Vec<(Bytes, f64)> {
         let mut result = Vec::new();
         let removed = self.scores_removed.as_ref();
 
@@ -494,7 +503,7 @@ impl ZSetDataCow {
         let base = self.base.read();
         for (member, score) in base.range_by_score(min, max) {
             if let Some(ref removed) = removed {
-                if !removed.contains_key(&member) {
+                if !removed.iter().any(|(m, _)| m.as_ref() == member.as_ref()) {
                     result.push((member, score));
                 }
             } else {
@@ -518,7 +527,7 @@ impl ZSetDataCow {
     }
 
     /// Get members in rank range (simplified, may not be exact due to COW)
-    pub fn range_by_rank(&self, start: usize, end: usize) -> Vec<(Vec<u8>, f64)> {
+    pub fn range_by_rank(&self, start: usize, end: usize) -> Vec<(Bytes, f64)> {
         // Get all members and sort
         let mut all = self.range_by_score(f64::NEG_INFINITY, f64::INFINITY);
         all.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -538,7 +547,7 @@ impl ZSetDataCow {
         let mut sorted = all;
         sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        sorted.iter().position(|(m, _)| m == member)
+        sorted.iter().position(|(m, _)| m.as_ref() == member)
     }
 
     /// Get reverse rank of a member
@@ -548,7 +557,7 @@ impl ZSetDataCow {
         let mut sorted = all;
         sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        sorted.iter().position(|(m, _)| m == member)
+        sorted.iter().position(|(m, _)| m.as_ref() == member)
     }
 
     /// Get reference count (for debugging)
@@ -572,7 +581,7 @@ impl Default for ZSetDataCow {
 ///
 /// Wraps f64 to make it usable as a BTreeMap key.
 /// Handles NaN and infinity by treating them as equal.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 pub struct OrderedFloat(pub f64);
 
 impl PartialEq for OrderedFloat {
@@ -861,7 +870,7 @@ impl ZSetStoreCow {
     }
 
     /// Add or update a member with score in a ZSet (incremental COW: only records change)
-    pub fn add(&mut self, key: Vec<u8>, member: Vec<u8>, score: f64) {
+    pub fn add(&mut self, key: Vec<u8>, member: Bytes, score: f64) {
         if let Some(zset) = self.get_zset_mut(&key) {
             zset.add(member, score);
         } else if !self.is_cow_mode() {
@@ -1064,16 +1073,16 @@ mod tests {
         let mut zset = ZSetData::new();
 
         // Add members
-        zset.add(b"member1".to_vec(), 10.0);
-        zset.add(b"member2".to_vec(), 20.0);
-        zset.add(b"member3".to_vec(), 15.0);
+        zset.add(Bytes::from("member1"), 10.0);
+        zset.add(Bytes::from("member2"), 20.0);
+        zset.add(Bytes::from("member3"), 15.0);
 
         assert_eq!(zset.len(), 3);
         assert!(zset.contains(b"member1"));
         assert_eq!(zset.get_score(b"member1"), Some(10.0));
 
         // Update score
-        zset.add(b"member1".to_vec(), 25.0);
+        zset.add(Bytes::from("member1"), 25.0);
         assert_eq!(zset.get_score(b"member1"), Some(25.0));
 
         // Remove member
@@ -1085,16 +1094,16 @@ mod tests {
     #[test]
     fn test_zset_range_queries() {
         let mut zset = ZSetData::new();
-        zset.add(b"a".to_vec(), 10.0);
-        zset.add(b"b".to_vec(), 20.0);
-        zset.add(b"c".to_vec(), 30.0);
-        zset.add(b"d".to_vec(), 40.0);
+        zset.add(Bytes::from("a"), 10.0);
+        zset.add(Bytes::from("b"), 20.0);
+        zset.add(Bytes::from("c"), 30.0);
+        zset.add(Bytes::from("d"), 40.0);
 
         // Range by score
         let result = zset.range_by_score(15.0, 35.0);
         assert_eq!(result.len(), 2);
-        assert!(result.iter().any(|(m, _)| m == b"b"));
-        assert!(result.iter().any(|(m, _)| m == b"c"));
+        assert!(result.iter().any(|(m, _)| m.as_ref() == b"b"));
+        assert!(result.iter().any(|(m, _)| m.as_ref() == b"c"));
 
         // Range by rank
         let result = zset.range_by_rank(1, 2);
@@ -1117,16 +1126,16 @@ mod tests {
         let mut cow = ZSetDataCow::new();
 
         // Add members
-        cow.add(b"member1".to_vec(), 10.0);
-        cow.add(b"member2".to_vec(), 20.0);
-        cow.add(b"member3".to_vec(), 15.0);
+        cow.add(Bytes::from("member1"), 10.0);
+        cow.add(Bytes::from("member2"), 20.0);
+        cow.add(Bytes::from("member3"), 15.0);
 
         assert_eq!(cow.len(), 3);
         assert!(cow.contains(b"member1"));
         assert_eq!(cow.get_score(b"member1"), Some(10.0));
 
         // Update score
-        cow.add(b"member1".to_vec(), 25.0);
+        cow.add(Bytes::from("member1"), 25.0);
         assert_eq!(cow.get_score(b"member1"), Some(25.0));
 
         // Remove member
@@ -1138,9 +1147,9 @@ mod tests {
     #[test]
     fn test_cow_snapshot_no_copy() {
         let mut cow = ZSetDataCow::new();
-        cow.add(b"a".to_vec(), 10.0);
-        cow.add(b"b".to_vec(), 20.0);
-        cow.add(b"c".to_vec(), 30.0);
+        cow.add(Bytes::from("a"), 10.0);
+        cow.add(Bytes::from("b"), 20.0);
+        cow.add(Bytes::from("c"), 30.0);
 
         // Before snapshot: ref count should be 1
         assert_eq!(cow.ref_count(), 1);
@@ -1168,8 +1177,8 @@ mod tests {
     #[test]
     fn test_cow_write_after_snapshot_copies() {
         let mut cow = ZSetDataCow::new();
-        cow.add(b"a".to_vec(), 10.0);
-        cow.add(b"b".to_vec(), 20.0);
+        cow.add(Bytes::from("a"), 10.0);
+        cow.add(Bytes::from("b"), 20.0);
 
         // Create snapshot
         let snapshot = cow.make_snapshot();
@@ -1177,7 +1186,7 @@ mod tests {
         assert!(cow.is_in_cow_mode()); // Should be in COW mode
 
         // Write operation records change in COW cache (NO data copy)
-        cow.add(b"c".to_vec(), 30.0);
+        cow.add(Bytes::from("c"), 30.0);
         assert_eq!(cow.ref_count(), 2); // Ref count unchanged (no copy!)
         assert_eq!(Arc::strong_count(&snapshot), 2); // Snapshot still shares base
         assert!(cow.is_in_cow_mode()); // Still in COW mode
@@ -1196,24 +1205,24 @@ mod tests {
     #[test]
     fn test_cow_write_without_snapshot_no_copy() {
         let mut cow = ZSetDataCow::new();
-        cow.add(b"a".to_vec(), 10.0);
+        cow.add(Bytes::from("a"), 10.0);
 
         // No snapshot, ref count is 1
         assert_eq!(cow.ref_count(), 1);
 
         // Write operation should NOT copy (ref count stays 1)
-        cow.add(b"b".to_vec(), 20.0);
+        cow.add(Bytes::from("b"), 20.0);
         assert_eq!(cow.ref_count(), 1); // No copy happened
 
         // Another write
-        cow.add(b"c".to_vec(), 30.0);
+        cow.add(Bytes::from("c"), 30.0);
         assert_eq!(cow.ref_count(), 1); // Still no copy
     }
 
     #[test]
     fn test_cow_multiple_snapshots() {
         let mut cow = ZSetDataCow::new();
-        cow.add(b"a".to_vec(), 10.0);
+        cow.add(Bytes::from("a"), 10.0);
 
         // Create multiple snapshots (they share the same Arc)
         let snapshot1 = cow.make_snapshot();
@@ -1222,7 +1231,7 @@ mod tests {
         assert!(cow.is_in_cow_mode()); // Should be in COW mode
 
         // Write records change in COW cache (NO data copy)
-        cow.add(b"b".to_vec(), 20.0);
+        cow.add(Bytes::from("b"), 20.0);
         assert_eq!(cow.ref_count(), 3); // Ref count unchanged (no copy!)
         assert!(cow.is_in_cow_mode()); // Still in COW mode
 
@@ -1246,8 +1255,8 @@ mod tests {
     #[test]
     fn test_cow_read_operations_no_overhead() {
         let mut cow = ZSetDataCow::new();
-        cow.add(b"a".to_vec(), 10.0);
-        cow.add(b"b".to_vec(), 20.0);
+        cow.add(Bytes::from("a"), 10.0);
+        cow.add(Bytes::from("b"), 20.0);
 
         // Create snapshot
         let _snapshot = cow.make_snapshot();
@@ -1265,17 +1274,17 @@ mod tests {
     #[test]
     fn test_cow_merge_applies_only_changes() {
         let mut cow = ZSetDataCow::new();
-        cow.add(b"a".to_vec(), 10.0);
-        cow.add(b"b".to_vec(), 20.0);
-        cow.add(b"c".to_vec(), 30.0);
+        cow.add(Bytes::from("a"), 10.0);
+        cow.add(Bytes::from("b"), 20.0);
+        cow.add(Bytes::from("c"), 30.0);
 
         // Create snapshot
         let snapshot = cow.make_snapshot();
         assert_eq!(cow.ref_count(), 2);
 
         // Make changes (only 3 changes, not full copy)
-        cow.add(b"d".to_vec(), 40.0); // Add new
-        cow.add(b"a".to_vec(), 15.0); // Update existing
+        cow.add(Bytes::from("d"), 40.0); // Add new
+        cow.add(Bytes::from("a"), 15.0); // Update existing
         cow.remove(b"b"); // Remove existing
 
         // Before merge: changes are in COW cache
@@ -1313,16 +1322,16 @@ mod tests {
         let mut store = ZSetStoreCow::new();
 
         // Add members to ZSet
-        store.add(b"zset1".to_vec(), b"member1".to_vec(), 10.0);
-        store.add(b"zset1".to_vec(), b"member2".to_vec(), 20.0);
-        store.add(b"zset1".to_vec(), b"member3".to_vec(), 15.0);
+        store.add(b"zset1".to_vec(), Bytes::from("member1"), 10.0);
+        store.add(b"zset1".to_vec(), Bytes::from("member2"), 20.0);
+        store.add(b"zset1".to_vec(), Bytes::from("member3"), 15.0);
 
         assert_eq!(store.len(b"zset1"), Some(3));
         assert!(store.contains(b"zset1", b"member1"));
         assert_eq!(store.get_score(b"zset1", b"member1"), Some(10.0));
 
         // Update score
-        store.add(b"zset1".to_vec(), b"member1".to_vec(), 25.0);
+        store.add(b"zset1".to_vec(), Bytes::from("member1"), 25.0);
         assert_eq!(store.get_score(b"zset1", b"member1"), Some(25.0));
 
         // Remove member
@@ -1334,9 +1343,9 @@ mod tests {
     #[test]
     fn test_zset_store_snapshot_no_copy() {
         let mut store = ZSetStoreCow::new();
-        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
-        store.add(b"zset1".to_vec(), b"b".to_vec(), 20.0);
-        store.add(b"zset1".to_vec(), b"c".to_vec(), 30.0);
+        store.add(b"zset1".to_vec(), Bytes::from("a"), 10.0);
+        store.add(b"zset1".to_vec(), Bytes::from("b"), 20.0);
+        store.add(b"zset1".to_vec(), Bytes::from("c"), 30.0);
 
         // Before snapshot: ref count should be 1
         assert_eq!(store.ref_count(), 1);
@@ -1368,8 +1377,8 @@ mod tests {
     #[test]
     fn test_zset_store_write_after_snapshot_no_copy() {
         let mut store = ZSetStoreCow::new();
-        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
-        store.add(b"zset1".to_vec(), b"b".to_vec(), 20.0);
+        store.add(b"zset1".to_vec(), Bytes::from("a"), 10.0);
+        store.add(b"zset1".to_vec(), Bytes::from("b"), 20.0);
 
         // Create snapshot
         let snapshot = store.make_snapshot();
@@ -1377,7 +1386,7 @@ mod tests {
         assert!(store.is_in_cow_mode());
 
         // Write operation records change in COW cache (NO data copy)
-        store.add(b"zset1".to_vec(), b"c".to_vec(), 30.0);
+        store.add(b"zset1".to_vec(), Bytes::from("c"), 30.0);
         assert_eq!(store.ref_count(), 2); // Ref count unchanged (no copy!)
         assert_eq!(Arc::strong_count(&snapshot), 2);
         assert!(store.is_in_cow_mode());
@@ -1397,34 +1406,34 @@ mod tests {
     #[test]
     fn test_zset_store_write_without_snapshot_no_copy() {
         let mut store = ZSetStoreCow::new();
-        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
+        store.add(b"zset1".to_vec(), Bytes::from("a"), 10.0);
 
         // No snapshot, ref count is 1
         assert_eq!(store.ref_count(), 1);
 
         // Write operation should NOT copy (ref count stays 1)
-        store.add(b"zset1".to_vec(), b"b".to_vec(), 20.0);
+        store.add(b"zset1".to_vec(), Bytes::from("b"), 20.0);
         assert_eq!(store.ref_count(), 1); // No copy happened
 
         // Another write
-        store.add(b"zset1".to_vec(), b"c".to_vec(), 30.0);
+        store.add(b"zset1".to_vec(), Bytes::from("c"), 30.0);
         assert_eq!(store.ref_count(), 1); // Still no copy
     }
 
     #[test]
     fn test_zset_store_merge_applies_only_changes() {
         let mut store = ZSetStoreCow::new();
-        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
-        store.add(b"zset1".to_vec(), b"b".to_vec(), 20.0);
-        store.add(b"zset1".to_vec(), b"c".to_vec(), 30.0);
+        store.add(b"zset1".to_vec(), Bytes::from("a"), 10.0);
+        store.add(b"zset1".to_vec(), Bytes::from("b"), 20.0);
+        store.add(b"zset1".to_vec(), Bytes::from("c"), 30.0);
 
         // Create snapshot
         let snapshot = store.make_snapshot();
         assert_eq!(store.ref_count(), 2);
 
         // Make changes (only 3 operations, not full copy)
-        store.add(b"zset1".to_vec(), b"d".to_vec(), 40.0); // Add new
-        store.add(b"zset1".to_vec(), b"a".to_vec(), 15.0); // Update existing
+        store.add(b"zset1".to_vec(), Bytes::from("d"), 40.0); // Add new
+        store.add(b"zset1".to_vec(), Bytes::from("a"), 15.0); // Update existing
         store.remove(b"zset1", b"b"); // Remove existing
 
         // Before merge: changes are in COW cache
@@ -1459,9 +1468,9 @@ mod tests {
     #[test]
     fn test_zset_store_multiple_keys() {
         let mut store = ZSetStoreCow::new();
-        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
-        store.add(b"zset2".to_vec(), b"x".to_vec(), 20.0);
-        store.add(b"zset2".to_vec(), b"y".to_vec(), 30.0);
+        store.add(b"zset1".to_vec(), Bytes::from("a"), 10.0);
+        store.add(b"zset2".to_vec(), Bytes::from("x"), 20.0);
+        store.add(b"zset2".to_vec(), Bytes::from("y"), 30.0);
 
         assert_eq!(store.key_count(), 2);
         assert_eq!(store.len(b"zset1"), Some(1));
@@ -1471,7 +1480,7 @@ mod tests {
         let _snapshot = store.make_snapshot();
 
         // Modify only zset1
-        store.add(b"zset1".to_vec(), b"b".to_vec(), 25.0);
+        store.add(b"zset1".to_vec(), Bytes::from("b"), 25.0);
 
         // zset1 should be updated
         assert_eq!(store.len(b"zset1"), Some(2));
@@ -1482,8 +1491,8 @@ mod tests {
     #[test]
     fn test_zset_store_updated_overrides_removed() {
         let mut store = ZSetStoreCow::new();
-        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
-        store.add(b"zset1".to_vec(), b"b".to_vec(), 20.0);
+        store.add(b"zset1".to_vec(), Bytes::from("a"), 10.0);
+        store.add(b"zset1".to_vec(), Bytes::from("b"), 20.0);
 
         // Create snapshot
         let _snapshot = store.make_snapshot();
@@ -1494,7 +1503,7 @@ mod tests {
         assert_eq!(store.len(b"zset1"), None);
 
         // Re-add zset1 (adds to updated cache, should override removed)
-        store.add(b"zset1".to_vec(), b"c".to_vec(), 30.0);
+        store.add(b"zset1".to_vec(), Bytes::from("c"), 30.0);
         assert!(store.contains_key(b"zset1")); // Should exist (updated overrides removed)
         assert_eq!(store.len(b"zset1"), Some(1));
         assert_eq!(store.get_score(b"zset1", b"c"), Some(30.0));
@@ -1509,8 +1518,8 @@ mod tests {
     #[test]
     fn test_zset_store_merge_updated_overrides_removed() {
         let mut store = ZSetStoreCow::new();
-        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
-        store.add(b"zset2".to_vec(), b"x".to_vec(), 20.0);
+        store.add(b"zset1".to_vec(), Bytes::from("a"), 10.0);
+        store.add(b"zset2".to_vec(), Bytes::from("x"), 20.0);
 
         // Create snapshot
         let _snapshot = store.make_snapshot();
@@ -1520,7 +1529,7 @@ mod tests {
         assert!(!store.contains_key(b"zset1"));
 
         // Re-add zset1 (should override removed)
-        store.add(b"zset1".to_vec(), b"b".to_vec(), 25.0);
+        store.add(b"zset1".to_vec(), Bytes::from("b"), 25.0);
         assert!(store.contains_key(b"zset1"));
 
         // Merge: updated should take precedence over removed
@@ -1537,9 +1546,9 @@ mod tests {
     #[test]
     fn test_zset_store_keys() {
         let mut store = ZSetStoreCow::new();
-        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
-        store.add(b"zset2".to_vec(), b"x".to_vec(), 20.0);
-        store.add(b"zset3".to_vec(), b"y".to_vec(), 30.0);
+        store.add(b"zset1".to_vec(), Bytes::from("a"), 10.0);
+        store.add(b"zset2".to_vec(), Bytes::from("x"), 20.0);
+        store.add(b"zset3".to_vec(), Bytes::from("y"), 30.0);
 
         let keys = store.keys();
         assert_eq!(keys.len(), 3);
@@ -1562,8 +1571,8 @@ mod tests {
     #[test]
     fn test_zset_store_clear() {
         let mut store = ZSetStoreCow::new();
-        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
-        store.add(b"zset1".to_vec(), b"b".to_vec(), 20.0);
+        store.add(b"zset1".to_vec(), Bytes::from("a"), 10.0);
+        store.add(b"zset1".to_vec(), Bytes::from("b"), 20.0);
 
         // Clear zset1
         assert!(store.clear(b"zset1"));
@@ -1579,8 +1588,8 @@ mod tests {
     fn test_zset_store_from_data() {
         let mut data = HashMap::new();
         let mut zset1 = ZSetDataCow::new();
-        zset1.add(b"a".to_vec(), 10.0);
-        zset1.add(b"b".to_vec(), 20.0);
+        zset1.add(Bytes::from("a"), 10.0);
+        zset1.add(Bytes::from("b"), 20.0);
         data.insert(b"zset1".to_vec(), zset1);
 
         let store = ZSetStoreCow::from_data(data);
@@ -1593,15 +1602,15 @@ mod tests {
     #[test]
     fn test_zset_store_multiple_writes_same_zset() {
         let mut store = ZSetStoreCow::new();
-        store.add(b"zset1".to_vec(), b"a".to_vec(), 10.0);
+        store.add(b"zset1".to_vec(), Bytes::from("a"), 10.0);
 
         // Create snapshot
         let _snapshot = store.make_snapshot();
 
         // Multiple writes to same zset (should reuse COW instance)
-        store.add(b"zset1".to_vec(), b"b".to_vec(), 20.0);
-        store.add(b"zset1".to_vec(), b"c".to_vec(), 30.0);
-        store.add(b"zset1".to_vec(), b"a".to_vec(), 15.0); // Update
+        store.add(b"zset1".to_vec(), Bytes::from("b"), 20.0);
+        store.add(b"zset1".to_vec(), Bytes::from("c"), 30.0);
+        store.add(b"zset1".to_vec(), Bytes::from("a"), 15.0); // Update
 
         assert_eq!(store.len(b"zset1"), Some(3));
         assert_eq!(store.get_score(b"zset1", b"a"), Some(15.0));

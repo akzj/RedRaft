@@ -16,18 +16,17 @@
 //! This module provides the core data structure for lists,
 //! without implementing Redis API traits.
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    sync::Arc,
-};
+use std::collections::VecDeque;
 
-use crate::memory::shard_data::{DataCow, UnifiedStoreCow};
+use bytes::Bytes;
+
+use crate::memory::store::{DataCow, MemStoreCow};
 use crate::traits::{StoreError, StoreResult};
 
 /// List data structure (VecDeque for O(1) head/tail operations)
-pub type ListData = VecDeque<Vec<u8>>;
+pub type ListData = VecDeque<Bytes>;
 
-impl UnifiedStoreCow {
+impl MemStoreCow {
     /// LLEN: Get list length for key (read operation, no copy)
     ///
     /// Returns StoreResult<usize> where the usize is the length of the list.
@@ -68,7 +67,7 @@ impl UnifiedStoreCow {
     ///
     /// Returns StoreResult<usize> where usize is the new length of the list.
     /// Returns StoreError::WrongType if key exists with different type.
-    pub fn lpush(&mut self, key: &[u8], values: Vec<Vec<u8>>) -> StoreResult<usize> {
+    pub fn lpush(&mut self, key: &[u8], values: Vec<Bytes>) -> StoreResult<usize> {
         if values.is_empty() {
             // If no values to push, just return current length
             return self.llen(key);
@@ -150,7 +149,7 @@ impl UnifiedStoreCow {
     ///
     /// Returns StoreResult<usize> where usize is the new length of the list.
     /// Returns StoreError::WrongType if key exists with different type.
-    pub fn rpush(&mut self, key: &[u8], values: Vec<Vec<u8>>) -> StoreResult<usize> {
+    pub fn rpush(&mut self, key: &[u8], values: Vec<Bytes>) -> StoreResult<usize> {
         if values.is_empty() {
             // If no values to push, just return current length
             return self.llen(key);
@@ -230,9 +229,9 @@ impl UnifiedStoreCow {
 
     /// LPOP: Pop element from front of list (incremental COW: only records change)
     ///
-    /// Returns StoreResult<Option<Vec<u8>>> where Some(value) is the popped element.
+    /// Returns StoreResult<Option<Bytes>> where Some(value) is the popped element.
     /// Returns StoreError::WrongType if key exists with different type.
-    pub fn lpop(&mut self, key: &[u8]) -> StoreResult<Option<Vec<u8>>> {
+    pub fn lpop(&mut self, key: &[u8]) -> StoreResult<Option<Bytes>> {
         if self.is_cow_mode() {
             let updated = self.updated.as_mut().unwrap();
             let removed = self.removed.as_mut().unwrap();
@@ -286,9 +285,9 @@ impl UnifiedStoreCow {
 
     /// RPOP: Pop element from back of list (incremental COW: only records change)
     ///
-    /// Returns StoreResult<Option<Vec<u8>>> where Some(value) is the popped element.
+    /// Returns StoreResult<Option<Bytes>> where Some(value) is the popped element.
     /// Returns StoreError::WrongType if key exists with different type.
-    pub fn rpop(&mut self, key: &[u8]) -> StoreResult<Option<Vec<u8>>> {
+    pub fn rpop(&mut self, key: &[u8]) -> StoreResult<Option<Bytes>> {
         if self.is_cow_mode() {
             let updated = self.updated.as_mut().unwrap();
             let removed = self.removed.as_mut().unwrap();
@@ -342,10 +341,10 @@ impl UnifiedStoreCow {
 
     /// LINDEX: Get element at specified index (read operation, no copy)
     ///
-    /// Returns StoreResult<Option<Vec<u8>>> where Some(value) is the element at index.
+    /// Returns StoreResult<Option<Bytes>> where Some(value) is the element at index.
     /// Returns StoreError::WrongType if key exists with different type.
     /// Index can be negative (counts from end).
-    pub fn lindex(&self, key: &[u8], index: i64) -> StoreResult<Option<Vec<u8>>> {
+    pub fn lindex(&self, key: &[u8], index: i64) -> StoreResult<Option<Bytes>> {
         if self.is_cow_mode() {
             // Check COW cache first (updated takes precedence over removed)
             if let Some(ref updated) = self.updated {
@@ -397,7 +396,7 @@ impl UnifiedStoreCow {
     /// Returns StoreError::IndexOutOfRange if index is out of range.
     /// Returns StoreError::KeyNotFound if key doesn't exist.
     /// Index can be negative (counts from end).
-    pub fn lset(&mut self, key: &[u8], index: i64, value: Vec<u8>) -> StoreResult<()> {
+    pub fn lset(&mut self, key: &[u8], index: i64, value: Bytes) -> StoreResult<()> {
         if self.is_cow_mode() {
             let updated = self.updated.as_mut().unwrap();
             let removed = self.removed.as_mut().unwrap();
@@ -465,10 +464,10 @@ impl UnifiedStoreCow {
 
     /// LRANGE: Get range of elements [start, end] (read operation, no copy)
     ///
-    /// Returns StoreResult<Vec<Vec<u8>>> containing elements in the range.
+    /// Returns StoreResult<Vec<Bytes>> containing elements in the range.
     /// Returns StoreError::WrongType if key exists with different type.
     /// Start and end can be negative (counts from end).
-    pub fn lrange(&self, key: &[u8], start: i64, stop: i64) -> StoreResult<Vec<Vec<u8>>> {
+    pub fn lrange(&self, key: &[u8], start: i64, stop: i64) -> StoreResult<Vec<Bytes>> {
         if self.is_cow_mode() {
             // Check COW cache first (updated takes precedence over removed)
             if let Some(ref updated) = self.updated {
@@ -562,38 +561,43 @@ impl UnifiedStoreCow {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
+
     use super::*;
 
     #[test]
     fn test_list_store_basic_operations() {
-        let mut store = UnifiedStoreCow::new();
+        let mut store = MemStoreCow::new();
 
         // Push elements
-        store.rpush(b"list1", vec![b"a".to_vec()]);
-        store.rpush(b"list1", vec![b"b".to_vec()]);
-        store.lpush(b"list1", vec![b"c".to_vec()]);
+        store.rpush(b"list1", vec![Bytes::from("a")]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("b")]).unwrap();
+        store.lpush(b"list1", vec![Bytes::from("c")]).unwrap();
 
         assert_eq!(store.llen(b"list1").unwrap(), 3);
-        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(b"c".to_vec()));
-        assert_eq!(store.lindex(b"list1", 1).unwrap(), Some(b"a".to_vec()));
-        assert_eq!(store.lindex(b"list1", 2).unwrap(), Some(b"b".to_vec()));
+        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(Bytes::from("c")));
+        assert_eq!(store.lindex(b"list1", 1).unwrap(), Some(Bytes::from("a")));
+        assert_eq!(store.lindex(b"list1", 2).unwrap(), Some(Bytes::from("b")));
 
         // Pop elements
-        assert_eq!(store.lpop(b"list1").unwrap(), Some(b"c".to_vec()));
-        assert_eq!(store.rpop(b"list1").unwrap(), Some(b"b".to_vec()));
+        assert_eq!(store.lpop(b"list1").unwrap(), Some(Bytes::from("c")));
+        assert_eq!(store.rpop(b"list1").unwrap(), Some(Bytes::from("b")));
         assert_eq!(store.llen(b"list1").unwrap(), 1);
 
         // Set element
-        store.lset(b"list1", 0, b"x".to_vec()).unwrap();
-        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(b"x".to_vec()));
+        store.lset(b"list1", 0, Bytes::from("x")).unwrap();
+        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(Bytes::from("x")));
     }
 
     #[test]
     fn test_list_store_snapshot_no_copy() {
-        let mut store = UnifiedStoreCow::new();
-        store.rpush(b"list1", vec![b"a".to_vec()]).unwrap();
-        store.rpush(b"list1", vec![b"b".to_vec()]).unwrap();
-        store.rpush(b"list1", vec![b"c".to_vec()]).unwrap();
+        let mut store = MemStoreCow::new();
+        store.rpush(b"list1", vec![Bytes::from("a")]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("b")]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("c")]).unwrap();
 
         // Before snapshot: ref count should be 1
         assert_eq!(store.ref_count(), 1);
@@ -615,14 +619,14 @@ mod tests {
 
         // Original should still work
         assert_eq!(store.llen(b"list1").unwrap(), 3);
-        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(b"a".to_vec()));
+        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(Bytes::from("a")));
     }
 
     #[test]
     fn test_list_store_write_after_snapshot_no_copy() {
-        let mut store = UnifiedStoreCow::new();
-        store.rpush(b"list1", vec![b"a".to_vec()]).unwrap();
-        store.rpush(b"list1", vec![b"b".to_vec()]).unwrap();
+        let mut store = MemStoreCow::new();
+        store.rpush(b"list1", vec![Bytes::from("a")]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("b")]).unwrap();
 
         // Create snapshot
         let snapshot = store.make_snapshot();
@@ -630,14 +634,14 @@ mod tests {
         assert!(store.is_in_cow_mode());
 
         // Write operation records change in COW cache (NO data copy)
-        store.rpush(b"list1", vec![b"c".to_vec()]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("c")]).unwrap();
         assert_eq!(store.ref_count(), 2); // Ref count unchanged (no copy!)
         assert_eq!(Arc::strong_count(&snapshot), 2);
         assert!(store.is_in_cow_mode());
 
         // Original should have new data (via COW cache)
         assert_eq!(store.llen(b"list1").unwrap(), 3);
-        assert_eq!(store.lindex(b"list1", 2).unwrap(), Some(b"c".to_vec()));
+        assert_eq!(store.lindex(b"list1", 2).unwrap(), Some(Bytes::from("c")));
 
         // Snapshot should have old data (unchanged, from base)
         let snapshot_data = snapshot.read();
@@ -650,49 +654,49 @@ mod tests {
 
     #[test]
     fn test_list_store_write_without_snapshot_no_copy() {
-        let mut store = UnifiedStoreCow::new();
-        store.rpush(b"list1", vec![b"a".to_vec()]).unwrap();
+        let mut store = MemStoreCow::new();
+        store.rpush(b"list1", vec![Bytes::from("a")]).unwrap();
 
         // No snapshot, ref count is 1
         assert_eq!(store.ref_count(), 1);
 
         // Write operation should NOT copy (ref count stays 1)
-        store.rpush(b"list1", vec![b"b".to_vec()]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("b")]).unwrap();
         assert_eq!(store.ref_count(), 1); // No copy happened
 
         // Another write
-        store.rpush(b"list1", vec![b"c".to_vec()]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("c")]).unwrap();
         assert_eq!(store.ref_count(), 1); // Still no copy
     }
 
     #[test]
     fn test_list_store_merge_applies_only_changes() {
-        let mut store = UnifiedStoreCow::new();
-        store.rpush(b"list1", vec![b"a".to_vec()]).unwrap();
-        store.rpush(b"list1", vec![b"b".to_vec()]).unwrap();
-        store.rpush(b"list1", vec![b"c".to_vec()]).unwrap();
+        let mut store = MemStoreCow::new();
+        store.rpush(b"list1", vec![Bytes::from("a")]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("b")]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("c")]).unwrap();
 
         // Create snapshot
         let snapshot = store.make_snapshot();
         assert_eq!(store.ref_count(), 2);
 
         // Make changes (only 3 operations, not full copy)
-        store.rpush(b"list1", vec![b"d".to_vec()]).unwrap(); // Add new
-        store.lset(b"list1", 0, b"x".to_vec()).unwrap(); // Update existing
+        store.rpush(b"list1", vec![Bytes::from("d")]).unwrap(); // Add new
+        store.lset(b"list1", 0, Bytes::from("x")).unwrap(); // Update existing
         store.lpop(b"list1").unwrap(); // Remove first
 
         // Before merge: changes are in COW cache
         assert!(store.is_in_cow_mode());
         assert_eq!(store.llen(b"list1").unwrap(), 3); // x, b, c, d -> after pop_front: b, c, d
-        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(b"b".to_vec()));
-        assert_eq!(store.lindex(b"list1", 1).unwrap(), Some(b"c".to_vec()));
-        assert_eq!(store.lindex(b"list1", 2).unwrap(), Some(b"d".to_vec()));
+        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(Bytes::from("b")));
+        assert_eq!(store.lindex(b"list1", 1).unwrap(), Some(Bytes::from("c")));
+        assert_eq!(store.lindex(b"list1", 2).unwrap(), Some(Bytes::from("d")));
 
         // Snapshot still has old data
         let snapshot_data = snapshot.read();
         if let Some(DataCow::List(list)) = snapshot_data.get(b"list1" as &[u8]) {
             assert_eq!(list.len(), 3);
-            assert_eq!(list.get(0), Some(&b"a".to_vec()));
+            assert_eq!(list.get(0), Some(&Bytes::from("a")));
         }
         drop(snapshot_data);
 
@@ -704,32 +708,32 @@ mod tests {
 
         // After merge: changes are in base
         assert_eq!(store.llen(b"list1").unwrap(), 3);
-        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(b"b".to_vec()));
-        assert_eq!(store.lindex(b"list1", 1).unwrap(), Some(b"c".to_vec()));
-        assert_eq!(store.lindex(b"list1", 2).unwrap(), Some(b"d".to_vec()));
+        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(Bytes::from("b")));
+        assert_eq!(store.lindex(b"list1", 1).unwrap(), Some(Bytes::from("c")));
+        assert_eq!(store.lindex(b"list1", 2).unwrap(), Some(Bytes::from("d")));
     }
 
     #[test]
     fn test_list_store_range() {
-        let mut store = UnifiedStoreCow::new();
-        store.rpush(b"list1", vec![b"a".to_vec()]).unwrap();
-        store.rpush(b"list1", vec![b"b".to_vec()]).unwrap();
-        store.rpush(b"list1", vec![b"c".to_vec()]).unwrap();
-        store.rpush(b"list1", vec![b"d".to_vec()]).unwrap();
+        let mut store = MemStoreCow::new();
+        store.rpush(b"list1", vec![Bytes::from("a")]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("b")]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("c")]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("d")]).unwrap();
 
         // Get range
         let range = store.lrange(b"list1", 1, 2).unwrap();
         assert_eq!(range.len(), 2);
-        assert_eq!(range[0], b"b".to_vec());
-        assert_eq!(range[1], b"c".to_vec());
+        assert_eq!(range[0], Bytes::from("b"));
+        assert_eq!(range[1], Bytes::from("c"));
     }
 
     #[test]
     fn test_list_store_multiple_keys() {
-        let mut store = UnifiedStoreCow::new();
-        store.rpush(b"list1", vec![b"a".to_vec()]).unwrap();
-        store.rpush(b"list2", vec![b"x".to_vec()]).unwrap();
-        store.rpush(b"list2", vec![b"y".to_vec()]).unwrap();
+        let mut store = MemStoreCow::new();
+        store.rpush(b"list1", vec![Bytes::from("a")]).unwrap();
+        store.rpush(b"list2", vec![Bytes::from("x")]).unwrap();
+        store.rpush(b"list2", vec![Bytes::from("y")]).unwrap();
 
         assert_eq!(store.key_count(), 2);
         assert_eq!(store.llen(b"list1").unwrap(), 1);
@@ -739,7 +743,7 @@ mod tests {
         let _snapshot = store.make_snapshot();
 
         // Modify only list1
-        store.rpush(b"list1", vec![b"b".to_vec()]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("b")]).unwrap();
 
         // list1 should be updated
         assert_eq!(store.llen(b"list1").unwrap(), 2);
@@ -749,9 +753,9 @@ mod tests {
 
     #[test]
     fn test_list_store_updated_overrides_removed() {
-        let mut store = UnifiedStoreCow::new();
-        store.rpush(b"list1", vec![b"a".to_vec()]).unwrap();
-        store.rpush(b"list1", vec![b"b".to_vec()]).unwrap();
+        let mut store = MemStoreCow::new();
+        store.rpush(b"list1", vec![Bytes::from("a")]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("b")]).unwrap();
 
         // Create snapshot
         let _snapshot = store.make_snapshot();
@@ -762,23 +766,23 @@ mod tests {
         assert_eq!(store.llen(b"list1").unwrap(), 0);
 
         // Re-add list1 (adds to updated cache, should override removed)
-        store.rpush(b"list1", vec![b"c".to_vec()]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("c")]).unwrap();
         assert!(store.contains_key(b"list1")); // Should exist (updated overrides removed)
         assert_eq!(store.llen(b"list1").unwrap(), 1);
-        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(b"c".to_vec()));
+        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(Bytes::from("c")));
 
         // Merge: updated should take precedence
         store.merge_cow();
         assert!(store.contains_key(b"list1")); // Should still exist after merge
         assert_eq!(store.llen(b"list1").unwrap(), 1);
-        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(b"c".to_vec()));
+        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(Bytes::from("c")));
     }
 
     #[test]
     fn test_list_store_merge_updated_overrides_removed() {
-        let mut store = UnifiedStoreCow::new();
-        store.rpush(b"list1", vec![b"a".to_vec()]).unwrap();
-        store.rpush(b"list2", vec![b"x".to_vec()]).unwrap();
+        let mut store = MemStoreCow::new();
+        store.rpush(b"list1", vec![Bytes::from("a")]).unwrap();
+        store.rpush(b"list2", vec![Bytes::from("x")]).unwrap();
 
         // Create snapshot
         let _snapshot = store.make_snapshot();
@@ -788,14 +792,14 @@ mod tests {
         assert!(!store.contains_key(b"list1"));
 
         // Re-add list1 (should override removed)
-        store.rpush(b"list1", vec![b"b".to_vec()]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("b")]).unwrap();
         assert!(store.contains_key(b"list1"));
 
         // Merge: updated should take precedence over removed
         store.merge_cow();
         assert!(store.contains_key(b"list1")); // Should exist (updated overrides removed)
         assert_eq!(store.len(b"list1"), Some(1));
-        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(b"b".to_vec()));
+        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(Bytes::from("b")));
 
         // list2 should still exist
         assert!(store.contains_key(b"list2"));
@@ -806,12 +810,12 @@ mod tests {
 
     #[test]
     fn test_list_data_cow_clear_in_cow_mode() {
-        let mut store = UnifiedStoreCow::new();
+        let mut store = MemStoreCow::new();
 
         // Add initial data
-        store.rpush(b"list1", vec![b"a".to_vec()]).unwrap();
-        store.rpush(b"list1", vec![b"b".to_vec()]).unwrap();
-        store.rpush(b"list2", vec![b"x".to_vec()]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("a")]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("b")]).unwrap();
+        store.rpush(b"list2", vec![Bytes::from("x")]).unwrap();
 
         // Create snapshot
         store.make_snapshot();
@@ -834,19 +838,19 @@ mod tests {
 
     #[test]
     fn test_list_data_cow_multiple_snapshots() {
-        let mut store1 = UnifiedStoreCow::new();
+        let mut store1 = MemStoreCow::new();
 
         // Add data to store1
-        store1.rpush(b"list1", vec![b"a".to_vec()]).unwrap();
-        store1.rpush(b"list1", vec![b"b".to_vec()]).unwrap();
-        store1.rpush(b"list2", vec![b"x".to_vec()]).unwrap();
+        store1.rpush(b"list1", vec![Bytes::from("a")]).unwrap();
+        store1.rpush(b"list1", vec![Bytes::from("b")]).unwrap();
+        store1.rpush(b"list2", vec![Bytes::from("x")]).unwrap();
 
         // Create snapshot and get reference
         let _snapshot = store1.make_snapshot();
         assert_eq!(store1.ref_count(), 2);
 
         // Create store2 from same base (simulating multiple snapshots)
-        let mut store2 = UnifiedStoreCow {
+        let mut store2 = MemStoreCow {
             base: Arc::clone(&store1.base),
             updated: Some(HashMap::new()),
             removed: Some(HashSet::new()),
@@ -857,8 +861,8 @@ mod tests {
         assert!(store2.is_cow_mode());
 
         // Make independent changes
-        store1.rpush(b"list1", vec![b"c".to_vec()]).unwrap(); // Add to list1
-        store2.rpush(b"list2", vec![b"y".to_vec()]).unwrap(); // Add to list2
+        store1.rpush(b"list1", vec![Bytes::from("c")]).unwrap(); // Add to list1
+        store2.rpush(b"list2", vec![Bytes::from("y")]).unwrap(); // Add to list2
         store2.del(b"list1"); // Remove list1 in store2
 
         // Verify independent states
@@ -873,30 +877,32 @@ mod tests {
 
     #[test]
     fn test_list_data_cow_edge_cases() {
-        let mut store = UnifiedStoreCow::new();
+        let mut store = MemStoreCow::new();
 
         // Test empty data
-        store.rpush(&[], vec![vec![]]).unwrap();
+        store.rpush(&[], vec![Bytes::new()]).unwrap();
         assert!(store.contains_key(&[]));
         assert_eq!(store.llen(&[]).unwrap(), 1);
-        assert_eq!(store.lindex(&[], 0).unwrap(), Some(vec![]));
+        assert_eq!(store.lindex(&[], 0).unwrap(), Some(Bytes::new()));
 
         // Test large data
-        let large_data = vec![b'x'; 1024]; // 1KB element
+        let large_data = Bytes::from(vec![b'x'; 1024]); // 1KB element
         store.rpush(b"large", vec![large_data.clone()]).unwrap();
         assert!(store.contains_key(b"large"));
         assert_eq!(store.llen(b"large").unwrap(), 1);
         assert_eq!(store.lindex(b"large", 0).unwrap(), Some(large_data));
 
         // Test binary data
-        let binary_data = vec![0, 1, 2, 255, 254, 253];
+        let binary_data = Bytes::from(vec![0, 1, 2, 255, 254, 253]);
         store.rpush(b"binary", vec![binary_data.clone()]).unwrap();
         assert!(store.contains_key(b"binary"));
         assert_eq!(store.lindex(b"binary", 0).unwrap(), Some(binary_data));
 
         // Test with snapshot
         store.make_snapshot();
-        store.rpush(b"binary", vec![vec![128, 129, 130]]).unwrap();
+        store
+            .rpush(b"binary", vec![Bytes::from(vec![128, 129, 130])])
+            .unwrap();
         assert_eq!(store.llen(b"binary").unwrap(), 2);
     }
 
@@ -905,11 +911,13 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let mut store = UnifiedStoreCow::new();
+        let mut store = MemStoreCow::new();
 
         // Add initial data
         for i in 0..10 {
-            store.rpush(b"shared", vec![format!("item{}", i).into_bytes()]).unwrap();
+            store
+                .rpush(b"shared", vec![Bytes::from(format!("item{}", i))])
+                .unwrap();
         }
 
         // Create snapshot
@@ -937,7 +945,9 @@ mod tests {
         let writer_handle = thread::spawn(move || {
             let mut store = store_clone.write();
             for i in 10..15 {
-                store.rpush(b"shared", vec![format!("item{}", i).into_bytes()]).unwrap();
+                store
+                    .rpush(b"shared", vec![Bytes::from(format!("item{}", i))])
+                    .unwrap();
             }
         });
 
@@ -954,35 +964,35 @@ mod tests {
 
     #[test]
     fn test_list_data_cow_multiple_merges() {
-        let mut store = UnifiedStoreCow::new();
+        let mut store = MemStoreCow::new();
 
         // First cycle: add data and merge
-        store.rpush(b"list1", vec![b"a".to_vec()]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("a")]).unwrap();
         store.make_snapshot();
-        store.rpush(b"list1", vec![b"b".to_vec()]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("b")]).unwrap();
         store.merge_cow();
 
         // Second cycle: modify and merge again
         store.make_snapshot();
-        store.rpush(b"list1", vec![b"c".to_vec()]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("c")]).unwrap();
         store.lpop(b"list1").unwrap();
         store.merge_cow();
 
         // Verify final state
         assert_eq!(store.llen(b"list1").unwrap(), 2); // b, c
-        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(b"b".to_vec()));
-        assert_eq!(store.lindex(b"list1", 1).unwrap(), Some(b"c".to_vec()));
+        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(Bytes::from("b")));
+        assert_eq!(store.lindex(b"list1", 1).unwrap(), Some(Bytes::from("c")));
     }
 
     #[test]
     fn test_list_store_cow_from_data() {
         let mut data = HashMap::new();
         let mut list1 = VecDeque::new();
-        list1.push_back(b"a".to_vec());
-        list1.push_back(b"b".to_vec());
+        list1.push_back(Bytes::from("a"));
+        list1.push_back(Bytes::from("b"));
         data.insert(b"list1".to_vec(), list1);
 
-        let mut store = UnifiedStoreCow::new();
+        let mut store = MemStoreCow::new();
         // Insert data manually
         for (key, list) in data {
             store.insert(key, DataCow::List(list));
@@ -990,26 +1000,26 @@ mod tests {
 
         // Verify initial data
         assert_eq!(store.llen(b"list1").unwrap(), 2);
-        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(b"a".to_vec()));
-        assert_eq!(store.lindex(b"list1", 1).unwrap(), Some(b"b".to_vec()));
+        assert_eq!(store.lindex(b"list1", 0).unwrap(), Some(Bytes::from("a")));
+        assert_eq!(store.lindex(b"list1", 1).unwrap(), Some(Bytes::from("b")));
 
         // Create snapshot and modify
         store.make_snapshot();
-        store.rpush(b"list1", vec![b"c".to_vec()]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("c")]).unwrap();
 
         // Verify changes
         assert_eq!(store.llen(b"list1").unwrap(), 3);
-        assert_eq!(store.lindex(b"list1", 2).unwrap(), Some(b"c".to_vec()));
+        assert_eq!(store.lindex(b"list1", 2).unwrap(), Some(Bytes::from("c")));
     }
 
     #[test]
     fn test_list_store_cow_clear_operations() {
-        let mut store = UnifiedStoreCow::new();
+        let mut store = MemStoreCow::new();
 
         // Add some data
-        store.rpush(b"list1", vec![b"a".to_vec()]).unwrap();
-        store.rpush(b"list1", vec![b"b".to_vec()]).unwrap();
-        store.rpush(b"list2", vec![b"x".to_vec()]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("a")]).unwrap();
+        store.rpush(b"list1", vec![Bytes::from("b")]).unwrap();
+        store.rpush(b"list2", vec![Bytes::from("x")]).unwrap();
 
         // Create snapshot
         store.make_snapshot();

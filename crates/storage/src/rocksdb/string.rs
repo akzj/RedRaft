@@ -9,9 +9,9 @@
 
 use crate::rocksdb::key_encoding::string_key;
 use crate::rocksdb::ShardedRocksDB;
-use crate::memory::ShardId;
+use crate::shard::ShardId;
 use crate::traits::{StoreError, StoreResult};
-use rocksdb::{ColumnFamily, WriteBatch};
+use rocksdb::WriteBatch;
 use tracing::error;
 
 impl ShardedRocksDB {
@@ -127,12 +127,7 @@ impl ShardedRocksDB {
     }
 
     /// DEL with apply_index: Atomically delete key and update apply_index
-    pub fn del_with_index(
-        &self,
-        shard_id: ShardId,
-        key: &[u8],
-        apply_index: Option<u64>,
-    ) -> bool {
+    pub fn del_with_index(&self, shard_id: ShardId, key: &[u8], apply_index: Option<u64>) -> bool {
         if let Some(cf) = self.get_cf(shard_id) {
             let db_key = string_key(key);
             if self.db.get_cf(cf, &db_key).ok().flatten().is_some() {
@@ -298,4 +293,3 @@ impl ShardedRocksDB {
         0
     }
 }
-

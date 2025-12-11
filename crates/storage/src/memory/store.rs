@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{
-    hybrid::BitmapData,
+    memory::bitmap::BitmapData,
     memory::{ListData, SetDataCow, ZSetDataCow},
 };
 
@@ -159,7 +159,7 @@ impl DataCow {
 ///
 /// This avoids full HashMap copy even for 1000 billion keys when only 3 keys change.
 #[derive(Debug, Clone)]
-pub struct UnifiedStoreCow {
+pub struct MemStoreCow {
     /// Base data (shared via Arc<RwLock<>>, can be directly modified without clone)
     /// Unified storage for all data types: key -> DataCow
     pub(crate) base: Arc<RwLock<HashMap<Vec<u8>, DataCow>>>,
@@ -172,7 +172,7 @@ pub struct UnifiedStoreCow {
     pub(crate) removed: Option<HashSet<Vec<u8>>>,
 }
 
-impl UnifiedStoreCow {
+impl MemStoreCow {
     /// Create a new empty unified store with COW support
     pub fn new() -> Self {
         Self {
@@ -444,7 +444,7 @@ impl UnifiedStoreCow {
 /// with type detection and COW support.
 pub struct ShardStore {
     /// Unified store for all data types with COW support
-    pub store: UnifiedStoreCow,
+    pub store: MemStoreCow,
 
     /// Shard metadata
     pub metadata: ShardMetadata,
@@ -453,7 +453,7 @@ pub struct ShardStore {
 impl ShardStore {
     pub fn new() -> Self {
         Self {
-            store: UnifiedStoreCow::new(),
+            store: MemStoreCow::new(),
             metadata: ShardMetadata::new(),
         }
     }
@@ -478,5 +478,3 @@ impl ShardStore {
         self.store.key_count()
     }
 }
-/// Shard data with RwLock for thread-safe access
-pub type LockedShardStore = Arc<RwLock<ShardStore>>;

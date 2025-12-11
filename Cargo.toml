@@ -60,4 +60,5 @@ prometheus = "0.14.0"
 
 # Storage
 rocksdb = "0.24"
+bytes = "1.7"
 

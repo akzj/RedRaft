@@ -14,21 +14,19 @@
 //! without implementing Redis API traits.
 
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
-use crate::memory::shard_data::{DataCow, UnifiedStoreCow};
+use bytes::Bytes;
+
+use crate::memory::store::{DataCow, MemStoreCow};
 use crate::traits::{StoreError, StoreResult};
 
 /// Set data structure
 ///
 /// A set maintains a collection of unique members.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SetData {
-    pub members: HashSet<Vec<u8>>,
+    pub members: HashSet<Bytes>,
 }
 
 impl SetData {
@@ -40,7 +38,7 @@ impl SetData {
     }
 
     /// Add a member
-    pub fn add(&mut self, member: Vec<u8>) -> bool {
+    pub fn add(&mut self, member: Bytes) -> bool {
         self.members.insert(member)
     }
 
@@ -70,7 +68,7 @@ impl SetData {
     }
 
     /// Get all members
-    pub fn members(&self) -> Vec<Vec<u8>> {
+    pub fn members(&self) -> Vec<Bytes> {
         self.members.iter().cloned().collect()
     }
 
@@ -130,10 +128,10 @@ pub struct SetDataCow {
     base: Arc<RwLock<SetData>>,
 
     /// COW cache: Updated/added members (only changed items)
-    members_updated: Option<HashSet<Vec<u8>>>,
+    members_updated: Option<HashSet<Bytes>>,
 
     /// COW cache: Removed members
-    members_removed: Option<HashSet<Vec<u8>>>,
+    members_removed: Option<HashSet<Bytes>>,
 }
 
 impl SetDataCow {
@@ -226,7 +224,7 @@ impl SetDataCow {
     }
 
     /// Add a member (incremental COW: only records change)
-    pub fn add(&mut self, member: Vec<u8>) -> bool {
+    pub fn add(&mut self, member: Bytes) -> bool {
         if self.is_cow_mode() {
             // COW mode: record change in cache, don't modify base
             let updated = self.members_updated.as_mut().unwrap();
@@ -235,19 +233,19 @@ impl SetDataCow {
             // Check if member exists in base (read lock)
             let exists_in_base = {
                 let base = self.base.read();
-                base.contains(&member)
+                base.contains(member.as_ref())
             }; // Read lock released here
 
             // Check if already in updated cache
-            if updated.contains(&member) {
+            if updated.contains(member.as_ref()) {
                 return false; // Already in updated, no change
             }
 
             if exists_in_base {
                 // Member already exists in base
                 // If it was removed, we need to re-add it
-                if removed.contains(&member) {
-                    removed.remove(&member);
+                if removed.contains(member.as_ref()) {
+                    removed.remove(member.as_ref());
                     updated.insert(member);
                     true // Re-added after removal
                 } else {
@@ -255,7 +253,7 @@ impl SetDataCow {
                 }
             } else {
                 // New member: add to updated, remove from removed if present
-                removed.remove(&member);
+                removed.remove(member.as_ref());
                 updated.insert(member)
             }
         } else {
@@ -282,7 +280,7 @@ impl SetDataCow {
                 // Remove from updated cache if present
                 updated.remove(member);
                 // Record removal
-                removed.insert(member.to_vec());
+                removed.insert(Bytes::copy_from_slice(member));
                 true
             } else if updated.contains(member) {
                 // Member was added in COW cache, just remove it
@@ -332,7 +330,7 @@ impl SetDataCow {
             let base_not_removed = base
                 .members
                 .iter()
-                .filter(|m| !removed.contains(*m))
+                .filter(|m| !removed.contains(m.as_ref()))
                 .count();
             drop(base);
 
@@ -341,7 +339,10 @@ impl SetDataCow {
             // But we need to subtract members that were already in base
             // (they were updated, not new)
             let base = self.base.read();
-            let updated_in_base = updated.iter().filter(|m| base.members.contains(*m)).count();
+            let updated_in_base = updated
+                .iter()
+                .filter(|m| base.members.contains(m.as_ref()))
+                .count();
             drop(base);
 
             // Final count: base (excluding removed) + updated (excluding those already in base)
@@ -379,14 +380,14 @@ impl SetDataCow {
     }
 
     /// Get all members (merges COW cache + base)
-    pub fn members(&self) -> Vec<Vec<u8>> {
+    pub fn members(&self) -> Vec<Bytes> {
         let mut members = HashSet::new();
 
         // Add base members (excluding removed) - read lock
         let base = self.base.read();
         if let Some(ref removed) = self.members_removed {
             for member in &base.members {
-                if !removed.contains(member) {
+                if !removed.contains(member.as_ref()) {
                     members.insert(member.clone());
                 }
             }
@@ -424,12 +425,12 @@ impl Default for SetDataCow {
     }
 }
 
-impl UnifiedStoreCow {
+impl MemStoreCow {
     /// Add a member to a Set (incremental COW: only records change)
     ///
     /// Returns StoreResult<bool> where true means member was added (new), false means already exists.
     /// Returns StoreError::WrongType if key exists with different type.
-    pub fn add(&mut self, key: Vec<u8>, member: Vec<u8>) -> StoreResult<bool> {
+    pub fn add(&mut self, key: Vec<u8>, member: Bytes) -> StoreResult<bool> {
         if self.is_cow_mode() {
             // COW mode: need to handle in updated cache
             let updated = self.updated.as_mut().unwrap();
@@ -488,12 +489,14 @@ impl UnifiedStoreCow {
                 updated.insert(key, DataCow::Set(set_cow));
                 Ok(added)
             } else {
-                Err(StoreError::Internal("Failed to create SetDataCow".to_string()))
+                Err(StoreError::Internal(
+                    "Failed to create SetDataCow".to_string(),
+                ))
             }
         } else {
             // No COW mode: directly modify base
             let mut base = self.base.write();
-            
+
             // Check if key exists with different type
             if let Some(existing) = base.get(&key) {
                 if !matches!(existing, DataCow::Set(_)) {
@@ -505,7 +508,7 @@ impl UnifiedStoreCow {
             let data = base
                 .entry(key)
                 .or_insert_with(|| DataCow::Set(SetDataCow::new()));
-            
+
             match data {
                 DataCow::Set(set) => Ok(set.add(member)),
                 _ => Err(StoreError::WrongType),
@@ -572,12 +575,14 @@ impl UnifiedStoreCow {
                 updated.insert(key.to_vec(), DataCow::Set(set_cow));
                 Ok(removed_result)
             } else {
-                Err(StoreError::Internal("Failed to create SetDataCow".to_string()))
+                Err(StoreError::Internal(
+                    "Failed to create SetDataCow".to_string(),
+                ))
             }
         } else {
             // No COW mode: directly modify base
             let mut base = self.base.write();
-            
+
             match base.get_mut(key) {
                 Some(DataCow::Set(set)) => Ok(set.remove(member)),
                 Some(_) => Err(StoreError::WrongType),
@@ -774,7 +779,7 @@ impl UnifiedStoreCow {
     }
 }
 
-impl Default for UnifiedStoreCow {
+impl Default for MemStoreCow {
     fn default() -> Self {
         Self::new()
     }
@@ -782,6 +787,8 @@ impl Default for UnifiedStoreCow {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     #[test]
@@ -789,9 +796,9 @@ mod tests {
         let mut set = SetData::new();
 
         // Add members
-        assert!(set.add(b"member1".to_vec()));
-        assert!(set.add(b"member2".to_vec()));
-        assert!(!set.add(b"member1".to_vec())); // Duplicate
+        assert!(set.add(Bytes::from("member1")));
+        assert!(set.add(Bytes::from("member2")));
+        assert!(!set.add(Bytes::from("member1"))); // Duplicate
 
         assert_eq!(set.len(), 2);
         assert!(set.contains(b"member1"));
@@ -806,14 +813,14 @@ mod tests {
     #[test]
     fn test_set_operations() {
         let mut set1 = SetData::new();
-        set1.add(b"a".to_vec());
-        set1.add(b"b".to_vec());
-        set1.add(b"c".to_vec());
+        set1.add(Bytes::from("a"));
+        set1.add(Bytes::from("b"));
+        set1.add(Bytes::from("c"));
 
         let mut set2 = SetData::new();
-        set2.add(b"b".to_vec());
-        set2.add(b"c".to_vec());
-        set2.add(b"d".to_vec());
+        set2.add(Bytes::from("b"));
+        set2.add(Bytes::from("c"));
+        set2.add(Bytes::from("d"));
 
         // Intersection
         let intersection = set1.intersect(&set2);
@@ -840,9 +847,9 @@ mod tests {
         let mut cow = SetDataCow::new();
 
         // Add members
-        assert!(cow.add(b"member1".to_vec()));
-        assert!(cow.add(b"member2".to_vec()));
-        assert!(!cow.add(b"member1".to_vec())); // Duplicate
+        assert!(cow.add(Bytes::from("member1")));
+        assert!(cow.add(Bytes::from("member2")));
+        assert!(!cow.add(Bytes::from("member1"))); // Duplicate
 
         assert_eq!(cow.len(), 2);
         assert!(cow.contains(b"member1"));
@@ -857,9 +864,9 @@ mod tests {
     #[test]
     fn test_set_cow_snapshot_no_copy() {
         let mut cow = SetDataCow::new();
-        cow.add(b"a".to_vec());
-        cow.add(b"b".to_vec());
-        cow.add(b"c".to_vec());
+        cow.add(Bytes::from("a"));
+        cow.add(Bytes::from("b"));
+        cow.add(Bytes::from("c"));
 
         // Before snapshot: ref count should be 1
         assert_eq!(cow.ref_count(), 1);
@@ -887,8 +894,8 @@ mod tests {
     #[test]
     fn test_set_cow_write_after_snapshot_no_copy() {
         let mut cow = SetDataCow::new();
-        cow.add(b"a".to_vec());
-        cow.add(b"b".to_vec());
+        cow.add(Bytes::from("a"));
+        cow.add(Bytes::from("b"));
 
         // Create snapshot
         let snapshot = cow.make_snapshot();
@@ -896,7 +903,7 @@ mod tests {
         assert!(cow.is_in_cow_mode());
 
         // Write operation records change in COW cache (NO data copy)
-        cow.add(b"c".to_vec());
+        cow.add(Bytes::from("c"));
         assert_eq!(cow.ref_count(), 2); // Ref count unchanged (no copy!)
         assert_eq!(Arc::strong_count(&snapshot), 2);
         assert!(cow.is_in_cow_mode());
@@ -915,33 +922,33 @@ mod tests {
     #[test]
     fn test_set_cow_write_without_snapshot_no_copy() {
         let mut cow = SetDataCow::new();
-        cow.add(b"a".to_vec());
+        cow.add(Bytes::from("a"));
 
         // No snapshot, ref count is 1
         assert_eq!(cow.ref_count(), 1);
 
         // Write operation should NOT copy (ref count stays 1)
-        cow.add(b"b".to_vec());
+        cow.add(Bytes::from("b"));
         assert_eq!(cow.ref_count(), 1); // No copy happened
 
         // Another write
-        cow.add(b"c".to_vec());
+        cow.add(Bytes::from("c"));
         assert_eq!(cow.ref_count(), 1); // Still no copy
     }
 
     #[test]
     fn test_set_cow_merge_applies_only_changes() {
         let mut cow = SetDataCow::new();
-        cow.add(b"a".to_vec());
-        cow.add(b"b".to_vec());
-        cow.add(b"c".to_vec());
+        cow.add(Bytes::from("a"));
+        cow.add(Bytes::from("b"));
+        cow.add(Bytes::from("c"));
 
         // Create snapshot
         let snapshot = cow.make_snapshot();
         assert_eq!(cow.ref_count(), 2);
 
         // Make changes (only 3 changes, not full copy)
-        cow.add(b"d".to_vec()); // Add new
+        cow.add(Bytes::from("d")); // Add new
         cow.remove(b"b"); // Remove existing
 
         // Before merge: changes are in COW cache
@@ -977,12 +984,12 @@ mod tests {
 
     #[test]
     fn test_set_store_basic_operations() {
-        let mut store = UnifiedStoreCow::new();
+        let mut store = MemStoreCow::new();
 
         // Add members to Set
-        assert!(store.add(b"set1".to_vec(), b"member1".to_vec()).unwrap());
-        assert!(store.add(b"set1".to_vec(), b"member2".to_vec()).unwrap());
-        assert!(!store.add(b"set1".to_vec(), b"member1".to_vec()).unwrap()); // Duplicate
+        assert!(store.add(b"set1".to_vec(), Bytes::from("member1")).unwrap());
+        assert!(store.add(b"set1".to_vec(), Bytes::from("member2")).unwrap());
+        assert!(!store.add(b"set1".to_vec(), Bytes::from("member1")).unwrap()); // Duplicate
 
         assert_eq!(store.len(b"set1"), Some(2));
         assert!(store.contains(b"set1", b"member1"));
@@ -996,10 +1003,10 @@ mod tests {
 
     #[test]
     fn test_set_store_snapshot_no_copy() {
-        let mut store = UnifiedStoreCow::new();
-        store.add(b"set1".to_vec(), b"a".to_vec()).unwrap();
-        store.add(b"set1".to_vec(), b"b".to_vec()).unwrap();
-        store.add(b"set1".to_vec(), b"c".to_vec()).unwrap();
+        let mut store = MemStoreCow::new();
+        store.add(b"set1".to_vec(), Bytes::from("a")).unwrap();
+        store.add(b"set1".to_vec(), Bytes::from("b")).unwrap();
+        store.add(b"set1".to_vec(), Bytes::from("c")).unwrap();
 
         // Before snapshot: ref count should be 1
         assert_eq!(store.ref_count(), 1);
@@ -1028,9 +1035,9 @@ mod tests {
 
     #[test]
     fn test_set_store_write_after_snapshot_no_copy() {
-        let mut store = UnifiedStoreCow::new();
-        store.add(b"set1".to_vec(), b"a".to_vec());
-        store.add(b"set1".to_vec(), b"b".to_vec());
+        let mut store = MemStoreCow::new();
+        store.add(b"set1".to_vec(), Bytes::from("a")).unwrap();
+        store.add(b"set1".to_vec(), Bytes::from("b")).unwrap();
 
         // Create snapshot
         let snapshot = store.make_snapshot();
@@ -1038,7 +1045,7 @@ mod tests {
         assert!(store.is_in_cow_mode());
 
         // Write operation records change in COW cache (NO data copy)
-        store.add(b"set1".to_vec(), b"c".to_vec());
+        store.add(b"set1".to_vec(), Bytes::from("c")).unwrap();
         assert_eq!(store.ref_count(), 2); // Ref count unchanged (no copy!)
         assert_eq!(Arc::strong_count(&snapshot), 2);
         assert!(store.is_in_cow_mode());
@@ -1060,34 +1067,34 @@ mod tests {
 
     #[test]
     fn test_set_store_write_without_snapshot_no_copy() {
-        let mut store = UnifiedStoreCow::new();
-        store.add(b"set1".to_vec(), b"a".to_vec());
+        let mut store = MemStoreCow::new();
+        store.add(b"set1".to_vec(), Bytes::from("a")).unwrap();
 
         // No snapshot, ref count is 1
         assert_eq!(store.ref_count(), 1);
 
         // Write operation should NOT copy (ref count stays 1)
-        store.add(b"set1".to_vec(), b"b".to_vec());
+        store.add(b"set1".to_vec(), Bytes::from("b")).unwrap();
         assert_eq!(store.ref_count(), 1); // No copy happened
 
         // Another write
-        store.add(b"set1".to_vec(), b"c".to_vec());
+        store.add(b"set1".to_vec(), Bytes::from("c")).unwrap();
         assert_eq!(store.ref_count(), 1); // Still no copy
     }
 
     #[test]
     fn test_set_store_merge_applies_only_changes() {
-        let mut store = UnifiedStoreCow::new();
-        store.add(b"set1".to_vec(), b"a".to_vec()).unwrap();
-        store.add(b"set1".to_vec(), b"b".to_vec()).unwrap();
-        store.add(b"set1".to_vec(), b"c".to_vec()).unwrap();
+        let mut store = MemStoreCow::new();
+        store.add(b"set1".to_vec(), Bytes::from("a")).unwrap();
+        store.add(b"set1".to_vec(), Bytes::from("b")).unwrap();
+        store.add(b"set1".to_vec(), Bytes::from("c")).unwrap();
 
         // Create snapshot
         let snapshot = store.make_snapshot();
         assert_eq!(store.ref_count(), 2);
 
         // Make changes (only 2 operations, not full copy)
-        store.add(b"set1".to_vec(), b"d".to_vec()).unwrap(); // Add new
+        store.add(b"set1".to_vec(), Bytes::from("d")).unwrap(); // Add new
         store.remove(b"set1", b"b").unwrap(); // Remove existing
 
         // Before merge: changes are in COW cache
@@ -1125,10 +1132,10 @@ mod tests {
 
     #[test]
     fn test_set_store_multiple_keys() {
-        let mut store = UnifiedStoreCow::new();
-        store.add(b"set1".to_vec(), b"a".to_vec());
-        store.add(b"set2".to_vec(), b"x".to_vec()).unwrap();
-        store.add(b"set2".to_vec(), b"y".to_vec()).unwrap();
+        let mut store = MemStoreCow::new();
+        store.add(b"set1".to_vec(), Bytes::from("a")).unwrap();
+        store.add(b"set2".to_vec(), Bytes::from("x")).unwrap();
+        store.add(b"set2".to_vec(), Bytes::from("y")).unwrap();
 
         assert_eq!(store.key_count(), 2);
         assert_eq!(store.len(b"set1"), Some(1));
@@ -1138,7 +1145,7 @@ mod tests {
         let _snapshot = store.make_snapshot();
 
         // Modify only set1
-        store.add(b"set1".to_vec(), b"b".to_vec());
+        store.add(b"set1".to_vec(), Bytes::from("b")).unwrap();
 
         // set1 should be updated
         assert_eq!(store.len(b"set1"), Some(2));
@@ -1148,9 +1155,9 @@ mod tests {
 
     #[test]
     fn test_set_store_updated_overrides_removed() {
-        let mut store = UnifiedStoreCow::new();
-        store.add(b"set1".to_vec(), b"a".to_vec());
-        store.add(b"set1".to_vec(), b"b".to_vec());
+        let mut store = MemStoreCow::new();
+        store.add(b"set1".to_vec(), Bytes::from("a")).unwrap();
+        store.add(b"set1".to_vec(), Bytes::from("b")).unwrap();
 
         // Create snapshot
         let _snapshot = store.make_snapshot();
@@ -1161,7 +1168,7 @@ mod tests {
         assert_eq!(store.len(b"set1"), None);
 
         // Re-add set1 (adds to updated cache, should override removed)
-        store.add(b"set1".to_vec(), b"c".to_vec());
+        store.add(b"set1".to_vec(), Bytes::from("c")).unwrap();
         assert!(store.contains_key(b"set1")); // Should exist (updated overrides removed)
         assert_eq!(store.len(b"set1"), Some(1));
         assert!(store.contains(b"set1", b"c"));
@@ -1175,9 +1182,9 @@ mod tests {
 
     #[test]
     fn test_set_store_merge_updated_overrides_removed() {
-        let mut store = UnifiedStoreCow::new();
-        store.add(b"set1".to_vec(), b"a".to_vec());
-        store.add(b"set2".to_vec(), b"x".to_vec());
+        let mut store = MemStoreCow::new();
+        store.add(b"set1".to_vec(), Bytes::from("a")).unwrap();
+        store.add(b"set2".to_vec(), Bytes::from("x")).unwrap();
 
         // Create snapshot
         let _snapshot = store.make_snapshot();
@@ -1187,7 +1194,7 @@ mod tests {
         assert!(!store.contains_key(b"set1"));
 
         // Re-add set1 (should override removed)
-        store.add(b"set1".to_vec(), b"b".to_vec());
+        store.add(b"set1".to_vec(), Bytes::from("b")).unwrap();
         assert!(store.contains_key(b"set1"));
 
         // Merge: updated should take precedence over removed
@@ -1203,10 +1210,10 @@ mod tests {
 
     #[test]
     fn test_set_store_keys() {
-        let mut store = UnifiedStoreCow::new();
-        store.add(b"set1".to_vec(), b"a".to_vec());
-        store.add(b"set2".to_vec(), b"x".to_vec());
-        store.add(b"set3".to_vec(), b"y".to_vec());
+        let mut store = MemStoreCow::new();
+        store.add(b"set1".to_vec(), Bytes::from("a")).unwrap();
+        store.add(b"set2".to_vec(), Bytes::from("x")).unwrap();
+        store.add(b"set3".to_vec(), Bytes::from("y")).unwrap();
 
         let keys = store.keys();
         assert_eq!(keys.len(), 3);
@@ -1228,9 +1235,9 @@ mod tests {
 
     #[test]
     fn test_set_store_clear() {
-        let mut store = UnifiedStoreCow::new();
-        store.add(b"set1".to_vec(), b"a".to_vec());
-        store.add(b"set1".to_vec(), b"b".to_vec());
+        let mut store = MemStoreCow::new();
+        store.add(b"set1".to_vec(), Bytes::from("a")).unwrap();
+        store.add(b"set1".to_vec(), Bytes::from("b")).unwrap();
 
         // Clear set1
         assert!(store.clear(b"set1"));
@@ -1246,11 +1253,11 @@ mod tests {
     fn test_set_store_from_data() {
         let mut data = HashMap::new();
         let mut set1 = SetDataCow::new();
-        set1.add(b"a".to_vec());
-        set1.add(b"b".to_vec());
+        set1.add(Bytes::from("a"));
+        set1.add(Bytes::from("b"));
         data.insert(b"set1".to_vec(), set1);
 
-        let store = UnifiedStoreCow::new(); // TODO: Implement from_data for UnifiedStoreCow if needed
+        let store = MemStoreCow::new(); // TODO: Implement from_data for UnifiedStoreCow if needed
         assert_eq!(store.key_count(), 1);
         assert_eq!(store.len(b"set1"), Some(2));
         assert!(store.contains(b"set1", b"a"));
@@ -1259,16 +1266,16 @@ mod tests {
 
     #[test]
     fn test_set_store_multiple_writes_same_set() {
-        let mut store = UnifiedStoreCow::new();
-        store.add(b"set1".to_vec(), b"a".to_vec());
+        let mut store = MemStoreCow::new();
+        store.add(b"set1".to_vec(), Bytes::from("a")).unwrap();
 
         // Create snapshot
         let _snapshot = store.make_snapshot();
 
         // Multiple writes to same set (should reuse COW instance)
-        store.add(b"set1".to_vec(), b"b".to_vec());
-        store.add(b"set1".to_vec(), b"c".to_vec());
-        assert!(!store.add(b"set1".to_vec(), b"a".to_vec()).unwrap()); // Duplicate (should return false)
+        store.add(b"set1".to_vec(), Bytes::from("b")).unwrap();
+        store.add(b"set1".to_vec(), Bytes::from("c")).unwrap();
+        assert!(!store.add(b"set1".to_vec(), Bytes::from("a")).unwrap()); // Duplicate (should return false)
 
         assert_eq!(store.len(b"set1"), Some(3));
         assert!(store.contains(b"set1", b"a"));
@@ -1282,12 +1289,12 @@ mod tests {
     // ========== Additional Comprehensive Tests from tests.rs ==========
 
     // Helper functions for testing
-    fn create_test_member(value: &str) -> Vec<u8> {
-        value.as_bytes().to_vec()
+    fn create_test_member(value: &'static str) -> Bytes {
+        Bytes::from(value)
     }
 
-    fn create_test_members(values: &[&str]) -> Vec<Vec<u8>> {
-        values.iter().map(|v| v.as_bytes().to_vec()).collect()
+    fn create_test_members(values: &[&'static str]) -> Vec<Bytes> {
+        values.iter().map(|v| Bytes::from(*v)).collect()
     }
 
     // ========== SetData Tests ==========
@@ -1345,9 +1352,9 @@ mod tests {
 
         // Check all members are present (order may vary)
         let member_set: HashSet<_> = all_members.into_iter().collect();
-        assert!(member_set.contains(&create_test_member("member1")));
-        assert!(member_set.contains(&create_test_member("member2")));
-        assert!(member_set.contains(&create_test_member("member3")));
+        assert!(member_set.iter().any(|m| m.as_ref() == b"member1"));
+        assert!(member_set.iter().any(|m| m.as_ref() == b"member2"));
+        assert!(member_set.iter().any(|m| m.as_ref() == b"member3"));
     }
 
     // ========== SetDataCow Tests ==========
@@ -1436,19 +1443,19 @@ mod tests {
         let mut set = SetDataCow::new();
 
         // Test empty member
-        assert!(set.add(vec![]));
+        assert!(set.add(Bytes::new()));
         assert!(set.contains(b""));
         assert_eq!(set.len(), 1);
 
         // Test large member
-        let large_member = vec![b'x'; 1024 * 1024]; // 1MB member
+        let large_member = Bytes::from(vec![b'x'; 1024 * 1024]); // 1MB member
         assert!(set.add(large_member.clone()));
-        assert!(set.contains(&large_member));
+        assert!(set.contains(large_member.as_ref()));
 
         // Test binary data
-        let binary_data = vec![0, 1, 2, 255, 254, 253];
+        let binary_data = Bytes::from(vec![0, 1, 2, 255, 254, 253]);
         assert!(set.add(binary_data.clone()));
-        assert!(set.contains(&binary_data));
+        assert!(set.contains(binary_data.as_ref()));
     }
 
     #[test]
@@ -1460,7 +1467,7 @@ mod tests {
 
         // Add initial data
         for i in 0..100 {
-            set.add(create_test_member(&format!("member{}", i)));
+            set.add(Bytes::from(format!("member{}", i)));
         }
 
         // Create snapshot
@@ -1476,8 +1483,8 @@ mod tests {
             let handle = thread::spawn(move || {
                 for j in 0..20 {
                     let set = set_clone.read();
-                    let member = create_test_member(&format!("member{}", j));
-                    let _contains = set.contains(&member);
+                    let member = Bytes::from(format!("member{}", j));
+                    let _contains = set.contains(member.as_ref());
                     let _len = set.len();
                 }
             });
@@ -1489,7 +1496,7 @@ mod tests {
         let writer_handle = thread::spawn(move || {
             let mut set = set_clone.write();
             for i in 100..110 {
-                set.add(create_test_member(&format!("member{}", i)));
+                set.add(Bytes::from(format!("member{}", i)));
             }
         });
 
@@ -1509,14 +1516,14 @@ mod tests {
         let mut set = SetDataCow::new();
 
         // First cycle: add data and merge
-        set.add(create_test_member("member1"));
+        set.add(Bytes::from("member1"));
         set.make_snapshot();
-        set.add(create_test_member("member2"));
+        set.add(Bytes::from("member2"));
         set.merge_cow();
 
         // Second cycle: modify and merge again
         set.make_snapshot();
-        set.add(create_test_member("member3"));
+        set.add(Bytes::from("member3"));
         set.remove(b"member1");
         set.merge_cow();
 
@@ -1531,35 +1538,35 @@ mod tests {
 
     #[test]
     fn test_set_store_cow_basic_operations() {
-        let mut store = UnifiedStoreCow::new();
+        let mut store = MemStoreCow::new();
 
         // Test initial state
         assert!(!store.is_cow_mode());
 
         // Test add creates new set
-        assert!(store.add(create_test_member("set1"), create_test_member("member1")).unwrap());
+        assert!(store.add(b"set1".to_vec(), Bytes::from("member1")).unwrap());
         assert!(store.contains(b"set1", b"member1"));
         assert_eq!(store.len(b"set1"), Some(1));
     }
 
     #[test]
     fn test_set_store_cow_snapshot_and_cow() {
-        let mut store = UnifiedStoreCow::new();
+        let mut store = MemStoreCow::new();
 
         // Create a set and add data
-        store.add(create_test_member("set1"), create_test_member("member1")).unwrap();
-        store.add(create_test_member("set1"), create_test_member("member2")).unwrap();
+        store.add(b"set1".to_vec(), Bytes::from("member1")).unwrap();
+        store.add(b"set1".to_vec(), Bytes::from("member2")).unwrap();
 
         // Create snapshot
         store.make_snapshot();
         assert!(store.is_cow_mode());
 
         // Modify existing set in COW mode
-        store.add(create_test_member("set1"), create_test_member("member3")).unwrap();
+        store.add(b"set1".to_vec(), Bytes::from("member3")).unwrap();
         store.remove(b"set1", b"member1").unwrap();
 
         // Create new set in COW mode
-        store.add(create_test_member("set2"), create_test_member("member4")).unwrap();
+        store.add(b"set2".to_vec(), Bytes::from("member4")).unwrap();
 
         // Verify changes
         assert!(store.contains(b"set1", b"member2"));
@@ -1571,20 +1578,20 @@ mod tests {
 
     #[test]
     fn test_set_store_cow_merge_changes() {
-        let mut store = UnifiedStoreCow::new();
+        let mut store = MemStoreCow::new();
 
         // Create initial sets
-        store.add(create_test_member("set1"), create_test_member("member1"));
-        store.add(create_test_member("set2"), create_test_member("member2"));
+        store.add(b"set1".to_vec(), Bytes::from("member1")).unwrap();
+        store.add(b"set2".to_vec(), Bytes::from("member2")).unwrap();
 
         // Create snapshot
         store.make_snapshot();
 
         // Make changes in COW mode
-        store.add(create_test_member("set1"), create_test_member("member3")).unwrap();
+        store.add(b"set1".to_vec(), Bytes::from("member3")).unwrap();
 
         // Create new set
-        store.add(create_test_member("set3"), create_test_member("member4")).unwrap();
+        store.add(b"set3".to_vec(), Bytes::from("member4")).unwrap();
 
         // Merge changes
         store.merge_cow();
@@ -1598,10 +1605,10 @@ mod tests {
 
     #[test]
     fn test_set_store_cow_set_removal() {
-        let mut store = UnifiedStoreCow::new();
+        let mut store = MemStoreCow::new();
 
         // Create a set
-        store.add(create_test_member("set1"), create_test_member("member1"));
+        store.add(b"set1".to_vec(), Bytes::from("member1")).unwrap();
 
         // Create snapshot
         store.make_snapshot();
@@ -1614,8 +1621,8 @@ mod tests {
 
     #[test]
     fn test_unified_store_cow_from_data() {
-        let mut store = UnifiedStoreCow::new();
-        store.add(b"set1".to_vec(), create_test_member("member1")).unwrap();
+        let mut store = MemStoreCow::new();
+        store.add(b"set1".to_vec(), Bytes::from("member1")).unwrap();
 
         // Verify data is accessible
         assert!(store.contains(b"set1", b"member1"));

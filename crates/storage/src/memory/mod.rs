@@ -8,15 +8,12 @@
 //!
 //! All structures support sharding for better performance and scalability
 
+mod bitmap;
 mod list;
 mod pubsub;
 mod set;
-mod shard;
-mod shard_data;
+mod store;
 mod zset;
-
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // Re-export data structures
 pub use list::ListData;
@@ -24,5 +21,4 @@ pub use set::{SetData, SetDataCow};
 pub use zset::{OrderedFloat, ZSetData, ZSetDataCow};
 
 pub use pubsub::PubSubStore;
-pub use shard::{shard_for_key, shard_slot_range, slot_for_key, ShardId, TOTAL_SLOTS};
-pub use shard_data::{LockedShardStore, ShardMetadata, ShardStore};
+pub use store::{ShardMetadata, ShardStore};

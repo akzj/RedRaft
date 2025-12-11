@@ -10,7 +10,7 @@
 //! - **Hash Operations**: See `hash.rs` for hash operations
 //! - **Snapshot Operations**: See `snapshot.rs` for snapshot operations
 
-use crate::memory::{slot_for_key, ShardId, TOTAL_SLOTS};
+use crate::shard::{slot_for_key, ShardId, TOTAL_SLOTS};
 use crate::rocksdb::key_encoding::apply_index_key;
 use parking_lot::RwLock;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, WriteOptions, DB};

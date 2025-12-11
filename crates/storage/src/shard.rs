@@ -14,11 +14,11 @@ pub fn slot_for_key(key: &[u8]) -> u32 {
 }
 
 /// Calculate shard ID from key
-/// 
+///
 /// # Arguments
 /// * `key` - The key to route
 /// * `shard_count` - Total number of shards
-/// 
+///
 /// # Returns
 /// Shard ID (0-based)
 pub fn shard_for_key(key: &[u8], shard_count: u32) -> ShardId {
@@ -27,11 +27,11 @@ pub fn shard_for_key(key: &[u8], shard_count: u32) -> ShardId {
 }
 
 /// Calculate slot range for shard
-/// 
+///
 /// # Arguments
 /// * `shard_id` - Shard ID
 /// * `shard_count` - Total number of shards
-/// 
+///
 /// # Returns
 /// (start_slot, end_slot) - Slot range [start, end)
 pub fn shard_slot_range(shard_id: ShardId, shard_count: u32) -> (u32, u32) {
@@ -46,7 +46,7 @@ pub fn shard_slot_range(shard_id: ShardId, shard_count: u32) -> (u32, u32) {
 }
 
 /// CRC16 implementation (compatible with Redis Cluster)
-/// 
+///
 /// This is a simplified CRC16-CCITT implementation
 fn crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0;
@@ -71,10 +71,10 @@ mod tests {
     fn test_slot_calculation() {
         let key1 = b"test_key_1";
         let key2 = b"test_key_2";
-        
+
         let slot1 = slot_for_key(key1);
         let slot2 = slot_for_key(key2);
-        
+
         assert!(slot1 < TOTAL_SLOTS);
         assert!(slot2 < TOTAL_SLOTS);
         // Different keys should (likely) have different slots
@@ -85,10 +85,10 @@ mod tests {
     fn test_shard_routing() {
         let key = b"test_key";
         let shard_count = 16;
-        
+
         let shard_id = shard_for_key(key, shard_count);
         assert!(shard_id < shard_count);
-        
+
         let (start, end) = shard_slot_range(shard_id, shard_count);
         let slot = slot_for_key(key);
         assert!(slot >= start && slot < end);
@@ -97,16 +97,15 @@ mod tests {
     #[test]
     fn test_shard_slot_range() {
         let shard_count = 4;
-        
+
         // Shard 0: [0, 4096)
         let (start, end) = shard_slot_range(0, shard_count);
         assert_eq!(start, 0);
         assert_eq!(end, 4096);
-        
+
         // Shard 3: [12288, 16384)
         let (start, end) = shard_slot_range(3, shard_count);
         assert_eq!(start, 12288);
         assert_eq!(end, 16384);
     }
 }
-

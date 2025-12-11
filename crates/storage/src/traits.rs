@@ -13,6 +13,8 @@
 
 use resp::Command;
 
+use bytes::Bytes;
+
 // ============================================================================
 // Error Types
 // ============================================================================
@@ -23,15 +25,15 @@ pub enum ApplyResult {
     /// Simple string response (OK, PONG, etc.)
     Ok,
     /// PONG response
-    Pong(Option<Vec<u8>>),
+    Pong(Option<Bytes>),
     /// Integer response
     Integer(i64),
     /// String response (may be nil)
-    Value(Option<Vec<u8>>),
+    Value(Option<Bytes>),
     /// Array response
-    Array(Vec<Option<Vec<u8>>>),
+    Array(Vec<Option<Bytes>>),
     /// Key-value array (used for HGETALL, etc.)
-    KeyValues(Vec<(Vec<u8>, Vec<u8>)>),
+    KeyValues(Vec<(Bytes, Bytes)>),
     /// Type string
     Type(Option<&'static str>),
     /// Error response
@@ -88,24 +90,24 @@ pub type StoreResult<T> = Result<T, StoreError>;
 /// Recommended backend: RocksDB (persistent)
 pub trait StringStore: Send + Sync {
     /// GET: Get string value
-    fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
+    fn get(&self, key: &[u8]) -> Option<Bytes>;
 
     /// SET: Set string value
-    fn set(&self, key: Vec<u8>, value: Vec<u8>);
+    fn set(&self, key: Vec<u8>, value: Bytes);
 
     /// SETNX: Set only if key does not exist
-    fn setnx(&self, key: Vec<u8>, value: Vec<u8>) -> bool;
+    fn setnx(&self, key: Vec<u8>, value: Bytes) -> bool;
 
     /// SETEX: Set value with expiration time (seconds)
-    fn setex(&self, key: Vec<u8>, value: Vec<u8>, ttl_secs: u64);
+    fn setex(&self, key: Vec<u8>, value: Bytes, ttl_secs: u64);
 
     /// MGET: Batch get
-    fn mget(&self, keys: &[&[u8]]) -> Vec<Option<Vec<u8>>> {
+    fn mget(&self, keys: &[&[u8]]) -> Vec<Option<Bytes>> {
         keys.iter().map(|k| self.get(k)).collect()
     }
 
     /// MSET: Batch set
-    fn mset(&self, kvs: Vec<(Vec<u8>, Vec<u8>)>) {
+    fn mset(&self, kvs: Vec<(Vec<u8>, Bytes)>) {
         for (k, v) in kvs {
             self.set(k, v);
         }
@@ -136,7 +138,7 @@ pub trait StringStore: Send + Sync {
     fn strlen(&self, key: &[u8]) -> usize;
 
     /// GETSET: Set new value and return old value
-    fn getset(&self, key: Vec<u8>, value: Vec<u8>) -> Option<Vec<u8>> {
+    fn getset(&self, key: Vec<u8>, value: Bytes) -> Option<Bytes> {
         let old = self.get(&key);
         self.set(key, value);
         old
@@ -154,28 +156,28 @@ pub trait StringStore: Send + Sync {
 /// Recommended backend: Memory (high performance)
 pub trait ListStore: Send + Sync {
     /// LPUSH: Insert elements from left
-    fn lpush(&self, key: &[u8], values: Vec<Vec<u8>>) -> StoreResult<usize>;
+    fn lpush(&self, key: &[u8], values: Vec<Bytes>) -> StoreResult<usize>;
 
     /// RPUSH: Insert elements from right
-    fn rpush(&self, key: &[u8], values: Vec<Vec<u8>>) -> StoreResult<usize>;
+    fn rpush(&self, key: &[u8], values: Vec<Bytes>) -> StoreResult<usize>;
 
     /// LPOP: Pop element from left
-    fn lpop(&self, key: &[u8]) -> StoreResult<Option<Vec<u8>>>;
+    fn lpop(&self, key: &[u8]) -> StoreResult<Option<Bytes>>;
 
     /// RPOP: Pop element from right
-    fn rpop(&self, key: &[u8]) -> StoreResult<Option<Vec<u8>>>;
+    fn rpop(&self, key: &[u8]) -> StoreResult<Option<Bytes>>;
 
     /// LRANGE: Get list range
-    fn lrange(&self, key: &[u8], start: i64, stop: i64) -> StoreResult<Vec<Vec<u8>>>;
+    fn lrange(&self, key: &[u8], start: i64, stop: i64) -> StoreResult<Vec<Bytes>>;
 
     /// LLEN: Get list length
     fn llen(&self, key: &[u8]) -> StoreResult<usize>;
 
     /// LINDEX: Get element at specified index
-    fn lindex(&self, key: &[u8], index: i64) -> StoreResult<Option<Vec<u8>>>;
+    fn lindex(&self, key: &[u8], index: i64) -> StoreResult<Option<Bytes>>;
 
     /// LSET: Set element at specified index
-    fn lset(&self, key: &[u8], index: i64, value: Vec<u8>) -> StoreResult<()>;
+    fn lset(&self, key: &[u8], index: i64, value: Bytes) -> StoreResult<()>;
 
     /// LTRIM: Trim list to specified range
     fn ltrim(&self, key: &[u8], start: i64, stop: i64) -> StoreResult<()> {
@@ -190,13 +192,13 @@ pub trait ListStore: Send + Sync {
     }
 
     /// LINSERT: Insert element before or after pivot
-    fn linsert(&self, key: &[u8], before: bool, pivot: &[u8], value: Vec<u8>) -> StoreResult<i64> {
+    fn linsert(&self, key: &[u8], before: bool, pivot: &[u8], value: Bytes) -> StoreResult<i64> {
         let _ = (key, before, pivot, value);
         Err(StoreError::NotSupported)
     }
 
     /// RPOPLPUSH: Pop from right, push to left of another list
-    fn rpoplpush(&self, source: &[u8], destination: &[u8]) -> StoreResult<Option<Vec<u8>>> {
+    fn rpoplpush(&self, source: &[u8], destination: &[u8]) -> StoreResult<Option<Bytes>> {
         let _ = (source, destination);
         Ok(None)
     }
@@ -213,53 +215,61 @@ pub trait ListStore: Send + Sync {
 /// Recommended backend: RocksDB (persistent)
 pub trait HashStore: Send + Sync {
     /// HGET: Get hash field value
-    fn hget(&self, key: &[u8], field: &[u8]) -> Option<Vec<u8>>;
+    fn hget(&self, key: &[u8], field: &[u8]) -> StoreResult<Option<Bytes>>;
 
     /// HSET: Set hash field value, returns true if field is new
-    fn hset(&self, key: &[u8], field: Vec<u8>, value: Vec<u8>) -> bool;
+    fn hset(&self, key: &[u8], field: Vec<u8>, value: Bytes) -> StoreResult<bool>;
 
     /// HMGET: Batch get hash fields
-    fn hmget(&self, key: &[u8], fields: &[&[u8]]) -> Vec<Option<Vec<u8>>> {
-        fields.iter().map(|f| self.hget(key, f)).collect()
+    fn hmget(&self, key: &[u8], fields: &[&[u8]]) -> StoreResult<Vec<Option<Bytes>>> {
+        let mut results = Vec::new();
+        for f in fields {
+            match self.hget(key, f) {
+                Ok(val) => results.push(val),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(results)
     }
 
     /// HMSET: Batch set hash fields
-    fn hmset(&self, key: &[u8], fvs: Vec<(Vec<u8>, Vec<u8>)>) {
+    fn hmset(&self, key: &[u8], fvs: Vec<(Vec<u8>, Bytes)>) -> StoreResult<()> {
         for (f, v) in fvs {
-            self.hset(key, f, v);
+            self.hset(key, f, v)?;
         }
+        Ok(())
     }
 
     /// HDEL: Delete hash fields
-    fn hdel(&self, key: &[u8], fields: &[&[u8]]) -> usize;
+    fn hdel(&self, key: &[u8], fields: &[&[u8]]) -> StoreResult<usize>;
 
     /// HEXISTS: Check if hash field exists
-    fn hexists(&self, key: &[u8], field: &[u8]) -> bool {
-        self.hget(key, field).is_some()
+    fn hexists(&self, key: &[u8], field: &[u8]) -> StoreResult<bool> {
+        Ok(self.hget(key, field)?.is_some())
     }
 
     /// HGETALL: Get all hash fields and values
-    fn hgetall(&self, key: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)>;
+    fn hgetall(&self, key: &[u8]) -> StoreResult<Vec<(Bytes, Bytes)>>;
 
     /// HKEYS: Get all hash field names
-    fn hkeys(&self, key: &[u8]) -> Vec<Vec<u8>>;
+    fn hkeys(&self, key: &[u8]) -> StoreResult<Vec<Bytes>>;
 
     /// HVALS: Get all hash field values
-    fn hvals(&self, key: &[u8]) -> Vec<Vec<u8>>;
+    fn hvals(&self, key: &[u8]) -> StoreResult<Vec<Bytes>>;
 
     /// HLEN: Get number of hash fields
-    fn hlen(&self, key: &[u8]) -> usize;
+    fn hlen(&self, key: &[u8]) -> StoreResult<usize>;
 
     /// HINCRBY: Increment hash field integer
     fn hincrby(&self, key: &[u8], field: &[u8], delta: i64) -> StoreResult<i64>;
 
     /// HSETNX: Set hash field only if it does not exist
-    fn hsetnx(&self, key: &[u8], field: Vec<u8>, value: Vec<u8>) -> bool {
-        if self.hexists(key, &field) {
-            false
+    fn hsetnx(&self, key: &[u8], field: Vec<u8>, value: Bytes) -> StoreResult<bool> {
+        if self.hexists(key, &field)? {
+            Ok(false)
         } else {
-            self.hset(key, field, value);
-            true
+            self.hset(key, field, value)?;
+            Ok(true)
         }
     }
 }
@@ -275,13 +285,13 @@ pub trait HashStore: Send + Sync {
 /// Recommended backend: Memory (high performance)
 pub trait SetStore: Send + Sync {
     /// SADD: Add set members
-    fn sadd(&self, key: &[u8], members: Vec<Vec<u8>>) -> StoreResult<usize>;
+    fn sadd(&self, key: &[u8], members: Vec<Bytes>) -> StoreResult<usize>;
 
     /// SREM: Remove set members
     fn srem(&self, key: &[u8], members: &[&[u8]]) -> StoreResult<usize>;
 
     /// SMEMBERS: Get all set members
-    fn smembers(&self, key: &[u8]) -> StoreResult<Vec<Vec<u8>>>;
+    fn smembers(&self, key: &[u8]) -> StoreResult<Vec<Bytes>>;
 
     /// SISMEMBER: Check if set member exists
     fn sismember(&self, key: &[u8], member: &[u8]) -> StoreResult<bool>;
@@ -290,31 +300,31 @@ pub trait SetStore: Send + Sync {
     fn scard(&self, key: &[u8]) -> StoreResult<usize>;
 
     /// SPOP: Remove and return random member(s)
-    fn spop(&self, key: &[u8], count: usize) -> StoreResult<Vec<Vec<u8>>> {
+    fn spop(&self, key: &[u8], count: usize) -> StoreResult<Vec<Bytes>> {
         let _ = (key, count);
         Ok(Vec::new())
     }
 
     /// SRANDMEMBER: Get random member(s) without removing
-    fn srandmember(&self, key: &[u8], count: i64) -> StoreResult<Vec<Vec<u8>>> {
+    fn srandmember(&self, key: &[u8], count: i64) -> StoreResult<Vec<Bytes>> {
         let _ = (key, count);
         Ok(Vec::new())
     }
 
     /// SINTER: Intersection of multiple sets
-    fn sinter(&self, keys: &[&[u8]]) -> StoreResult<Vec<Vec<u8>>> {
+    fn sinter(&self, keys: &[&[u8]]) -> StoreResult<Vec<Bytes>> {
         let _ = keys;
         Ok(Vec::new())
     }
 
     /// SUNION: Union of multiple sets
-    fn sunion(&self, keys: &[&[u8]]) -> StoreResult<Vec<Vec<u8>>> {
+    fn sunion(&self, keys: &[&[u8]]) -> StoreResult<Vec<Bytes>> {
         let _ = keys;
         Ok(Vec::new())
     }
 
     /// SDIFF: Difference of multiple sets
-    fn sdiff(&self, keys: &[&[u8]]) -> StoreResult<Vec<Vec<u8>>> {
+    fn sdiff(&self, keys: &[&[u8]]) -> StoreResult<Vec<Bytes>> {
         let _ = keys;
         Ok(Vec::new())
     }
@@ -331,7 +341,7 @@ pub trait SetStore: Send + Sync {
 /// Recommended backend: Memory (high performance)
 pub trait ZSetStore: Send + Sync {
     /// ZADD: Add members with scores
-    fn zadd(&self, key: &[u8], members: Vec<(f64, Vec<u8>)>) -> usize;
+    fn zadd(&self, key: &[u8], members: Vec<(f64, Bytes)>) -> usize;
 
     /// ZREM: Remove members
     fn zrem(&self, key: &[u8], members: &[&[u8]]) -> usize;
@@ -349,16 +359,10 @@ pub trait ZSetStore: Send + Sync {
     }
 
     /// ZRANGE: Get members by rank range
-    fn zrange(&self, key: &[u8], start: i64, stop: i64, with_scores: bool) -> Vec<(Vec<u8>, f64)>;
+    fn zrange(&self, key: &[u8], start: i64, stop: i64, with_scores: bool) -> Vec<(Bytes, f64)>;
 
     /// ZREVRANGE: Get members by reverse rank range
-    fn zrevrange(
-        &self,
-        key: &[u8],
-        start: i64,
-        stop: i64,
-        with_scores: bool,
-    ) -> Vec<(Vec<u8>, f64)> {
+    fn zrevrange(&self, key: &[u8], start: i64, stop: i64, with_scores: bool) -> Vec<(Bytes, f64)> {
         let _ = (key, start, stop, with_scores);
         Vec::new()
     }
@@ -372,7 +376,7 @@ pub trait ZSetStore: Send + Sync {
         with_scores: bool,
         offset: Option<usize>,
         count: Option<usize>,
-    ) -> Vec<(Vec<u8>, f64)> {
+    ) -> Vec<(Bytes, f64)> {
         let _ = (key, min, max, with_scores, offset, count);
         Vec::new()
     }
@@ -417,7 +421,7 @@ pub trait KeyStore: Send + Sync {
     fn exists(&self, keys: &[&[u8]]) -> usize;
 
     /// KEYS: Get all keys matching pattern (simplified, only * wildcard)
-    fn keys(&self, pattern: &[u8]) -> Vec<Vec<u8>>;
+    fn keys(&self, pattern: &[u8]) -> Vec<Bytes>;
 
     /// TYPE: Get key type
     fn key_type(&self, key: &[u8]) -> Option<&'static str>;
@@ -532,8 +536,10 @@ pub trait RedisStore:
     fn apply(&self, cmd: &Command) -> ApplyResult {
         match cmd {
             // ==================== Connection/Management Commands ====================
-            Command::Ping { message } => ApplyResult::Pong(message.clone()),
-            Command::Echo { message } => ApplyResult::Value(Some(message.clone())),
+            Command::Ping { message } => {
+                ApplyResult::Pong(message.as_ref().map(|m| Bytes::from(m.clone())))
+            }
+            Command::Echo { message } => ApplyResult::Value(Some(Bytes::from(message.clone()))),
             Command::DbSize => ApplyResult::Integer(self.dbsize() as i64),
             Command::FlushDb => {
                 self.flushdb();
@@ -572,11 +578,11 @@ pub trait RedisStore:
                 }
                 // Handle NX condition: key must not exist
                 if *nx {
-                    if !self.setnx(key.clone(), value.clone()) {
+                    if !self.setnx(key.clone(), Bytes::from(value.clone())) {
                         return ApplyResult::Value(None);
                     }
                 } else {
-                    self.set(key.clone(), value.clone());
+                    self.set(key.clone(), Bytes::from(value.clone()));
                 }
                 // Handle expiration time
                 if let Some(secs) = ex {
@@ -587,7 +593,7 @@ pub trait RedisStore:
                 ApplyResult::Ok
             }
             Command::SetNx { key, value } => {
-                let result = self.setnx(key.clone(), value.clone());
+                let result = self.setnx(key.clone(), Bytes::from(value.clone()));
                 ApplyResult::Integer(if result { 1 } else { 0 })
             }
             Command::SetEx {
@@ -595,7 +601,7 @@ pub trait RedisStore:
                 seconds,
                 value,
             } => {
-                self.setex(key.clone(), value.clone(), *seconds);
+                self.setex(key.clone(), Bytes::from(value.clone()), *seconds);
                 ApplyResult::Ok
             }
             Command::PSetEx {
@@ -603,18 +609,30 @@ pub trait RedisStore:
                 milliseconds,
                 value,
             } => {
-                self.setex(key.clone(), value.clone(), *milliseconds / 1000);
+                self.setex(
+                    key.clone(),
+                    Bytes::from(value.clone()),
+                    *milliseconds / 1000,
+                );
                 ApplyResult::Ok
             }
             Command::MSet { kvs } => {
-                self.mset(kvs.clone());
+                let kvs_converted: Vec<(Vec<u8>, Bytes)> = kvs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Bytes::from(v.clone())))
+                    .collect();
+                self.mset(kvs_converted);
                 ApplyResult::Ok
             }
             Command::MSetNx { kvs } => {
                 // Check if all keys do not exist
                 let all_new = kvs.iter().all(|(k, _)| self.get(k).is_none());
                 if all_new {
-                    self.mset(kvs.clone());
+                    let kvs_converted: Vec<(Vec<u8>, Bytes)> = kvs
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Bytes::from(v.clone())))
+                        .collect();
+                    self.mset(kvs_converted);
                     ApplyResult::Integer(1)
                 } else {
                     ApplyResult::Integer(0)
@@ -645,7 +663,7 @@ pub trait RedisStore:
                 ApplyResult::Integer(len as i64)
             }
             Command::GetSet { key, value } => {
-                let old = self.getset(key.clone(), value.clone());
+                let old = self.getset(key.clone(), Bytes::from(value.clone()));
                 ApplyResult::Value(old)
             }
             Command::SetRange { key, offset, value } => {
@@ -655,74 +673,125 @@ pub trait RedisStore:
             }
 
             // ==================== List Read Commands ====================
-            Command::LLen { key } => ApplyResult::Integer(self.llen(key) as i64),
-            Command::LIndex { key, index } => ApplyResult::Value(self.lindex(key, *index)),
-            Command::LRange { key, start, stop } => {
-                let list = self.lrange(key, *start, *stop);
-                ApplyResult::Array(list.into_iter().map(Some).collect())
-            }
+            Command::LLen { key } => match self.llen(key) {
+                Ok(len) => ApplyResult::Integer(len as i64),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::LIndex { key, index } => match self.lindex(key, *index) {
+                Ok(val) => ApplyResult::Value(val),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::LRange { key, start, stop } => match self.lrange(key, *start, *stop) {
+                Ok(list) => ApplyResult::Array(list.into_iter().map(Some).collect()),
+                Err(e) => ApplyResult::Error(e),
+            },
 
             // ==================== List Write Commands ====================
             Command::LPush { key, values } => {
-                let len = self.lpush(key, values.clone());
-                ApplyResult::Integer(len as i64)
+                let values_converted: Vec<Bytes> =
+                    values.iter().map(|v| Bytes::from(v.clone())).collect();
+                match self.lpush(key, values_converted) {
+                    Ok(len) => ApplyResult::Integer(len as i64),
+                    Err(e) => ApplyResult::Error(e),
+                }
             }
             Command::RPush { key, values } => {
-                let len = self.rpush(key, values.clone());
-                ApplyResult::Integer(len as i64)
+                let values_converted: Vec<Bytes> =
+                    values.iter().map(|v| Bytes::from(v.clone())).collect();
+                match self.rpush(key, values_converted) {
+                    Ok(len) => ApplyResult::Integer(len as i64),
+                    Err(e) => ApplyResult::Error(e),
+                }
             }
-            Command::LPop { key } => ApplyResult::Value(self.lpop(key)),
-            Command::RPop { key } => ApplyResult::Value(self.rpop(key)),
-            Command::LSet { key, index, value } => match self.lset(key, *index, value.clone()) {
-                Ok(()) => ApplyResult::Ok,
+            Command::LPop { key } => match self.lpop(key) {
+                Ok(val) => ApplyResult::Value(val),
                 Err(e) => ApplyResult::Error(e),
             },
+            Command::RPop { key } => match self.rpop(key) {
+                Ok(val) => ApplyResult::Value(val),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::LSet { key, index, value } => {
+                match self.lset(key, *index, Bytes::from(value.clone())) {
+                    Ok(()) => ApplyResult::Ok,
+                    Err(e) => ApplyResult::Error(e),
+                }
+            }
             Command::LTrim { key, start, stop } => match self.ltrim(key, *start, *stop) {
                 Ok(()) => ApplyResult::Ok,
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::LRem { key, count, value } => {
-                let removed = self.lrem(key, *count, value);
-                ApplyResult::Integer(removed as i64)
-            }
+            Command::LRem { key, count, value } => match self.lrem(key, *count, value) {
+                Ok(removed) => ApplyResult::Integer(removed as i64),
+                Err(e) => ApplyResult::Error(e),
+            },
 
             // ==================== Hash Read Commands ====================
-            Command::HGet { key, field } => ApplyResult::Value(self.hget(key, field)),
+            Command::HGet { key, field } => match self.hget(key, field) {
+                Ok(val) => ApplyResult::Value(val),
+                Err(e) => ApplyResult::Error(e),
+            },
             Command::HMGet { key, fields } => {
                 let fields_refs: Vec<&[u8]> = fields.iter().map(|f| f.as_slice()).collect();
-                ApplyResult::Array(self.hmget(key, &fields_refs))
+                match self.hmget(key, &fields_refs) {
+                    Ok(vals) => ApplyResult::Array(vals),
+                    Err(e) => ApplyResult::Error(e),
+                }
             }
-            Command::HGetAll { key } => ApplyResult::KeyValues(self.hgetall(key)),
-            Command::HKeys { key } => {
-                let keys = self.hkeys(key);
-                ApplyResult::Array(keys.into_iter().map(Some).collect())
-            }
-            Command::HVals { key } => {
-                let vals = self.hvals(key);
-                ApplyResult::Array(vals.into_iter().map(Some).collect())
-            }
-            Command::HLen { key } => ApplyResult::Integer(self.hlen(key) as i64),
-            Command::HExists { key, field } => {
-                ApplyResult::Integer(if self.hexists(key, field) { 1 } else { 0 })
-            }
+            Command::HGetAll { key } => match self.hgetall(key) {
+                Ok(kvs) => ApplyResult::KeyValues(kvs),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::HKeys { key } => match self.hkeys(key) {
+                Ok(keys) => ApplyResult::Array(keys.into_iter().map(Some).collect()),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::HVals { key } => match self.hvals(key) {
+                Ok(vals) => ApplyResult::Array(vals.into_iter().map(Some).collect()),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::HLen { key } => match self.hlen(key) {
+                Ok(len) => ApplyResult::Integer(len as i64),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::HExists { key, field } => match self.hexists(key, field) {
+                Ok(exists) => ApplyResult::Integer(if exists { 1 } else { 0 }),
+                Err(e) => ApplyResult::Error(e),
+            },
 
             // ==================== Hash Write Commands ====================
             Command::HSet { key, fvs } => {
-                self.hmset(key, fvs.clone());
-                ApplyResult::Integer(fvs.len() as i64)
+                let fvs_converted: Vec<(Vec<u8>, Bytes)> = fvs
+                    .iter()
+                    .map(|(f, v)| (f.clone(), Bytes::from(v.clone())))
+                    .collect();
+                match self.hmset(key, fvs_converted) {
+                    Ok(()) => ApplyResult::Integer(fvs.len() as i64),
+                    Err(e) => ApplyResult::Error(e),
+                }
             }
             Command::HSetNx { key, field, value } => {
-                let result = self.hsetnx(key, field.clone(), value.clone());
-                ApplyResult::Integer(if result { 1 } else { 0 })
+                match self.hsetnx(key, field.clone(), Bytes::from(value.clone())) {
+                    Ok(result) => ApplyResult::Integer(if result { 1 } else { 0 }),
+                    Err(e) => ApplyResult::Error(e),
+                }
             }
             Command::HMSet { key, fvs } => {
-                self.hmset(key, fvs.clone());
-                ApplyResult::Ok
+                let fvs_converted: Vec<(Vec<u8>, Bytes)> = fvs
+                    .iter()
+                    .map(|(f, v)| (f.clone(), Bytes::from(v.clone())))
+                    .collect();
+                match self.hmset(key, fvs_converted) {
+                    Ok(()) => ApplyResult::Ok,
+                    Err(e) => ApplyResult::Error(e),
+                }
             }
             Command::HDel { key, fields } => {
                 let fields_refs: Vec<&[u8]> = fields.iter().map(|f| f.as_slice()).collect();
-                let count = self.hdel(key, &fields_refs);
-                ApplyResult::Integer(count as i64)
+                match self.hdel(key, &fields_refs) {
+                    Ok(count) => ApplyResult::Integer(count as i64),
+                    Err(e) => ApplyResult::Error(e),
+                }
             }
             Command::HIncrBy { key, field, delta } => match self.hincrby(key, field, *delta) {
                 Ok(v) => ApplyResult::Integer(v),
@@ -734,48 +803,66 @@ pub trait RedisStore:
             }
 
             // ==================== Set Read Commands ====================
-            Command::SMembers { key } => {
-                let members = self.smembers(key);
-                ApplyResult::Array(members.into_iter().map(Some).collect())
-            }
-            Command::SIsMember { key, member } => {
-                ApplyResult::Integer(if self.sismember(key, member) { 1 } else { 0 })
-            }
-            Command::SCard { key } => ApplyResult::Integer(self.scard(key) as i64),
+            Command::SMembers { key } => match self.smembers(key) {
+                Ok(members) => ApplyResult::Array(members.into_iter().map(Some).collect()),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::SIsMember { key, member } => match self.sismember(key, member) {
+                Ok(exists) => ApplyResult::Integer(if exists { 1 } else { 0 }),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::SCard { key } => match self.scard(key) {
+                Ok(card) => ApplyResult::Integer(card as i64),
+                Err(e) => ApplyResult::Error(e),
+            },
             Command::SInter { keys } => {
                 let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
-                let result = self.sinter(&keys_refs);
-                ApplyResult::Array(result.into_iter().map(Some).collect())
+                match self.sinter(&keys_refs) {
+                    Ok(result) => ApplyResult::Array(result.into_iter().map(Some).collect()),
+                    Err(e) => ApplyResult::Error(e),
+                }
             }
             Command::SUnion { keys } => {
                 let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
-                let result = self.sunion(&keys_refs);
-                ApplyResult::Array(result.into_iter().map(Some).collect())
+                match self.sunion(&keys_refs) {
+                    Ok(result) => ApplyResult::Array(result.into_iter().map(Some).collect()),
+                    Err(e) => ApplyResult::Error(e),
+                }
             }
             Command::SDiff { keys } => {
                 let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
-                let result = self.sdiff(&keys_refs);
-                ApplyResult::Array(result.into_iter().map(Some).collect())
+                match self.sdiff(&keys_refs) {
+                    Ok(result) => ApplyResult::Array(result.into_iter().map(Some).collect()),
+                    Err(e) => ApplyResult::Error(e),
+                }
             }
 
             // ==================== Set Write Commands ====================
             Command::SAdd { key, members } => {
-                let count = self.sadd(key, members.clone());
-                ApplyResult::Integer(count as i64)
+                let members_converted: Vec<Bytes> =
+                    members.iter().map(|m| Bytes::from(m.clone())).collect();
+                match self.sadd(key, members_converted) {
+                    Ok(count) => ApplyResult::Integer(count as i64),
+                    Err(e) => ApplyResult::Error(e),
+                }
             }
             Command::SRem { key, members } => {
                 let members_refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
-                let count = self.srem(key, &members_refs);
-                ApplyResult::Integer(count as i64)
-            }
-            Command::SPop { key, count } => {
-                let result = self.spop(key, count.unwrap_or(1) as usize);
-                if result.len() == 1 {
-                    ApplyResult::Value(result.into_iter().next())
-                } else {
-                    ApplyResult::Array(result.into_iter().map(Some).collect())
+                match self.srem(key, &members_refs) {
+                    Ok(count) => ApplyResult::Integer(count as i64),
+                    Err(e) => ApplyResult::Error(e),
                 }
             }
+            Command::SPop { key, count } => match self.spop(key, count.unwrap_or(1) as usize) {
+                Ok(result) => {
+                    if result.len() == 1 {
+                        ApplyResult::Value(result.into_iter().next())
+                    } else {
+                        ApplyResult::Array(result.into_iter().map(Some).collect())
+                    }
+                }
+                Err(e) => ApplyResult::Error(e),
+            },
 
             // ==================== Key Read Commands ====================
             Command::Exists { keys } => {
