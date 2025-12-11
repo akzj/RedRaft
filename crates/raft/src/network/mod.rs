@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{timeout, Duration};
 use tonic::transport::{Endpoint, Server};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 /// Network message channel capacity
 const NETWORK_CHANNEL_CAPACITY: usize = 4096;
@@ -204,52 +204,36 @@ impl MultiRaftNetwork {
         rpc_client: GrpcClient,
         shutdown: Arc<Notify>,
     ) {
-        let batch_size = self.options.batch_size; // Batch size
+        let batch_size = self.options.batch_size;
+        const MAX_RETRIES: u32 = 3;
+        const RETRY_DELAY: Duration = Duration::from_millis(100);
 
         let mut client = RaftServiceClient::new(rpc_client.clone());
 
         loop {
-            let mut batch: Vec<OutgoingMessage> = Vec::with_capacity(batch_size / 4);
+            let mut batch: Vec<OutgoingMessage> = Vec::with_capacity(batch_size);
             // Collect a batch of messages
-            async {
-                tokio::select! {
-                    // Receive messages
-                    size = rx.recv_many(&mut batch, batch_size) => {
-                        if size == 0 {
-                            warn!("No messages received, exiting sender task");
-                            return;
-                        }
-                    }
-                    // Check shutdown notification
-                    _ = shutdown.notified() => {
-                        warn!("Shutdown notified, exiting sender task");
+            tokio::select! {
+                // Receive messages (recv_many will receive up to batch_size messages)
+                size = rx.recv_many(&mut batch, batch_size) => {
+                    if size == 0 {
+                        warn!("No messages received, exiting sender task");
                         return;
                     }
                 }
-
-                while batch.len() < batch_size {
-                    match rx.try_recv() {
-                        Ok(msg) => batch.push(msg),
-                        Err(err) => {
-                            // check err is closed
-                            if err == mpsc::error::TryRecvError::Empty {
-                                debug!("Outgoing message channel empty");
-                            } else if err == mpsc::error::TryRecvError::Disconnected {
-                                warn!("Outgoing message channel disconnected");
-                            }
-                            break;
-                        }
-                    }
+                // Check shutdown notification
+                _ = shutdown.notified() => {
+                    warn!("Shutdown notified, exiting sender task");
+                    return;
                 }
             }
-            .await;
 
             if batch.is_empty() {
-                //  No messages received, exiting sender task
+                // No messages received, exiting sender task
                 return;
             }
 
-            // Group messages by target node
+            // Convert messages to batch request
             let mut batch_requests = pb::BatchRequest {
                 node_id: self.options.node_id.clone(),
                 messages: Vec::with_capacity(batch.len()),
@@ -260,20 +244,51 @@ impl MultiRaftNetwork {
 
             // Send batch with retry logic
             let msg_len = batch_requests.messages.len();
+            let mut retry_count = 0;
+            let mut send_success = false;
 
-            match client.send_batch(batch_requests).await {
-                Ok(response) => {
-                    if response.get_ref().success {
-                        info!("Batch {} sent successfully", msg_len);
-                        break;
-                    } else {
-                        error!("Failed to send batch: {:?}", response.get_ref().error);
+            while retry_count < MAX_RETRIES && !send_success {
+                match client.send_batch(batch_requests.clone()).await {
+                    Ok(response) => {
+                        if response.get_ref().success {
+                            info!("Batch {} sent successfully", msg_len);
+                            send_success = true;
+                        } else {
+                            error!(
+                                "Failed to send batch (attempt {}/{}): {:?}",
+                                retry_count + 1,
+                                MAX_RETRIES,
+                                response.get_ref().error
+                            );
+                            retry_count += 1;
+                            if retry_count < MAX_RETRIES {
+                                tokio::time::sleep(RETRY_DELAY).await;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        error!(
+                            "Failed to send batch (attempt {}/{}): {}",
+                            retry_count + 1,
+                            MAX_RETRIES,
+                            err
+                        );
+                        retry_count += 1;
+                        if retry_count < MAX_RETRIES {
+                            tokio::time::sleep(RETRY_DELAY).await;
+                        }
                     }
                 }
-                Err(err) => {
-                    error!("Failed to send batch: {}", err);
-                }
             }
+
+            if !send_success {
+                error!(
+                    "Failed to send batch after {} retries, messages may be lost",
+                    MAX_RETRIES
+                );
+                // Continue processing next batch instead of exiting
+            }
+            // Continue loop to process more messages (removed break)
         }
     }
 
@@ -297,14 +312,25 @@ impl MultiRaftNetwork {
                     }
                     Err(_) => {
                         let node_map = clone_self.node_map.read().await;
+
+                        // Remove senders for nodes that no longer exist
+                        let mut nodes_to_remove = Vec::new();
                         for (node_id, notify) in notifies.iter() {
-                            if node_map.contains_key(node_id) {
-                                continue;
+                            if !node_map.contains_key(node_id) {
+                                notify.notify_one();
+                                info!("Node {} removed, notified sender to stop", node_id);
+                                nodes_to_remove.push(node_id.clone());
+
+                                // Remove from outgoing_tx
+                                clone_self.outgoing_tx.write().remove(node_id);
                             }
-                            notify.notify_one();
-                            info!("no found node_id,notified sender for {} to stop", node_id);
+                        }
+                        // Remove from notifies map
+                        for node_id in nodes_to_remove {
+                            notifies.remove(&node_id);
                         }
 
+                        // Create senders for new nodes
                         for node_id in node_map.keys() {
                             if notifies.contains_key(node_id) {
                                 continue;
@@ -312,10 +338,7 @@ impl MultiRaftNetwork {
                             match clone_self.create_client(node_id).await {
                                 Ok(client) => {
                                     let (tx, rx) = mpsc::channel(NETWORK_CHANNEL_CAPACITY);
-                                    clone_self
-                                        .outgoing_tx
-                                        .write()
-                                        .insert(node_id.clone(), tx);
+                                    clone_self.outgoing_tx.write().insert(node_id.clone(), tx);
 
                                     let notify = Arc::new(Notify::new());
 
@@ -343,19 +366,26 @@ impl MultiRaftNetwork {
 
     // Start gRPC server (usually called in application main function)
     pub async fn start_grpc_server(&mut self, dispatch: Arc<dyn MessageDispatcher>) -> Result<()> {
-        assert!(self.dispatch.is_none(), "gRPC server already running");
+        if self.dispatch.is_some() {
+            return Err(anyhow::anyhow!("gRPC server already running"));
+        }
         self.dispatch = Some(dispatch);
         let server_addr = self.options.grpc_server_addr.clone();
+
+        let server_addr_parsed = server_addr
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid server address {}: {}", server_addr, e))?;
 
         let clone_self = self.clone();
         let shutdown = self.shutdown.clone();
         tokio::spawn(async move {
             if let Err(e) = Server::builder()
                 .add_service(RaftServiceServer::new(clone_self))
-                .serve_with_shutdown(server_addr.parse().unwrap(), shutdown.notified())
+                .serve_with_shutdown(server_addr_parsed, shutdown.notified())
                 .await
             {
-                panic!("Failed to start gRPC server: {}", e);
+                error!("gRPC server error: {}", e);
+                // Server task exits, but we don't panic to avoid crashing the process
             }
         });
         Ok(())
@@ -373,7 +403,13 @@ impl RaftService for MultiRaftNetwork {
             error: "".into(),
         };
 
-        let dispatch = self.dispatch.as_ref().unwrap().clone();
+        let dispatch = self
+            .dispatch
+            .as_ref()
+            .ok_or_else(|| {
+                tonic::Status::internal("Dispatcher not initialized - gRPC server not started")
+            })?
+            .clone();
 
         // Consume the incoming request so we can take ownership of the messages
         // and avoid cloning each message.
@@ -405,11 +441,14 @@ impl Network for MultiRaftNetwork {
         target: &RaftId,
         args: RequestVoteRequest,
     ) -> RpcResult<()> {
-        self.send_message(target, OutgoingMessage::RequestVote {
-                    from: from.clone(),
-                    target: target.clone(),
-            args,
-                })
+        self.send_message(
+            target,
+            OutgoingMessage::RequestVote {
+                from: from.clone(),
+                target: target.clone(),
+                args,
+            },
+        )
     }
 
     async fn send_request_vote_response(
@@ -418,11 +457,14 @@ impl Network for MultiRaftNetwork {
         target: &RaftId,
         args: RequestVoteResponse,
     ) -> RpcResult<()> {
-        self.send_message(target, OutgoingMessage::RequestVoteResponse {
-                    from: from.clone(),
-                    target: target.clone(),
-            args,
-                })
+        self.send_message(
+            target,
+            OutgoingMessage::RequestVoteResponse {
+                from: from.clone(),
+                target: target.clone(),
+                args,
+            },
+        )
     }
 
     async fn send_append_entries_request(
@@ -431,11 +473,14 @@ impl Network for MultiRaftNetwork {
         target: &RaftId,
         args: AppendEntriesRequest,
     ) -> RpcResult<()> {
-        self.send_message(target, OutgoingMessage::AppendEntries {
-                    from: from.clone(),
-                    target: target.clone(),
-            args,
-                })
+        self.send_message(
+            target,
+            OutgoingMessage::AppendEntries {
+                from: from.clone(),
+                target: target.clone(),
+                args,
+            },
+        )
     }
 
     async fn send_append_entries_response(
@@ -444,11 +489,14 @@ impl Network for MultiRaftNetwork {
         target: &RaftId,
         args: AppendEntriesResponse,
     ) -> RpcResult<()> {
-        self.send_message(target, OutgoingMessage::AppendEntriesResponse {
-                    from: from.clone(),
-                    target: target.clone(),
-            args,
-                })
+        self.send_message(
+            target,
+            OutgoingMessage::AppendEntriesResponse {
+                from: from.clone(),
+                target: target.clone(),
+                args,
+            },
+        )
     }
 
     async fn send_install_snapshot_request(
@@ -457,11 +505,14 @@ impl Network for MultiRaftNetwork {
         target: &RaftId,
         args: InstallSnapshotRequest,
     ) -> RpcResult<()> {
-        self.send_message(target, OutgoingMessage::InstallSnapshot {
-                    from: from.clone(),
-                    target: target.clone(),
-            args,
-                })
+        self.send_message(
+            target,
+            OutgoingMessage::InstallSnapshot {
+                from: from.clone(),
+                target: target.clone(),
+                args,
+            },
+        )
     }
 
     async fn send_install_snapshot_response(
@@ -470,11 +521,14 @@ impl Network for MultiRaftNetwork {
         target: &RaftId,
         args: InstallSnapshotResponse,
     ) -> RpcResult<()> {
-        self.send_message(target, OutgoingMessage::InstallSnapshotResponse {
-                    from: from.clone(),
-                    target: target.clone(),
-            args,
-                })
+        self.send_message(
+            target,
+            OutgoingMessage::InstallSnapshotResponse {
+                from: from.clone(),
+                target: target.clone(),
+                args,
+            },
+        )
     }
 
     async fn send_pre_vote_request(
@@ -483,11 +537,14 @@ impl Network for MultiRaftNetwork {
         target: &RaftId,
         args: PreVoteRequest,
     ) -> RpcResult<()> {
-        self.send_message(target, OutgoingMessage::PreVote {
-            from: from.clone(),
-            target: target.clone(),
-            args,
-        })
+        self.send_message(
+            target,
+            OutgoingMessage::PreVote {
+                from: from.clone(),
+                target: target.clone(),
+                args,
+            },
+        )
     }
 
     async fn send_pre_vote_response(
@@ -496,10 +553,13 @@ impl Network for MultiRaftNetwork {
         target: &RaftId,
         args: PreVoteResponse,
     ) -> RpcResult<()> {
-        self.send_message(target, OutgoingMessage::PreVoteResponse {
-            from: from.clone(),
-            target: target.clone(),
-            args,
-        })
+        self.send_message(
+            target,
+            OutgoingMessage::PreVoteResponse {
+                from: from.clone(),
+                target: target.clone(),
+                args,
+            },
+        )
     }
 }
