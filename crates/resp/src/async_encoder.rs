@@ -19,11 +19,11 @@ impl<W: AsyncWrite + Unpin> AsyncRespEncoder<W> {
     pub async fn encode(&mut self, value: &RespValue) -> std::io::Result<()> {
         match value {
             RespValue::SimpleString(s) => {
-                let data = format!("+{}\r\n", s);
+                let data = format!("+{}\r\n", String::from_utf8_lossy(&s));
                 self.writer.write_all(data.as_bytes()).await?;
             }
             RespValue::Error(e) => {
-                let data = format!("-{}\r\n", e);
+                let data = format!("-{}\r\n", String::from_utf8_lossy(&e));
                 self.writer.write_all(data.as_bytes()).await?;
             }
             RespValue::Integer(i) => {
@@ -62,7 +62,7 @@ mod tests {
     async fn test_encode_simple_string() {
         let mut writer = Vec::new();
         let mut encoder = AsyncRespEncoder::new(&mut writer);
-        let value = RespValue::SimpleString("OK".to_string());
+        let value = RespValue::SimpleString(bytes::Bytes::from(b"OK" as &[u8]));
         encoder.encode(&value).await.unwrap();
         assert_eq!(String::from_utf8_lossy(&writer), "+OK\r\n");
     }
@@ -71,7 +71,7 @@ mod tests {
     async fn test_encode_bulk_string() {
         let mut writer = Vec::new();
         let mut encoder = AsyncRespEncoder::new(&mut writer);
-        let value = RespValue::BulkString(Some(b"hello".to_vec()));
+        let value = RespValue::BulkString(Some(bytes::Bytes::from(b"hello" as &[u8])));
         encoder.encode(&value).await.unwrap();
         assert_eq!(String::from_utf8_lossy(&writer), "$5\r\nhello\r\n");
     }
@@ -81,8 +81,8 @@ mod tests {
         let mut writer = Vec::new();
         let mut encoder = AsyncRespEncoder::new(&mut writer);
         let value = RespValue::Array(vec![
-            RespValue::BulkString(Some(b"GET".to_vec())),
-            RespValue::BulkString(Some(b"key".to_vec())),
+            RespValue::BulkString(Some(bytes::Bytes::from(b"GET" as &[u8]))),
+            RespValue::BulkString(Some(bytes::Bytes::from(b"key" as &[u8]))),
         ]);
         encoder.encode(&value).await.unwrap();
         assert_eq!(

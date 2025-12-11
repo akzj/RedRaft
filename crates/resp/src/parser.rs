@@ -1,5 +1,7 @@
 //! RESP protocol sync parser
 
+use bytes::Bytes;
+
 use crate::{RespError, RespValue};
 use std::io::{BufRead, BufReader, Read};
 use std::str;
@@ -32,9 +34,10 @@ impl<R: Read> RespParser<R> {
             return Err(RespError::InvalidFormat("Empty line".to_string()));
         }
 
-        let prefix = line.chars().next().ok_or_else(|| {
-            RespError::InvalidFormat("Empty line".to_string())
-        })?;
+        let prefix = line
+            .chars()
+            .next()
+            .ok_or_else(|| RespError::InvalidFormat("Empty line".to_string()))?;
 
         match prefix {
             '+' => {
@@ -46,12 +49,12 @@ impl<R: Read> RespParser<R> {
                         "Simple string cannot contain CR or LF".to_string(),
                     ));
                 }
-                Ok(RespValue::SimpleString(value.to_string()))
+                Ok(RespValue::SimpleString(Bytes::copy_from_slice(value.as_bytes())))
             }
             '-' => {
                 // Error: -ERR message\r\n
                 // Error message may contain CRLF, but read_line already handled it
-                let error = line[1..].to_string();
+                let error = Bytes::copy_from_slice(line[1..].as_bytes());
                 Ok(RespValue::Error(error))
             }
             ':' => {
@@ -61,12 +64,12 @@ impl<R: Read> RespParser<R> {
                 let num = num_str.parse::<i128>().map_err(|_| {
                     RespError::InvalidFormat(format!("Invalid integer: {}", num_str))
                 })?;
-                
+
                 // Check if within i64 range
                 if num > i64::MAX as i128 || num < i64::MIN as i128 {
                     return Err(RespError::IntegerOverflow);
                 }
-                
+
                 Ok(RespValue::Integer(num as i64))
             }
             '$' => {
@@ -98,7 +101,7 @@ impl<R: Read> RespParser<R> {
                         ));
                     }
 
-                    Ok(RespValue::BulkString(Some(buffer)))
+                    Ok(RespValue::BulkString(Some(bytes::Bytes::from(buffer))))
                 }
             }
             '*' => {
@@ -112,7 +115,10 @@ impl<R: Read> RespParser<R> {
                     // Null array
                     Ok(RespValue::Null)
                 } else if count < 0 {
-                    Err(RespError::InvalidFormat(format!("Invalid array length: {}", count)))
+                    Err(RespError::InvalidFormat(format!(
+                        "Invalid array length: {}",
+                        count
+                    )))
                 } else {
                     let mut array = Vec::with_capacity(count as usize);
                     for _ in 0..count {
@@ -131,6 +137,8 @@ impl<R: Read> RespParser<R> {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+
     use super::*;
     use std::io::Cursor;
 
@@ -139,7 +147,7 @@ mod tests {
         let data = b"+OK\r\n";
         let mut parser = RespParser::new(Cursor::new(data));
         let result = parser.parse().unwrap();
-        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+        assert_eq!(result, RespValue::SimpleString(Bytes::from(b"OK" as &[u8])));
     }
 
     #[test]
@@ -149,7 +157,7 @@ mod tests {
         let result = parser.parse().unwrap();
         assert_eq!(
             result,
-            RespValue::BulkString(Some(b"hello".to_vec()))
+            RespValue::BulkString(Some(Bytes::from(b"hello" as &[u8])))
         );
     }
 
@@ -161,8 +169,14 @@ mod tests {
         match result {
             RespValue::Array(items) => {
                 assert_eq!(items.len(), 2);
-                assert_eq!(items[0], RespValue::BulkString(Some(b"GET".to_vec())));
-                assert_eq!(items[1], RespValue::BulkString(Some(b"key".to_vec())));
+                assert_eq!(
+                    items[0],
+                    RespValue::BulkString(Some(bytes::Bytes::from(b"GET" as &[u8])))
+                );
+                assert_eq!(
+                    items[1],
+                    RespValue::BulkString(Some(bytes::Bytes::from(b"key" as &[u8])))
+                );
             }
             _ => panic!("Expected array"),
         }
@@ -174,7 +188,7 @@ mod tests {
         let data = b"+OK\rHI\r\n";
         let mut parser = RespParser::new(Cursor::new(data));
         assert!(parser.parse().is_err());
-        
+
         // Test that simple string cannot contain LF
         let data = b"+OK\nHI\r\n";
         let mut parser = RespParser::new(Cursor::new(data));
@@ -187,7 +201,7 @@ mod tests {
         let data = format!(":{}\r\n", i64::MAX as i128 + 1);
         let mut parser = RespParser::new(Cursor::new(data.as_bytes()));
         assert!(matches!(parser.parse(), Err(RespError::IntegerOverflow)));
-        
+
         // Test integer within normal range
         let data = format!(":{}\r\n", i64::MAX);
         let mut parser = RespParser::new(Cursor::new(data.as_bytes()));

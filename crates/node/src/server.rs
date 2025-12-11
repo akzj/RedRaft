@@ -61,7 +61,7 @@ async fn handle_client(
             Ok(v) => v,
             Err(e) => {
                 // Send error response
-                let error = RespValue::Error(format!("ERR {}", e));
+                let error = RespValue::Error(bytes::Bytes::from(format!("ERR {}", e)));
                 encoder.encode(&error).await?;
                 break;
             }
@@ -71,7 +71,7 @@ async fn handle_client(
         let command = match Command::try_from(&resp_value) {
             Ok(cmd) => cmd,
             Err(e) => {
-                let error = RespValue::Error(format!("ERR {}", e));
+                let error = RespValue::Error(bytes::Bytes::from(format!("ERR {}", e)));
                 encoder.encode(&error).await?;
                 continue;
             }
@@ -80,7 +80,7 @@ async fn handle_client(
         // Handle command
         let response = match node.handle_command(command).await {
             Ok(resp) => resp,
-            Err(e) => RespValue::Error(format!("ERR {}", e)),
+            Err(e) => RespValue::Error(bytes::Bytes::from(format!("ERR {}", e))),
         };
 
         encoder.encode(&response).await?;

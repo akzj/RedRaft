@@ -1,6 +1,7 @@
 //! RESP protocol async parser
 
 use crate::{RespError, RespValue};
+use bytes::Bytes;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 
 /// Default maximum frame size: 512MB (prevents memory overflow attacks)
@@ -109,13 +110,13 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
                 "Simple string cannot contain CR or LF".to_string(),
             ));
         }
-        Ok(RespValue::SimpleString(value.to_string()))
+        Ok(RespValue::SimpleString(Bytes::from(value.to_string())))
     }
 
     /// Parse error: -ERR message\r\n
     async fn parse_error(&mut self, line: &str) -> Result<RespValue, RespError> {
         let error = line[1..].to_string();
-        Ok(RespValue::Error(error))
+        Ok(RespValue::Error(Bytes::from(error)))
     }
 
     /// Parse integer: :123\r\n
@@ -166,7 +167,7 @@ impl<R: AsyncRead + Unpin> AsyncRespParser<R> {
                 ));
             }
 
-            Ok(RespValue::BulkString(Some(buffer)))
+            Ok(RespValue::BulkString(Some(bytes::Bytes::from(buffer))))
         }
     }
 
@@ -216,7 +217,7 @@ mod tests {
         let reader = Builder::new().read(data).build();
         let mut parser = AsyncRespParser::with_max_bytes(reader, 1024);
         let result = parser.parse().await.unwrap();
-        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+        assert_eq!(result, RespValue::SimpleString(Bytes::from("OK")));
     }
 
     #[tokio::test]
@@ -225,7 +226,10 @@ mod tests {
         let reader = Builder::new().read(data).build();
         let mut parser = AsyncRespParser::with_max_bytes(reader, 1024);
         let result = parser.parse().await.unwrap();
-        assert_eq!(result, RespValue::BulkString(Some(b"hello".to_vec())));
+        assert_eq!(
+            result,
+            RespValue::BulkString(Some(bytes::Bytes::from(b"hello" as &[u8])))
+        );
     }
 
     #[tokio::test]
@@ -237,8 +241,14 @@ mod tests {
         match result {
             RespValue::Array(items) => {
                 assert_eq!(items.len(), 2);
-                assert_eq!(items[0], RespValue::BulkString(Some(b"GET".to_vec())));
-                assert_eq!(items[1], RespValue::BulkString(Some(b"key".to_vec())));
+                assert_eq!(
+                    items[0],
+                    RespValue::BulkString(Some(bytes::Bytes::from(b"GET" as &[u8])))
+                );
+                assert_eq!(
+                    items[1],
+                    RespValue::BulkString(Some(bytes::Bytes::from(b"key" as &[u8])))
+                );
             }
             _ => panic!("Expected array"),
         }

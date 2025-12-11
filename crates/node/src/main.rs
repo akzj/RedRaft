@@ -7,11 +7,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use storage::store::HybridStore;
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use raft::storage::FileStorage;
 use raft::network::MultiRaftNetwork;
+use raft::storage::FileStorage;
 
 use redraft::node::RedRaftNode;
 use redraft::pilot_client::{PilotClient, PilotClientConfig};
@@ -73,9 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => Level::INFO,
     };
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(level)
-        .finish();
+    let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
     info!("Starting RedRaft node: {}", args.node_id);
@@ -92,15 +91,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage = Arc::new(file_storage);
 
     // Create network layer
-    let network_options = raft::network::MultiRaftNetworkOptions::default()
-        .with_node_id(args.node_id.clone());
+    let network_options =
+        raft::network::MultiRaftNetworkOptions::default().with_node_id(args.node_id.clone());
     let network = Arc::new(MultiRaftNetwork::new(network_options));
+
+    // Create Redis store
+    let redis_store = Arc::new(HybridStore::new(
+        args.shard_count as u32,
+        storage::snapshot::SnapshotConfig::default(),
+        args.data_dir.clone(),
+    )?);
 
     // Create RedRaft node
     let node = Arc::new(RedRaftNode::new(
         args.node_id.clone(),
         storage,
         network,
+        redis_store,
         args.shard_count,
     ));
 
@@ -128,7 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match client.connect().await {
             Ok(()) => {
                 info!("Connected to pilot successfully");
-                
+
                 // Update node routing table and sync Raft groups
                 {
                     let routing = client.routing_table();
@@ -140,13 +147,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         info!("Initial sync: created {} Raft groups", created);
                     }
                 }
-                
+
                 // Set Pilot client for status reporting
                 node.set_pilot_client(client.clone());
-                
+
                 // Start background tasks
                 let _handles = client.clone().start_background_tasks();
-                
+
                 // Start routing table sync task
                 let node_clone = node.clone();
                 let routing_table = client.routing_table();
@@ -161,11 +168,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         node_clone.sync_raft_groups_from_routing(&table).await;
                     }
                 });
-                
+
                 Some(client)
             }
             Err(e) => {
-                warn!("Failed to connect to pilot: {}, running in standalone mode", e);
+                warn!(
+                    "Failed to connect to pilot: {}, running in standalone mode",
+                    e
+                );
                 None
             }
         }
@@ -184,10 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 router.shard_count()
             );
         } else {
-            info!(
-                "Using local routing: {} shards",
-                router.shard_count()
-            );
+            info!("Using local routing: {} shards", router.shard_count());
         }
     }
 
@@ -196,7 +203,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = RedisServer::new(node, addr);
 
     info!("RedRaft node is ready!");
-    info!("Connect with: redis-cli -h {} -p {}", addr.ip(), addr.port());
+    info!(
+        "Connect with: redis-cli -h {} -p {}",
+        addr.ip(),
+        addr.port()
+    );
 
     // Start server (blocking)
     server.start().await?;

@@ -14,6 +14,7 @@ use crate::rocksdb::key_encoding::{
 use crate::rocksdb::ShardedRocksDB;
 use crate::shard::ShardId;
 use crate::traits::{StoreError, StoreResult};
+use bytes::Bytes;
 use rocksdb::{ColumnFamily, WriteBatch};
 
 impl ShardedRocksDB {
@@ -25,8 +26,8 @@ impl ShardedRocksDB {
     }
 
     /// HSET
-    pub fn hset(&self, shard_id: ShardId, key: &[u8], field: Vec<u8>, value: Vec<u8>) -> bool {
-        self.hset_with_index(shard_id, key, field, value, None)
+    pub fn hset(&self, shard_id: ShardId, key: &[u8], field: &[u8], value: Bytes) -> bool {
+        self.hset_with_index(shard_id, key, field.as_ref(), value, None)
     }
 
     /// HSET with apply_index: Atomically set hash field and update apply_index
@@ -34,8 +35,8 @@ impl ShardedRocksDB {
         &self,
         shard_id: ShardId,
         key: &[u8],
-        field: Vec<u8>,
-        value: Vec<u8>,
+        field: &[u8],
+        value: Bytes,
         apply_index: Option<u64>,
     ) -> bool {
         if let Ok(cf) = self.get_or_create_cf(shard_id) {
@@ -79,7 +80,7 @@ impl ShardedRocksDB {
     }
 
     /// HMSET
-    pub fn hmset(&self, shard_id: ShardId, key: &[u8], fvs: Vec<(Vec<u8>, Vec<u8>)>) {
+    pub fn hmset(&self, shard_id: ShardId, key: &[u8], fvs: Vec<(&[u8], Bytes)>) {
         self.hmset_with_index(shard_id, key, fvs, None)
     }
 
@@ -88,7 +89,7 @@ impl ShardedRocksDB {
         &self,
         shard_id: ShardId,
         key: &[u8],
-        fvs: Vec<(Vec<u8>, Vec<u8>)>,
+        fvs: Vec<(&[u8], Bytes)>,
         apply_index: Option<u64>,
     ) {
         if let Ok(cf) = self.get_or_create_cf(shard_id) {
@@ -382,4 +383,3 @@ impl ShardedRocksDB {
         }
     }
 }
-

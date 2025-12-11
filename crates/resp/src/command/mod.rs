@@ -1,5 +1,5 @@
 //! Redis command parsing module
-//! 
+//!
 //! Parses RespValue into type-safe Command structures
 
 mod error;
@@ -9,6 +9,7 @@ pub use error::{CommandError, CommandErrorKind};
 pub use result::CommandResult;
 
 use crate::RespValue;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 /// Command type marker
@@ -25,9 +26,9 @@ pub enum CommandType {
 pub enum Command {
     // ==================== Connection/Management Commands ====================
     /// PING [message]
-    Ping { message: Option<Vec<u8>> },
+    Ping { message: Option<Bytes> },
     /// ECHO message
-    Echo { message: Vec<u8> },
+    Echo { message: Bytes },
     /// COMMAND
     CommandInfo,
     /// INFO [section]
@@ -39,152 +40,194 @@ pub enum Command {
 
     // ==================== String Read Commands ====================
     /// GET key
-    Get { key: Vec<u8> },
+    Get { key: Bytes },
     /// MGET key [key ...]
-    MGet { keys: Vec<Vec<u8>> },
+    MGet { keys: Vec<Bytes> },
     /// STRLEN key
-    StrLen { key: Vec<u8> },
+    StrLen { key: Bytes },
     /// GETRANGE key start end
-    GetRange { key: Vec<u8>, start: i64, end: i64 },
+    GetRange { key: Bytes, start: i64, end: i64 },
 
     // ==================== String Write Commands ====================
     /// SET key value [EX seconds] [PX milliseconds] [NX|XX]
     Set {
-        key: Vec<u8>,
-        value: Vec<u8>,
+        key: Bytes,
+        value: Bytes,
         ex: Option<u64>,
         px: Option<u64>,
         nx: bool,
         xx: bool,
     },
     /// SETNX key value
-    SetNx { key: Vec<u8>, value: Vec<u8> },
+    SetNx { key: Bytes, value: Bytes },
     /// SETEX key seconds value
-    SetEx { key: Vec<u8>, seconds: u64, value: Vec<u8> },
+    SetEx {
+        key: Bytes,
+        seconds: u64,
+        value: Bytes,
+    },
     /// PSETEX key milliseconds value
-    PSetEx { key: Vec<u8>, milliseconds: u64, value: Vec<u8> },
+    PSetEx {
+        key: Bytes,
+        milliseconds: u64,
+        value: Bytes,
+    },
     /// MSET key value [key value ...]
-    MSet { kvs: Vec<(Vec<u8>, Vec<u8>)> },
+    MSet { kvs: Vec<(Bytes, Bytes)> },
     /// MSETNX key value [key value ...]
-    MSetNx { kvs: Vec<(Vec<u8>, Vec<u8>)> },
+    MSetNx { kvs: Vec<(Bytes, Bytes)> },
     /// INCR key
-    Incr { key: Vec<u8> },
+    Incr { key: Bytes },
     /// INCRBY key increment
-    IncrBy { key: Vec<u8>, delta: i64 },
+    IncrBy { key: Bytes, delta: i64 },
     /// INCRBYFLOAT key increment
-    IncrByFloat { key: Vec<u8>, delta: f64 },
+    IncrByFloat { key: Bytes, delta: f64 },
     /// DECR key
-    Decr { key: Vec<u8> },
+    Decr { key: Bytes },
     /// DECRBY key decrement
-    DecrBy { key: Vec<u8>, delta: i64 },
+    DecrBy { key: Bytes, delta: i64 },
     /// APPEND key value
-    Append { key: Vec<u8>, value: Vec<u8> },
+    Append { key: Bytes, value: Bytes },
     /// GETSET key value
-    GetSet { key: Vec<u8>, value: Vec<u8> },
+    GetSet { key: Bytes, value: Bytes },
     /// SETRANGE key offset value
-    SetRange { key: Vec<u8>, offset: i64, value: Vec<u8> },
+    SetRange {
+        key: Bytes,
+        offset: i64,
+        value: Bytes,
+    },
 
     // ==================== List Read Commands ====================
     /// LLEN key
-    LLen { key: Vec<u8> },
+    LLen { key: Bytes },
     /// LINDEX key index
-    LIndex { key: Vec<u8>, index: i64 },
+    LIndex { key: Bytes, index: i64 },
     /// LRANGE key start stop
-    LRange { key: Vec<u8>, start: i64, stop: i64 },
+    LRange { key: Bytes, start: i64, stop: i64 },
 
     // ==================== List Write Commands ====================
     /// LPUSH key value [value ...]
-    LPush { key: Vec<u8>, values: Vec<Vec<u8>> },
+    LPush { key: Bytes, values: Vec<Bytes> },
     /// RPUSH key value [value ...]
-    RPush { key: Vec<u8>, values: Vec<Vec<u8>> },
+    RPush { key: Bytes, values: Vec<Bytes> },
     /// LPOP key
-    LPop { key: Vec<u8> },
+    LPop { key: Bytes },
     /// RPOP key
-    RPop { key: Vec<u8> },
+    RPop { key: Bytes },
     /// LSET key index value
-    LSet { key: Vec<u8>, index: i64, value: Vec<u8> },
+    LSet {
+        key: Bytes,
+        index: i64,
+        value: Bytes,
+    },
     /// LTRIM key start stop
-    LTrim { key: Vec<u8>, start: i64, stop: i64 },
+    LTrim { key: Bytes, start: i64, stop: i64 },
     /// LREM key count value
-    LRem { key: Vec<u8>, count: i64, value: Vec<u8> },
+    LRem {
+        key: Bytes,
+        count: i64,
+        value: Bytes,
+    },
 
     // ==================== Hash Read Commands ====================
     /// HGET key field
-    HGet { key: Vec<u8>, field: Vec<u8> },
+    HGet { key: Bytes, field: Bytes },
     /// HMGET key field [field ...]
-    HMGet { key: Vec<u8>, fields: Vec<Vec<u8>> },
+    HMGet { key: Bytes, fields: Vec<Bytes> },
     /// HGETALL key
-    HGetAll { key: Vec<u8> },
+    HGetAll { key: Bytes },
     /// HKEYS key
-    HKeys { key: Vec<u8> },
+    HKeys { key: Bytes },
     /// HVALS key
-    HVals { key: Vec<u8> },
+    HVals { key: Bytes },
     /// HLEN key
-    HLen { key: Vec<u8> },
+    HLen { key: Bytes },
     /// HEXISTS key field
-    HExists { key: Vec<u8>, field: Vec<u8> },
+    HExists { key: Bytes, field: Bytes },
 
     // ==================== Hash Write Commands ====================
     /// HSET key field value [field value ...]
-    HSet { key: Vec<u8>, fvs: Vec<(Vec<u8>, Vec<u8>)> },
+    HSet {
+        key: Bytes,
+        fvs: Vec<(Bytes, Bytes)>,
+    },
     /// HSETNX key field value
-    HSetNx { key: Vec<u8>, field: Vec<u8>, value: Vec<u8> },
+    HSetNx {
+        key: Bytes,
+        field: Bytes,
+        value: Bytes,
+    },
     /// HMSET key field value [field value ...]
-    HMSet { key: Vec<u8>, fvs: Vec<(Vec<u8>, Vec<u8>)> },
+    HMSet {
+        key: Bytes,
+        fvs: Vec<(Bytes, Bytes)>,
+    },
     /// HDEL key field [field ...]
-    HDel { key: Vec<u8>, fields: Vec<Vec<u8>> },
+    HDel { key: Bytes, fields: Vec<Bytes> },
     /// HINCRBY key field increment
-    HIncrBy { key: Vec<u8>, field: Vec<u8>, delta: i64 },
+    HIncrBy {
+        key: Bytes,
+        field: Bytes,
+        delta: i64,
+    },
     /// HINCRBYFLOAT key field increment
-    HIncrByFloat { key: Vec<u8>, field: Vec<u8>, delta: f64 },
+    HIncrByFloat {
+        key: Bytes,
+        field: Bytes,
+        delta: f64,
+    },
 
     // ==================== Set Read Commands ====================
     /// SMEMBERS key
-    SMembers { key: Vec<u8> },
+    SMembers { key: Bytes },
     /// SISMEMBER key member
-    SIsMember { key: Vec<u8>, member: Vec<u8> },
+    SIsMember { key: Bytes, member: Bytes },
     /// SCARD key
-    SCard { key: Vec<u8> },
+    SCard { key: Bytes },
     /// SINTER key [key ...]
-    SInter { keys: Vec<Vec<u8>> },
+    SInter { keys: Vec<Bytes> },
     /// SUNION key [key ...]
-    SUnion { keys: Vec<Vec<u8>> },
+    SUnion { keys: Vec<Bytes> },
     /// SDIFF key [key ...]
-    SDiff { keys: Vec<Vec<u8>> },
+    SDiff { keys: Vec<Bytes> },
 
     // ==================== Set Write Commands ====================
     /// SADD key member [member ...]
-    SAdd { key: Vec<u8>, members: Vec<Vec<u8>> },
+    SAdd { key: Bytes, members: Vec<Bytes> },
     /// SREM key member [member ...]
-    SRem { key: Vec<u8>, members: Vec<Vec<u8>> },
+    SRem { key: Bytes, members: Vec<Bytes> },
     /// SPOP key [count]
-    SPop { key: Vec<u8>, count: Option<u64> },
+    SPop { key: Bytes, count: Option<u64> },
 
     // ==================== Key Commands ====================
     /// DEL key [key ...]
-    Del { keys: Vec<Vec<u8>> },
+    Del { keys: Vec<Bytes> },
     /// EXISTS key [key ...]
-    Exists { keys: Vec<Vec<u8>> },
+    Exists { keys: Vec<Bytes> },
     /// EXPIRE key seconds
-    Expire { key: Vec<u8>, seconds: u64 },
+    Expire { key: Bytes, seconds: u64 },
     /// PEXPIRE key milliseconds
-    PExpire { key: Vec<u8>, milliseconds: u64 },
+    PExpire { key: Bytes, milliseconds: u64 },
     /// TTL key
-    Ttl { key: Vec<u8> },
+    Ttl { key: Bytes },
     /// PTTL key
-    PTtl { key: Vec<u8> },
+    PTtl { key: Bytes },
     /// PERSIST key
-    Persist { key: Vec<u8> },
+    Persist { key: Bytes },
     /// TYPE key
-    Type { key: Vec<u8> },
+    Type { key: Bytes },
     /// RENAME key newkey
-    Rename { key: Vec<u8>, new_key: Vec<u8> },
+    Rename { key: Bytes, new_key: Bytes },
     /// RENAMENX key newkey
-    RenameNx { key: Vec<u8>, new_key: Vec<u8> },
+    RenameNx { key: Bytes, new_key: Bytes },
     /// KEYS pattern
-    Keys { pattern: Vec<u8> },
+    Keys { pattern: Bytes },
     /// SCAN cursor [MATCH pattern] [COUNT count]
-    Scan { cursor: u64, pattern: Option<Vec<u8>>, count: Option<u64> },
+    Scan {
+        cursor: u64,
+        pattern: Option<Bytes>,
+        count: Option<u64>,
+    },
 }
 
 impl Command {
@@ -192,42 +235,84 @@ impl Command {
     pub fn command_type(&self) -> CommandType {
         match self {
             // Management commands
-            Command::Ping { .. } | Command::Echo { .. } | Command::CommandInfo |
-            Command::Info { .. } | Command::DbSize => CommandType::Read,
+            Command::Ping { .. }
+            | Command::Echo { .. }
+            | Command::CommandInfo
+            | Command::Info { .. }
+            | Command::DbSize => CommandType::Read,
             Command::FlushDb => CommandType::Write,
 
             // String commands
-            Command::Get { .. } | Command::MGet { .. } | Command::StrLen { .. } |
-            Command::GetRange { .. } => CommandType::Read,
-            Command::Set { .. } | Command::SetNx { .. } | Command::SetEx { .. } |
-            Command::PSetEx { .. } | Command::MSet { .. } | Command::MSetNx { .. } |
-            Command::Incr { .. } | Command::IncrBy { .. } | Command::IncrByFloat { .. } |
-            Command::Decr { .. } | Command::DecrBy { .. } | Command::Append { .. } |
-            Command::GetSet { .. } | Command::SetRange { .. } => CommandType::Write,
+            Command::Get { .. }
+            | Command::MGet { .. }
+            | Command::StrLen { .. }
+            | Command::GetRange { .. } => CommandType::Read,
+            Command::Set { .. }
+            | Command::SetNx { .. }
+            | Command::SetEx { .. }
+            | Command::PSetEx { .. }
+            | Command::MSet { .. }
+            | Command::MSetNx { .. }
+            | Command::Incr { .. }
+            | Command::IncrBy { .. }
+            | Command::IncrByFloat { .. }
+            | Command::Decr { .. }
+            | Command::DecrBy { .. }
+            | Command::Append { .. }
+            | Command::GetSet { .. }
+            | Command::SetRange { .. } => CommandType::Write,
 
             // List commands
-            Command::LLen { .. } | Command::LIndex { .. } | Command::LRange { .. } => CommandType::Read,
-            Command::LPush { .. } | Command::RPush { .. } | Command::LPop { .. } |
-            Command::RPop { .. } | Command::LSet { .. } | Command::LTrim { .. } |
-            Command::LRem { .. } => CommandType::Write,
+            Command::LLen { .. } | Command::LIndex { .. } | Command::LRange { .. } => {
+                CommandType::Read
+            }
+            Command::LPush { .. }
+            | Command::RPush { .. }
+            | Command::LPop { .. }
+            | Command::RPop { .. }
+            | Command::LSet { .. }
+            | Command::LTrim { .. }
+            | Command::LRem { .. } => CommandType::Write,
 
             // Hash commands
-            Command::HGet { .. } | Command::HMGet { .. } | Command::HGetAll { .. } |
-            Command::HKeys { .. } | Command::HVals { .. } | Command::HLen { .. } |
-            Command::HExists { .. } => CommandType::Read,
-            Command::HSet { .. } | Command::HSetNx { .. } | Command::HMSet { .. } |
-            Command::HDel { .. } | Command::HIncrBy { .. } | Command::HIncrByFloat { .. } => CommandType::Write,
+            Command::HGet { .. }
+            | Command::HMGet { .. }
+            | Command::HGetAll { .. }
+            | Command::HKeys { .. }
+            | Command::HVals { .. }
+            | Command::HLen { .. }
+            | Command::HExists { .. } => CommandType::Read,
+            Command::HSet { .. }
+            | Command::HSetNx { .. }
+            | Command::HMSet { .. }
+            | Command::HDel { .. }
+            | Command::HIncrBy { .. }
+            | Command::HIncrByFloat { .. } => CommandType::Write,
 
             // Set commands
-            Command::SMembers { .. } | Command::SIsMember { .. } | Command::SCard { .. } |
-            Command::SInter { .. } | Command::SUnion { .. } | Command::SDiff { .. } => CommandType::Read,
-            Command::SAdd { .. } | Command::SRem { .. } | Command::SPop { .. } => CommandType::Write,
+            Command::SMembers { .. }
+            | Command::SIsMember { .. }
+            | Command::SCard { .. }
+            | Command::SInter { .. }
+            | Command::SUnion { .. }
+            | Command::SDiff { .. } => CommandType::Read,
+            Command::SAdd { .. } | Command::SRem { .. } | Command::SPop { .. } => {
+                CommandType::Write
+            }
 
             // Key commands
-            Command::Exists { .. } | Command::Ttl { .. } | Command::PTtl { .. } |
-            Command::Type { .. } | Command::Keys { .. } | Command::Scan { .. } => CommandType::Read,
-            Command::Del { .. } | Command::Expire { .. } | Command::PExpire { .. } |
-            Command::Persist { .. } | Command::Rename { .. } | Command::RenameNx { .. } => CommandType::Write,
+            Command::Exists { .. }
+            | Command::Ttl { .. }
+            | Command::PTtl { .. }
+            | Command::Type { .. }
+            | Command::Keys { .. }
+            | Command::Scan { .. } => CommandType::Read,
+            Command::Del { .. }
+            | Command::Expire { .. }
+            | Command::PExpire { .. }
+            | Command::Persist { .. }
+            | Command::Rename { .. }
+            | Command::RenameNx { .. } => CommandType::Write,
         }
     }
 
@@ -246,40 +331,77 @@ impl Command {
     pub fn get_key(&self) -> Option<&[u8]> {
         match self {
             // No key commands
-            Command::Ping { .. } | Command::Echo { .. } | Command::CommandInfo |
-            Command::Info { .. } | Command::DbSize | Command::FlushDb => None,
+            Command::Ping { .. }
+            | Command::Echo { .. }
+            | Command::CommandInfo
+            | Command::Info { .. }
+            | Command::DbSize
+            | Command::FlushDb => None,
 
             // Single key commands
-            Command::Get { key } | Command::StrLen { key } | Command::GetRange { key, .. } |
-            Command::Set { key, .. } | Command::SetNx { key, .. } | Command::SetEx { key, .. } |
-            Command::PSetEx { key, .. } | Command::Incr { key } | Command::IncrBy { key, .. } |
-            Command::IncrByFloat { key, .. } | Command::Decr { key } | Command::DecrBy { key, .. } |
-            Command::Append { key, .. } | Command::GetSet { key, .. } | Command::SetRange { key, .. } |
-            Command::LLen { key } | Command::LIndex { key, .. } | Command::LRange { key, .. } |
-            Command::LPush { key, .. } | Command::RPush { key, .. } | Command::LPop { key } |
-            Command::RPop { key } | Command::LSet { key, .. } | Command::LTrim { key, .. } |
-            Command::LRem { key, .. } |
-            Command::HGet { key, .. } | Command::HMGet { key, .. } | Command::HGetAll { key } |
-            Command::HKeys { key } | Command::HVals { key } | Command::HLen { key } |
-            Command::HExists { key, .. } | Command::HSet { key, .. } | Command::HSetNx { key, .. } |
-            Command::HMSet { key, .. } | Command::HDel { key, .. } | Command::HIncrBy { key, .. } |
-            Command::HIncrByFloat { key, .. } |
-            Command::SMembers { key } | Command::SIsMember { key, .. } | Command::SCard { key } |
-            Command::SAdd { key, .. } | Command::SRem { key, .. } | Command::SPop { key, .. } |
-            Command::Expire { key, .. } | Command::PExpire { key, .. } | Command::Ttl { key } |
-            Command::PTtl { key } | Command::Persist { key } | Command::Type { key } |
-            Command::Rename { key, .. } | Command::RenameNx { key, .. } => Some(key),
+            Command::Get { key }
+            | Command::StrLen { key }
+            | Command::GetRange { key, .. }
+            | Command::Set { key, .. }
+            | Command::SetNx { key, .. }
+            | Command::SetEx { key, .. }
+            | Command::PSetEx { key, .. }
+            | Command::Incr { key }
+            | Command::IncrBy { key, .. }
+            | Command::IncrByFloat { key, .. }
+            | Command::Decr { key }
+            | Command::DecrBy { key, .. }
+            | Command::Append { key, .. }
+            | Command::GetSet { key, .. }
+            | Command::SetRange { key, .. }
+            | Command::LLen { key }
+            | Command::LIndex { key, .. }
+            | Command::LRange { key, .. }
+            | Command::LPush { key, .. }
+            | Command::RPush { key, .. }
+            | Command::LPop { key }
+            | Command::RPop { key }
+            | Command::LSet { key, .. }
+            | Command::LTrim { key, .. }
+            | Command::LRem { key, .. }
+            | Command::HGet { key, .. }
+            | Command::HMGet { key, .. }
+            | Command::HGetAll { key }
+            | Command::HKeys { key }
+            | Command::HVals { key }
+            | Command::HLen { key }
+            | Command::HExists { key, .. }
+            | Command::HSet { key, .. }
+            | Command::HSetNx { key, .. }
+            | Command::HMSet { key, .. }
+            | Command::HDel { key, .. }
+            | Command::HIncrBy { key, .. }
+            | Command::HIncrByFloat { key, .. }
+            | Command::SMembers { key }
+            | Command::SIsMember { key, .. }
+            | Command::SCard { key }
+            | Command::SAdd { key, .. }
+            | Command::SRem { key, .. }
+            | Command::SPop { key, .. }
+            | Command::Expire { key, .. }
+            | Command::PExpire { key, .. }
+            | Command::Ttl { key }
+            | Command::PTtl { key }
+            | Command::Persist { key }
+            | Command::Type { key }
+            | Command::Rename { key, .. }
+            | Command::RenameNx { key, .. } => Some(key),
 
             // Multi-key commands, take the first key
-            Command::MGet { keys } | Command::Del { keys } | Command::Exists { keys } |
-            Command::SInter { keys } | Command::SUnion { keys } | Command::SDiff { keys } => {
-                keys.first().map(|k| k.as_slice())
-            }
+            Command::MGet { keys }
+            | Command::Del { keys }
+            | Command::Exists { keys }
+            | Command::SInter { keys }
+            | Command::SUnion { keys }
+            | Command::SDiff { keys } => keys.first().map(|k| k.as_ref()),
 
             // Multi key-value pairs, take the first key
-            Command::MSet { kvs } | Command::MSetNx { kvs } => {
-                kvs.first().map(|(k, _)| k.as_slice())
-            }
+            Command::MSet { kvs } | Command::MSetNx { kvs } => kvs.first().map(|(k, _)| k.as_ref()),
 
             // Global scan commands
             Command::Keys { .. } | Command::Scan { .. } => None,
@@ -375,7 +497,10 @@ impl TryFrom<&RespValue> for Command {
     fn try_from(value: &RespValue) -> Result<Self, Self::Error> {
         let args = extract_args(value)?;
         if args.is_empty() {
-            return Err(CommandError::new(CommandErrorKind::EmptyCommand, "Empty command"));
+            return Err(CommandError::new(
+                CommandErrorKind::EmptyCommand,
+                "Empty command",
+            ));
         }
 
         let cmd_name = String::from_utf8_lossy(&args[0]).to_uppercase();
@@ -386,19 +511,21 @@ impl TryFrom<&RespValue> for Command {
 }
 
 /// Extract argument list from RespValue
-fn extract_args(value: &RespValue) -> Result<Vec<Vec<u8>>, CommandError> {
+fn extract_args(value: &RespValue) -> Result<Vec<Bytes>, CommandError> {
     match value {
         RespValue::Array(items) => {
             let mut args = Vec::with_capacity(items.len());
             for item in items {
                 match item {
                     RespValue::BulkString(Some(bytes)) => args.push(bytes.clone()),
-                    RespValue::SimpleString(s) => args.push(s.as_bytes().to_vec()),
-                    RespValue::Integer(n) => args.push(n.to_string().into_bytes()),
-                    _ => return Err(CommandError::new(
-                        CommandErrorKind::InvalidArgument,
-                        "Invalid argument type",
-                    )),
+                    RespValue::SimpleString(s) => args.push(s.clone()),
+                    RespValue::Integer(n) => args.push(Bytes::from(n.to_string())),
+                    _ => {
+                        return Err(CommandError::new(
+                            CommandErrorKind::InvalidArgument,
+                            "Invalid argument type",
+                        ))
+                    }
                 }
             }
             Ok(args)
@@ -413,29 +540,64 @@ fn extract_args(value: &RespValue) -> Result<Vec<Vec<u8>>, CommandError> {
 /// Parse integer argument
 fn parse_int(arg: &[u8], name: &str) -> Result<i64, CommandError> {
     std::str::from_utf8(arg)
-        .map_err(|_| CommandError::new(CommandErrorKind::InvalidArgument, format!("{} must be valid UTF-8", name)))?
+        .map_err(|_| {
+            CommandError::new(
+                CommandErrorKind::InvalidArgument,
+                format!("{} must be valid UTF-8", name),
+            )
+        })?
         .parse::<i64>()
-        .map_err(|_| CommandError::new(CommandErrorKind::InvalidArgument, format!("{} must be an integer", name)))
+        .map_err(|_| {
+            CommandError::new(
+                CommandErrorKind::InvalidArgument,
+                format!("{} must be an integer", name),
+            )
+        })
 }
 
 /// Parse unsigned integer argument
 fn parse_uint(arg: &[u8], name: &str) -> Result<u64, CommandError> {
     std::str::from_utf8(arg)
-        .map_err(|_| CommandError::new(CommandErrorKind::InvalidArgument, format!("{} must be valid UTF-8", name)))?
+        .map_err(|_| {
+            CommandError::new(
+                CommandErrorKind::InvalidArgument,
+                format!("{} must be valid UTF-8", name),
+            )
+        })?
         .parse::<u64>()
-        .map_err(|_| CommandError::new(CommandErrorKind::InvalidArgument, format!("{} must be a non-negative integer", name)))
+        .map_err(|_| {
+            CommandError::new(
+                CommandErrorKind::InvalidArgument,
+                format!("{} must be a non-negative integer", name),
+            )
+        })
 }
 
 /// Parse float argument
 fn parse_float(arg: &[u8], name: &str) -> Result<f64, CommandError> {
     std::str::from_utf8(arg)
-        .map_err(|_| CommandError::new(CommandErrorKind::InvalidArgument, format!("{} must be valid UTF-8", name)))?
+        .map_err(|_| {
+            CommandError::new(
+                CommandErrorKind::InvalidArgument,
+                format!("{} must be valid UTF-8", name),
+            )
+        })?
         .parse::<f64>()
-        .map_err(|_| CommandError::new(CommandErrorKind::InvalidArgument, format!("{} must be a float", name)))
+        .map_err(|_| {
+            CommandError::new(
+                CommandErrorKind::InvalidArgument,
+                format!("{} must be a float", name),
+            )
+        })
 }
 
 /// Check argument count
-fn check_arity(args: &[Vec<u8>], min: usize, max: Option<usize>, cmd: &str) -> Result<(), CommandError> {
+fn check_arity(
+    args: &[Bytes],
+    min: usize,
+    max: Option<usize>,
+    cmd: &str,
+) -> Result<(), CommandError> {
     if args.len() < min {
         return Err(CommandError::new(
             CommandErrorKind::WrongArity,
@@ -454,7 +616,7 @@ fn check_arity(args: &[Vec<u8>], min: usize, max: Option<usize>, cmd: &str) -> R
 }
 
 /// Parse command
-fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
+fn parse_command(cmd: &str, args: &[Bytes]) -> Result<Command, CommandError> {
     match cmd {
         // Connection/Management commands
         "PING" => {
@@ -465,7 +627,9 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
         }
         "ECHO" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::Echo { message: args[0].clone() })
+            Ok(Command::Echo {
+                message: args[0].clone(),
+            })
         }
         "COMMAND" => Ok(Command::CommandInfo),
         "INFO" => {
@@ -486,7 +650,9 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
         // String read commands
         "GET" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::Get { key: args[0].clone() })
+            Ok(Command::Get {
+                key: args[0].clone(),
+            })
         }
         "MGET" => {
             check_arity(args, 1, None, cmd)?;
@@ -494,7 +660,9 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
         }
         "STRLEN" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::StrLen { key: args[0].clone() })
+            Ok(Command::StrLen {
+                key: args[0].clone(),
+            })
         }
         "GETRANGE" => {
             check_arity(args, 3, Some(3), cmd)?;
@@ -522,29 +690,50 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
                     "EX" => {
                         i += 1;
                         if i >= args.len() {
-                            return Err(CommandError::new(CommandErrorKind::SyntaxError, "EX requires an argument"));
+                            return Err(CommandError::new(
+                                CommandErrorKind::SyntaxError,
+                                "EX requires an argument",
+                            ));
                         }
                         ex = Some(parse_uint(&args[i], "EX")?);
                     }
                     "PX" => {
                         i += 1;
                         if i >= args.len() {
-                            return Err(CommandError::new(CommandErrorKind::SyntaxError, "PX requires an argument"));
+                            return Err(CommandError::new(
+                                CommandErrorKind::SyntaxError,
+                                "PX requires an argument",
+                            ));
                         }
                         px = Some(parse_uint(&args[i], "PX")?);
                     }
                     "NX" => nx = true,
                     "XX" => xx = true,
-                    _ => return Err(CommandError::new(CommandErrorKind::SyntaxError, format!("unknown option '{}'", opt))),
+                    _ => {
+                        return Err(CommandError::new(
+                            CommandErrorKind::SyntaxError,
+                            format!("unknown option '{}'", opt),
+                        ))
+                    }
                 }
                 i += 1;
             }
 
-            Ok(Command::Set { key, value, ex, px, nx, xx })
+            Ok(Command::Set {
+                key,
+                value,
+                ex,
+                px,
+                nx,
+                xx,
+            })
         }
         "SETNX" => {
             check_arity(args, 2, Some(2), cmd)?;
-            Ok(Command::SetNx { key: args[0].clone(), value: args[1].clone() })
+            Ok(Command::SetNx {
+                key: args[0].clone(),
+                value: args[1].clone(),
+            })
         }
         "SETEX" => {
             check_arity(args, 3, Some(3), cmd)?;
@@ -565,22 +754,36 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
         "MSET" => {
             check_arity(args, 2, None, cmd)?;
             if args.len() % 2 != 0 {
-                return Err(CommandError::new(CommandErrorKind::WrongArity, "wrong number of arguments for 'MSET' command"));
+                return Err(CommandError::new(
+                    CommandErrorKind::WrongArity,
+                    "wrong number of arguments for 'MSET' command",
+                ));
             }
-            let kvs: Vec<_> = args.chunks(2).map(|c| (c[0].clone(), c[1].clone())).collect();
+            let kvs: Vec<_> = args
+                .chunks(2)
+                .map(|c| (c[0].clone(), c[1].clone()))
+                .collect();
             Ok(Command::MSet { kvs })
         }
         "MSETNX" => {
             check_arity(args, 2, None, cmd)?;
             if args.len() % 2 != 0 {
-                return Err(CommandError::new(CommandErrorKind::WrongArity, "wrong number of arguments for 'MSETNX' command"));
+                return Err(CommandError::new(
+                    CommandErrorKind::WrongArity,
+                    "wrong number of arguments for 'MSETNX' command",
+                ));
             }
-            let kvs: Vec<_> = args.chunks(2).map(|c| (c[0].clone(), c[1].clone())).collect();
+            let kvs: Vec<_> = args
+                .chunks(2)
+                .map(|c| (c[0].clone(), c[1].clone()))
+                .collect();
             Ok(Command::MSetNx { kvs })
         }
         "INCR" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::Incr { key: args[0].clone() })
+            Ok(Command::Incr {
+                key: args[0].clone(),
+            })
         }
         "INCRBY" => {
             check_arity(args, 2, Some(2), cmd)?;
@@ -598,7 +801,9 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
         }
         "DECR" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::Decr { key: args[0].clone() })
+            Ok(Command::Decr {
+                key: args[0].clone(),
+            })
         }
         "DECRBY" => {
             check_arity(args, 2, Some(2), cmd)?;
@@ -609,11 +814,17 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
         }
         "APPEND" => {
             check_arity(args, 2, Some(2), cmd)?;
-            Ok(Command::Append { key: args[0].clone(), value: args[1].clone() })
+            Ok(Command::Append {
+                key: args[0].clone(),
+                value: args[1].clone(),
+            })
         }
         "GETSET" => {
             check_arity(args, 2, Some(2), cmd)?;
-            Ok(Command::GetSet { key: args[0].clone(), value: args[1].clone() })
+            Ok(Command::GetSet {
+                key: args[0].clone(),
+                value: args[1].clone(),
+            })
         }
         "SETRANGE" => {
             check_arity(args, 3, Some(3), cmd)?;
@@ -627,7 +838,9 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
         // List commands
         "LLEN" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::LLen { key: args[0].clone() })
+            Ok(Command::LLen {
+                key: args[0].clone(),
+            })
         }
         "LINDEX" => {
             check_arity(args, 2, Some(2), cmd)?;
@@ -660,11 +873,15 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
         }
         "LPOP" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::LPop { key: args[0].clone() })
+            Ok(Command::LPop {
+                key: args[0].clone(),
+            })
         }
         "RPOP" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::RPop { key: args[0].clone() })
+            Ok(Command::RPop {
+                key: args[0].clone(),
+            })
         }
         "LSET" => {
             check_arity(args, 3, Some(3), cmd)?;
@@ -694,7 +911,10 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
         // Hash commands
         "HGET" => {
             check_arity(args, 2, Some(2), cmd)?;
-            Ok(Command::HGet { key: args[0].clone(), field: args[1].clone() })
+            Ok(Command::HGet {
+                key: args[0].clone(),
+                field: args[1].clone(),
+            })
         }
         "HMGET" => {
             check_arity(args, 2, None, cmd)?;
@@ -705,31 +925,51 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
         }
         "HGETALL" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::HGetAll { key: args[0].clone() })
+            Ok(Command::HGetAll {
+                key: args[0].clone(),
+            })
         }
         "HKEYS" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::HKeys { key: args[0].clone() })
+            Ok(Command::HKeys {
+                key: args[0].clone(),
+            })
         }
         "HVALS" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::HVals { key: args[0].clone() })
+            Ok(Command::HVals {
+                key: args[0].clone(),
+            })
         }
         "HLEN" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::HLen { key: args[0].clone() })
+            Ok(Command::HLen {
+                key: args[0].clone(),
+            })
         }
         "HEXISTS" => {
             check_arity(args, 2, Some(2), cmd)?;
-            Ok(Command::HExists { key: args[0].clone(), field: args[1].clone() })
+            Ok(Command::HExists {
+                key: args[0].clone(),
+                field: args[1].clone(),
+            })
         }
         "HSET" => {
             check_arity(args, 3, None, cmd)?;
             if (args.len() - 1) % 2 != 0 {
-                return Err(CommandError::new(CommandErrorKind::WrongArity, "wrong number of arguments for 'HSET' command"));
+                return Err(CommandError::new(
+                    CommandErrorKind::WrongArity,
+                    "wrong number of arguments for 'HSET' command",
+                ));
             }
-            let fvs: Vec<_> = args[1..].chunks(2).map(|c| (c[0].clone(), c[1].clone())).collect();
-            Ok(Command::HSet { key: args[0].clone(), fvs })
+            let fvs: Vec<_> = args[1..]
+                .chunks(2)
+                .map(|c| (c[0].clone(), c[1].clone()))
+                .collect();
+            Ok(Command::HSet {
+                key: args[0].clone(),
+                fvs,
+            })
         }
         "HSETNX" => {
             check_arity(args, 3, Some(3), cmd)?;
@@ -742,10 +982,19 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
         "HMSET" => {
             check_arity(args, 3, None, cmd)?;
             if (args.len() - 1) % 2 != 0 {
-                return Err(CommandError::new(CommandErrorKind::WrongArity, "wrong number of arguments for 'HMSET' command"));
+                return Err(CommandError::new(
+                    CommandErrorKind::WrongArity,
+                    "wrong number of arguments for 'HMSET' command",
+                ));
             }
-            let fvs: Vec<_> = args[1..].chunks(2).map(|c| (c[0].clone(), c[1].clone())).collect();
-            Ok(Command::HMSet { key: args[0].clone(), fvs })
+            let fvs: Vec<_> = args[1..]
+                .chunks(2)
+                .map(|c| (c[0].clone(), c[1].clone()))
+                .collect();
+            Ok(Command::HMSet {
+                key: args[0].clone(),
+                fvs,
+            })
         }
         "HDEL" => {
             check_arity(args, 2, None, cmd)?;
@@ -774,15 +1023,22 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
         // Set commands
         "SMEMBERS" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::SMembers { key: args[0].clone() })
+            Ok(Command::SMembers {
+                key: args[0].clone(),
+            })
         }
         "SISMEMBER" => {
             check_arity(args, 2, Some(2), cmd)?;
-            Ok(Command::SIsMember { key: args[0].clone(), member: args[1].clone() })
+            Ok(Command::SIsMember {
+                key: args[0].clone(),
+                member: args[1].clone(),
+            })
         }
         "SCARD" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::SCard { key: args[0].clone() })
+            Ok(Command::SCard {
+                key: args[0].clone(),
+            })
         }
         "SINTER" => {
             check_arity(args, 1, None, cmd)?;
@@ -822,7 +1078,7 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
         "DEL" => {
             check_arity(args, 1, None, cmd)?;
             Ok(Command::Del { keys: args.to_vec() })
-        }
+        }   
         "EXISTS" => {
             check_arity(args, 1, None, cmd)?;
             Ok(Command::Exists { keys: args.to_vec() })
@@ -843,38 +1099,54 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
         }
         "TTL" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::Ttl { key: args[0].clone() })
+            Ok(Command::Ttl {
+                key: args[0].clone(),
+            })
         }
         "PTTL" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::PTtl { key: args[0].clone() })
+            Ok(Command::PTtl {
+                key: args[0].clone(),
+            })
         }
         "PERSIST" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::Persist { key: args[0].clone() })
+            Ok(Command::Persist {
+                key: args[0].clone(),
+            })
         }
         "TYPE" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::Type { key: args[0].clone() })
+            Ok(Command::Type {
+                key: args[0].clone(),
+            })
         }
         "RENAME" => {
             check_arity(args, 2, Some(2), cmd)?;
-            Ok(Command::Rename { key: args[0].clone(), new_key: args[1].clone() })
+            Ok(Command::Rename {
+                key: args[0].clone(),
+                new_key: args[1].clone(),
+            })
         }
         "RENAMENX" => {
             check_arity(args, 2, Some(2), cmd)?;
-            Ok(Command::RenameNx { key: args[0].clone(), new_key: args[1].clone() })
+            Ok(Command::RenameNx {
+                key: args[0].clone(),
+                new_key: args[1].clone(),
+            })
         }
         "KEYS" => {
             check_arity(args, 1, Some(1), cmd)?;
-            Ok(Command::Keys { pattern: args[0].clone() })
+            Ok(Command::Keys {
+                pattern: args[0].clone(),
+            })
         }
         "SCAN" => {
             check_arity(args, 1, None, cmd)?;
             let cursor = parse_uint(&args[0], "cursor")?;
             let mut pattern = None;
             let mut count = None;
-            
+
             let mut i = 1;
             while i < args.len() {
                 let opt = String::from_utf8_lossy(&args[i]).to_uppercase();
@@ -882,23 +1154,38 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
                     "MATCH" => {
                         i += 1;
                         if i >= args.len() {
-                            return Err(CommandError::new(CommandErrorKind::SyntaxError, "MATCH requires an argument"));
+                            return Err(CommandError::new(
+                                CommandErrorKind::SyntaxError,
+                                "MATCH requires an argument",
+                            ));
                         }
                         pattern = Some(args[i].clone());
                     }
                     "COUNT" => {
                         i += 1;
                         if i >= args.len() {
-                            return Err(CommandError::new(CommandErrorKind::SyntaxError, "COUNT requires an argument"));
+                            return Err(CommandError::new(
+                                CommandErrorKind::SyntaxError,
+                                "COUNT requires an argument",
+                            ));
                         }
                         count = Some(parse_uint(&args[i], "COUNT")?);
                     }
-                    _ => return Err(CommandError::new(CommandErrorKind::SyntaxError, format!("unknown option '{}'", opt))),
+                    _ => {
+                        return Err(CommandError::new(
+                            CommandErrorKind::SyntaxError,
+                            format!("unknown option '{}'", opt),
+                        ))
+                    }
                 }
                 i += 1;
             }
-            
-            Ok(Command::Scan { cursor, pattern, count })
+
+            Ok(Command::Scan {
+                cursor,
+                pattern,
+                count,
+            })
         }
 
         _ => Err(CommandError::new(
@@ -911,11 +1198,12 @@ fn parse_command(cmd: &str, args: &[Vec<u8>]) -> Result<Command, CommandError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     fn make_cmd(args: &[&str]) -> RespValue {
         RespValue::Array(
             args.iter()
-                .map(|s| RespValue::BulkString(Some(s.as_bytes().to_vec())))
+                .map(|s| RespValue::BulkString(Some(Bytes::from(s.to_string()))))
                 .collect(),
         )
     }
@@ -923,67 +1211,92 @@ mod tests {
     #[test]
     fn test_parse_get() {
         let cmd = Command::try_from(make_cmd(&["GET", "key1"])).unwrap();
-        assert_eq!(cmd, Command::Get { key: b"key1".to_vec() });
+        assert_eq!(
+            cmd,
+            Command::Get {
+                key: Bytes::from(b"key1" as &[u8])
+            }
+        );
         assert!(cmd.is_read());
     }
 
     #[test]
     fn test_parse_set() {
         let cmd = Command::try_from(make_cmd(&["SET", "key1", "value1"])).unwrap();
-        assert_eq!(cmd, Command::Set {
-            key: b"key1".to_vec(),
-            value: b"value1".to_vec(),
-            ex: None,
-            px: None,
-            nx: false,
-            xx: false,
-        });
+        assert_eq!(
+            cmd,
+            Command::Set {
+                key: Bytes::from(b"key1" as &[u8]),
+                value: Bytes::from(b"value1" as &[u8]),
+                ex: None,
+                px: None,
+                nx: false,
+                xx: false,
+            }
+        );
         assert!(cmd.is_write());
     }
 
     #[test]
     fn test_parse_set_with_options() {
-        let cmd = Command::try_from(make_cmd(&["SET", "key1", "value1", "EX", "60", "NX"])).unwrap();
-        assert_eq!(cmd, Command::Set {
-            key: b"key1".to_vec(),
-            value: b"value1".to_vec(),
-            ex: Some(60),
-            px: None,
-            nx: true,
-            xx: false,
-        });
+        let cmd =
+            Command::try_from(make_cmd(&["SET", "key1", "value1", "EX", "60", "NX"])).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Set {
+                key: Bytes::from(b"key1" as &[u8]),
+                value: Bytes::from(b"value1" as &[u8]),
+                ex: Some(60),
+                px: None,
+                nx: true,
+                xx: false,
+            }
+        );
     }
 
     #[test]
     fn test_parse_mset() {
         let cmd = Command::try_from(make_cmd(&["MSET", "k1", "v1", "k2", "v2"])).unwrap();
-        assert_eq!(cmd, Command::MSet {
-            kvs: vec![
-                (b"k1".to_vec(), b"v1".to_vec()),
-                (b"k2".to_vec(), b"v2".to_vec()),
-            ],
-        });
+        assert_eq!(
+            cmd,
+            Command::MSet {
+                kvs: vec![
+                    (Bytes::from(b"k1" as &[u8]), Bytes::from(b"v1" as &[u8])),
+                    (Bytes::from(b"k2" as &[u8]), Bytes::from(b"v2" as &[u8])),
+                ],
+            }
+        );
     }
 
     #[test]
     fn test_parse_lpush() {
         let cmd = Command::try_from(make_cmd(&["LPUSH", "list", "a", "b", "c"])).unwrap();
-        assert_eq!(cmd, Command::LPush {
-            key: b"list".to_vec(),
-            values: vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
-        });
+        assert_eq!(
+            cmd,
+            Command::LPush {
+                key: Bytes::from(b"list" as &[u8]),
+                values: vec![
+                    Bytes::from(b"a" as &[u8]),
+                    Bytes::from(b"b" as &[u8]),
+                    Bytes::from(b"c" as &[u8]),
+                ],
+            }
+        );
     }
 
     #[test]
     fn test_parse_hset() {
         let cmd = Command::try_from(make_cmd(&["HSET", "hash", "f1", "v1", "f2", "v2"])).unwrap();
-        assert_eq!(cmd, Command::HSet {
-            key: b"hash".to_vec(),
-            fvs: vec![
-                (b"f1".to_vec(), b"v1".to_vec()),
-                (b"f2".to_vec(), b"v2".to_vec()),
-            ],
-        });
+        assert_eq!(
+            cmd,
+            Command::HSet {
+                key: Bytes::from(b"hash" as &[u8]),
+                fvs: vec![
+                    (Bytes::from(b"f1" as &[u8]), Bytes::from(b"v1" as &[u8])),
+                    (Bytes::from(b"f2" as &[u8]), Bytes::from(b"v2" as &[u8])),
+                ],
+            }
+        );
     }
 
     #[test]

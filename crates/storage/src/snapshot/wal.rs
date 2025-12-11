@@ -300,6 +300,64 @@ impl WalWriter {
             .map_err(|e| format!("Failed to write metadata: {}", e))?;
         Ok(())
     }
+
+    /// Get current WAL size (all files)
+    pub fn total_size(&self) -> u64 {
+        let mut total = self.current_file_size;
+        for file_meta in &self.metadata.files {
+            total += file_meta.file_size;
+        }
+        total
+    }
+
+    /// Clean up WAL files that are no longer needed
+    ///
+    /// Removes WAL files where all entries have apply_index < min_apply_index.
+    /// This should be called after segment generation to free up disk space.
+    ///
+    /// # Arguments
+    /// - `min_apply_index`: Minimum apply_index that should be kept
+    ///
+    /// # Returns
+    /// Number of files deleted
+    pub fn cleanup_old_files(&mut self, min_apply_index: u64) -> Result<usize, String> {
+        let mut deleted_count = 0;
+        let mut files_to_keep = Vec::new();
+
+        // Check each WAL file
+        for file_meta in &self.metadata.files {
+            // Check if all shards in this file have max apply_index < min_apply_index
+            let mut can_delete = true;
+            for (_, (_begin, end)) in &file_meta.shard_ranges {
+                // If any shard has entries >= min_apply_index, keep the file
+                if *end > min_apply_index {
+                    can_delete = false;
+                    break;
+                }
+            }
+
+            if can_delete {
+                // Delete the file
+                let file_path = self.wal_dir.join(&file_meta.file_name);
+                if file_path.exists() {
+                    std::fs::remove_file(&file_path).map_err(|e| {
+                        format!("Failed to delete WAL file {}: {}", file_meta.file_name, e)
+                    })?;
+                    deleted_count += 1;
+                    info!("Deleted old WAL file: {}", file_meta.file_name);
+                }
+            } else {
+                // Keep the file
+                files_to_keep.push(file_meta.clone());
+            }
+        }
+
+        // Update metadata
+        self.metadata.files = files_to_keep;
+        self.save_metadata()?;
+
+        Ok(deleted_count)
+    }
 }
 
 /// WAL Reader
@@ -404,6 +462,7 @@ impl WalReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use resp::Command;
     use std::fs;
     use tempfile::TempDir;
@@ -428,10 +487,32 @@ mod tests {
         let key2 = b"test_key_2".to_vec();
 
         writer
-            .write_entry(1, &Command::Set { key: key1.clone(), value: b"value1".to_vec(), ex: None, px: None, nx: false, xx: false }, &key1)
+            .write_entry(
+                1,
+                &Command::Set {
+                    key: Bytes::from(b"test_key_1" as &[u8]),
+                    value: Bytes::from(b"value1" as &[u8]),
+                    ex: None,
+                    px: None,
+                    nx: false,
+                    xx: false,
+                },
+                &key1,
+            )
             .unwrap();
         writer
-            .write_entry(2, &Command::Set { key: key2.clone(), value: b"value2".to_vec(), ex: None, px: None, nx: false, xx: false }, &key2)
+            .write_entry(
+                2,
+                &Command::Set {
+                    key: Bytes::from(b"test_key_2" as &[u8]),
+                    value: Bytes::from(b"value2" as &[u8]),
+                    ex: None,
+                    px: None,
+                    nx: false,
+                    xx: false,
+                },
+                &key2,
+            )
             .unwrap();
         writer.flush().unwrap();
         writer.save_metadata().unwrap(); // Save metadata before reading
@@ -441,7 +522,12 @@ mod tests {
         let reader = WalReader::new(config, wal_dir).unwrap();
         let entries = reader.read_entries_from(0).unwrap();
 
-        assert_eq!(entries.len(), 2, "Expected 2 entries, got {}", entries.len());
+        assert_eq!(
+            entries.len(),
+            2,
+            "Expected 2 entries, got {}",
+            entries.len()
+        );
         assert_eq!(entries[0].apply_index, 1);
         assert_eq!(entries[1].apply_index, 2);
     }
@@ -462,14 +548,36 @@ mod tests {
 
         // Write entries
         let mut writer = WalWriter::new(config.clone(), wal_dir.clone()).unwrap();
-        let key1 = b"test_key_1".to_vec();
-        let key2 = b"test_key_2".to_vec();
+        let key1 = Bytes::from(b"test_key_1" as &[u8]);
+        let key2 = Bytes::from(b"test_key_2" as &[u8]);
 
         writer
-            .write_entry(1, &Command::Set { key: key1.clone(), value: b"value1".to_vec(), ex: None, px: None, nx: false, xx: false }, &key1)
+            .write_entry(
+                1,
+                &Command::Set {
+                    key: key1.clone(),
+                    value: Bytes::from(b"value1" as &[u8]),
+                    ex: None,
+                    px: None,
+                    nx: false,
+                    xx: false,
+                },
+                &key1,
+            )
             .unwrap();
         writer
-            .write_entry(2, &Command::Set { key: key2.clone(), value: b"value2".to_vec(), ex: None, px: None, nx: false, xx: false }, &key2)
+            .write_entry(
+                2,
+                &Command::Set {
+                    key: key2.clone(),
+                    value: Bytes::from(b"value2" as &[u8]),
+                    ex: None,
+                    px: None,
+                    nx: false,
+                    xx: false,
+                },
+                &key2,
+            )
             .unwrap();
         writer.flush().unwrap();
         writer.save_metadata().unwrap(); // Save metadata before reading

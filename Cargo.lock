@@ -1533,6 +1533,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bincode",
+ "bytes",
  "clap",
  "parking_lot",
  "pilot",
@@ -1625,6 +1626,7 @@ dependencies = [
 name = "resp"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "serde",
  "thiserror",
  "tokio",

@@ -10,8 +10,8 @@
 //! - **Hash Operations**: See `hash.rs` for hash operations
 //! - **Snapshot Operations**: See `snapshot.rs` for snapshot operations
 
-use crate::shard::{slot_for_key, ShardId, TOTAL_SLOTS};
 use crate::rocksdb::key_encoding::apply_index_key;
+use crate::shard::{slot_for_key, ShardId, TOTAL_SLOTS};
 use parking_lot::RwLock;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, WriteOptions, DB};
 use std::collections::HashMap;
@@ -296,6 +296,8 @@ impl Clone for ShardedRocksDB {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+
     use super::*;
     use std::fs;
 
@@ -334,7 +336,12 @@ mod tests {
         let db = create_temp_db();
 
         // Test in shard 1
-        assert!(db.hset(1, b"myhash", b"field1".to_vec(), b"value1".to_vec()));
+        assert!(db.hset(
+            1,
+            b"myhash",
+            b"field1".as_ref(),
+            Bytes::from(b"value1".to_vec())
+        ));
         assert_eq!(db.hget(1, b"myhash", b"field1"), Some(b"value1".to_vec()));
 
         // Test HMSET
@@ -342,8 +349,8 @@ mod tests {
             1,
             b"myhash",
             vec![
-                (b"field2".to_vec(), b"value2".to_vec()),
-                (b"field3".to_vec(), b"value3".to_vec()),
+                (b"field2".as_ref(), Bytes::from(b"value2".to_vec())),
+                (b"field3".as_ref(), Bytes::from(b"value3".to_vec())),
             ],
         );
 
@@ -362,7 +369,7 @@ mod tests {
 
         // Add data to shard 2
         db.set(2, b"key1", b"value1".to_vec()).unwrap();
-        db.hset(2, b"hash1", b"f1".to_vec(), b"v1".to_vec());
+        db.hset(2, b"hash1", b"f1".as_ref(), Bytes::from("v1"));
 
         // Create snapshot
         let snapshot = db.create_shard_snapshot(2).unwrap();

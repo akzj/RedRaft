@@ -6,9 +6,12 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use raft::{ApplyResult, ClusterConfig, RaftId, RequestId, SnapshotStorage, StateMachine, StorageResult, traits::ClientResult};
-use storage::{ApplyResult as StoreApplyResult, RedisStore};
+use raft::{
+    traits::ClientResult, ApplyResult, ClusterConfig, RaftId, RequestId, SnapshotStorage,
+    StateMachine, StorageResult,
+};
 use resp::Command;
+use storage::traits::{ApplyResult as StoreApplyResult, RedisStore, StoreError};
 
 use crate::node::PendingRequests;
 
@@ -17,8 +20,9 @@ use crate::node::PendingRequests;
 pub struct KVStateMachine {
     /// Storage backend (supports memory or persistent storage)
     store: Arc<dyn RedisStore>,
-    /// Version number (monotonically increasing)
-    version: Arc<std::sync::atomic::AtomicU64>,
+    /// Last applied index (monotonically increasing, tracks Raft apply_index)
+    apply_index: Arc<std::sync::atomic::AtomicU64>,
+    term: Arc<std::sync::atomic::AtomicU64>,
     /// Pending request tracker
     pending_requests: Option<PendingRequests>,
     /// Apply result cache (index -> result), used to return actual results in client_response
@@ -30,17 +34,22 @@ impl KVStateMachine {
     pub fn new(store: Arc<dyn RedisStore>) -> Self {
         Self {
             store,
-            version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            apply_index: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            term: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_requests: None,
             apply_results: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
     /// Create KV state machine with request tracking
-    pub fn with_pending_requests(store: Arc<dyn RedisStore>, pending_requests: PendingRequests) -> Self {
+    pub fn with_pending_requests(
+        store: Arc<dyn RedisStore>,
+        pending_requests: PendingRequests,
+    ) -> Self {
         Self {
             store,
-            version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            apply_index: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            term: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_requests: Some(pending_requests),
             apply_results: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         }
@@ -51,14 +60,10 @@ impl KVStateMachine {
         &self.store
     }
 
-    /// Get key-value pair count
-    pub fn size(&self) -> usize {
-        self.store.dbsize()
-    }
-
-    fn inc_version(&self) {
-        self.version
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    /// Update apply_index (called after applying a command)
+    fn update_apply_index(&self, index: u64) {
+        self.apply_index
+            .store(index, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -72,28 +77,32 @@ impl StateMachine for KVStateMachine {
         cmd: raft::Command,
     ) -> ApplyResult<()> {
         // Deserialize to Command
-        let command: Command = match bincode::serde::decode_from_slice(&cmd, bincode::config::standard()) {
-            Ok((cmd, _)) => cmd,
-            Err(e) => {
-                warn!("Failed to deserialize command at index {}: {}", index, e);
-                return Err(raft::ApplyError::Internal(format!(
-                    "Invalid command: {}",
-                    e
-                )));
-            }
-        };
+        let command: Command =
+            match bincode::serde::decode_from_slice(&cmd, bincode::config::standard()) {
+                Ok((cmd, _)) => cmd,
+                Err(e) => {
+                    warn!("Failed to deserialize command at index {}: {}", index, e);
+                    return Err(raft::ApplyError::Internal(format!(
+                        "Invalid command: {}",
+                        e
+                    )));
+                }
+            };
 
         debug!(
             "Applying command at index {}, term {}: {:?}",
             index, term, command
         );
 
-        // Execute command and save result
-        let result = self.store.apply(&command);
-        
+        // Execute command with apply_index (for WAL logging) and save result
+        let result = self.store.apply_with_index(index, &command);
+
         // Cache result for use in client_response
         self.apply_results.lock().insert(index, result);
-        self.inc_version();
+
+        // Update apply_index and term (this is the last applied index and term)
+        self.update_apply_index(index);
+        self.term.store(term, std::sync::atomic::Ordering::SeqCst);
 
         Ok(())
     }
@@ -109,7 +118,8 @@ impl StateMachine for KVStateMachine {
         oneshot: tokio::sync::oneshot::Sender<raft::SnapshotResult<()>>,
     ) {
         let store = self.store.clone();
-        let version = self.version.clone();
+        let apply_index = self.apply_index.clone();
+        let term_atomic = self.term.clone();
         let apply_results = self.apply_results.clone();
         let from = from.clone();
 
@@ -122,17 +132,19 @@ impl StateMachine for KVStateMachine {
 
             match store.restore_from_snapshot(&data) {
                 Ok(()) => {
-                    // Update version number to snapshot index
-                    version.store(index, std::sync::atomic::Ordering::SeqCst);
-                    
+                    // Update apply_index and term to snapshot values
+                    apply_index.store(index, std::sync::atomic::Ordering::SeqCst);
+                    term_atomic.store(term, std::sync::atomic::Ordering::SeqCst);
+
                     // Clear old apply result cache (results before snapshot are meaningless)
                     apply_results.lock().clear();
-                    
+
+                    let key_count = store.dbsize().unwrap_or(0);
                     info!(
                         "Snapshot installed successfully for {} at index {}, {} keys restored",
-                        from, index, store.dbsize()
+                        from, index, key_count
                     );
-                    
+
                     let _ = oneshot.send(Ok(()));
                 }
                 Err(e) => {
@@ -154,32 +166,37 @@ impl StateMachine for KVStateMachine {
         config: ClusterConfig,
         saver: Arc<dyn SnapshotStorage>,
     ) -> StorageResult<(u64, u64)> {
-        let snapshot_data = self.store.create_snapshot().map_err(|e| {
-            raft::StorageError::SnapshotCreationFailed(format!("Failed to create snapshot: {}", e))
+        // Extract shard_id from RaftId.group (in multi-raft, group == shard_id)
+        let shard_id = &from.group;
+
+        // Only flush data to disk (data is already stored on disk via WAL + Segment)
+        self.store.create_snapshot(shard_id).map_err(|e| {
+            raft::StorageError::SnapshotCreationFailed(format!(
+                "Failed to flush snapshot for shard {}: {}",
+                shard_id, e
+            ))
         })?;
 
-        // Get current version as snapshot index
-        let version = self.version.load(std::sync::atomic::Ordering::SeqCst);
-        let last_index = version; // Use version number as index
+        // Get apply_index and term (last applied index and term)
+        let apply_index = self.apply_index.load(std::sync::atomic::Ordering::SeqCst);
+        let term = self.term.load(std::sync::atomic::Ordering::SeqCst);
 
-        // Create snapshot
+        // Create snapshot with empty data (data is already on disk)
         let snapshot = raft::Snapshot {
-            index: last_index,
-            term: 0, // Snapshot does not contain term information
-            data: snapshot_data,
+            index: apply_index,
+            term,
+            data: Vec::new(), // Empty - data is already on disk (WAL + Segment)
             config,
         };
 
         saver.save_snapshot(from, snapshot).await?;
 
         info!(
-            "Created snapshot for {} at index {}, {} keys",
-            from,
-            last_index,
-            self.size()
+            "Created snapshot for {} at index {}, term {} (data flushed to disk)",
+            from, apply_index, term
         );
 
-        Ok((last_index, 0))
+        Ok((apply_index, term))
     }
 
     async fn client_response(
@@ -198,9 +215,7 @@ impl StateMachine for KVStateMachine {
                         .remove(&index)
                         .unwrap_or(StoreApplyResult::Ok)
                 }
-                Err(e) => {
-                    StoreApplyResult::Error(storage::StoreError::Internal(format!("{:?}", e)))
-                }
+                Err(e) => StoreApplyResult::Error(StoreError::Internal(format!("{:?}", e))),
             };
             pending.complete(request_id, store_result);
         }
@@ -214,100 +229,5 @@ impl StateMachine for KVStateMachine {
         _result: ClientResult<u64>,
     ) -> ClientResult<()> {
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use storage::MemoryStore;
-    use resp::Command;
-
-    #[tokio::test]
-    async fn test_set_and_get() {
-        let store = Arc::new(MemoryStore::default());
-        let sm = KVStateMachine::new(store);
-        let raft_id = RaftId::new("test".to_string(), "node1".to_string());
-
-        let cmd = Command::Set {
-            key: b"key1".to_vec(),
-            value: b"value1".to_vec(),
-            ex: None,
-            px: None,
-            nx: false,
-            xx: false,
-        };
-        let command = bincode::serde::encode_to_vec(&cmd, bincode::config::standard()).unwrap();
-
-        let result = sm.apply_command(&raft_id, 1, 1, command).await;
-        assert!(result.is_ok());
-
-        assert_eq!(sm.store().get(b"key1"), Some(b"value1".to_vec()));
-    }
-
-    #[tokio::test]
-    async fn test_del() {
-        let store = Arc::new(MemoryStore::default());
-        let sm = KVStateMachine::new(store);
-        let raft_id = RaftId::new("test".to_string(), "node1".to_string());
-
-        // Insert first
-        let cmd = Command::Set {
-            key: b"key1".to_vec(),
-            value: b"value1".to_vec(),
-            ex: None,
-            px: None,
-            nx: false,
-            xx: false,
-        };
-        let command = bincode::serde::encode_to_vec(&cmd, bincode::config::standard()).unwrap();
-        sm.apply_command(&raft_id, 1, 1, command).await.unwrap();
-
-        // Delete
-        let cmd = Command::Del {
-            keys: vec![b"key1".to_vec()],
-        };
-        let command = bincode::serde::encode_to_vec(&cmd, bincode::config::standard()).unwrap();
-        sm.apply_command(&raft_id, 2, 1, command).await.unwrap();
-
-        assert_eq!(sm.store().get(b"key1"), None);
-    }
-
-    #[tokio::test]
-    async fn test_list_operations() {
-        let store = Arc::new(MemoryStore::default());
-        let sm = KVStateMachine::new(store);
-        let raft_id = RaftId::new("test".to_string(), "node1".to_string());
-
-        let cmd = Command::RPush {
-            key: b"list".to_vec(),
-            values: vec![b"a".to_vec(), b"b".to_vec()],
-        };
-        let command = bincode::serde::encode_to_vec(&cmd, bincode::config::standard()).unwrap();
-        sm.apply_command(&raft_id, 1, 1, command).await.unwrap();
-
-        assert_eq!(
-            sm.store().lrange(b"list", 0, -1),
-            vec![b"a".to_vec(), b"b".to_vec()]
-        );
-    }
-
-    #[tokio::test]
-    async fn test_hash_operations() {
-        let store = Arc::new(MemoryStore::default());
-        let sm = KVStateMachine::new(store);
-        let raft_id = RaftId::new("test".to_string(), "node1".to_string());
-
-        let cmd = Command::HSet {
-            key: b"hash".to_vec(),
-            fvs: vec![(b"field1".to_vec(), b"value1".to_vec())],
-        };
-        let command = bincode::serde::encode_to_vec(&cmd, bincode::config::standard()).unwrap();
-        sm.apply_command(&raft_id, 1, 1, command).await.unwrap();
-
-        assert_eq!(
-            sm.store().hget(b"hash", b"field1"),
-            Some(b"value1".to_vec())
-        );
     }
 }

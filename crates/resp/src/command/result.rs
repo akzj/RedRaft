@@ -1,9 +1,10 @@
 //! Command execution result type
 
 use crate::RespValue;
+use bytes::Bytes;
 
 /// Command execution result
-/// 
+///
 /// Represents all possible return types for Redis commands, which can be easily converted to RespValue
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommandResult {
@@ -12,15 +13,15 @@ pub enum CommandResult {
     /// PONG response
     Pong,
     /// Custom simple string
-    SimpleString(String),
+    SimpleString(Bytes),
     /// Integer response
     Integer(i64),
     /// Single value (may be empty)
-    Value(Option<Vec<u8>>),
+    Value(Option<Bytes>),
     /// Array of values
-    Array(Vec<Option<Vec<u8>>>),
+    Array(Vec<Option<Bytes>>),
     /// Key-value array (for HGETALL etc.)
-    KeyValueArray(Vec<(Vec<u8>, Vec<u8>)>),
+    KeyValueArray(Vec<(Bytes, Bytes)>),
     /// Error response
     Error(String),
     /// Type error
@@ -28,7 +29,7 @@ pub enum CommandResult {
     /// Null response
     Null,
     /// SCAN result (cursor, keys)
-    Scan(u64, Vec<Vec<u8>>),
+    Scan(u64, Vec<Bytes>),
 }
 
 impl CommandResult {
@@ -43,12 +44,12 @@ impl CommandResult {
     }
 
     /// Create value response
-    pub fn value(v: Option<Vec<u8>>) -> Self {
+    pub fn value(v: Option<Bytes>) -> Self {
         CommandResult::Value(v)
     }
 
     /// Create array response
-    pub fn array(arr: Vec<Option<Vec<u8>>>) -> Self {
+    pub fn array(arr: Vec<Option<Bytes>>) -> Self {
         CommandResult::Array(arr)
     }
 
@@ -66,8 +67,8 @@ impl CommandResult {
 impl From<CommandResult> for RespValue {
     fn from(result: CommandResult) -> Self {
         match result {
-            CommandResult::Ok => RespValue::SimpleString("OK".to_string()),
-            CommandResult::Pong => RespValue::SimpleString("PONG".to_string()),
+            CommandResult::Ok => RespValue::SimpleString(Bytes::from("OK")),
+            CommandResult::Pong => RespValue::SimpleString(Bytes::from("PONG")),
             CommandResult::SimpleString(s) => RespValue::SimpleString(s),
             CommandResult::Integer(n) => RespValue::Integer(n),
             CommandResult::Value(v) => match v {
@@ -92,13 +93,13 @@ impl From<CommandResult> for RespValue {
                     })
                     .collect(),
             ),
-            CommandResult::Error(msg) => RespValue::Error(format!("ERR {}", msg)),
-            CommandResult::WrongType => RespValue::Error(
-                "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-            ),
+            CommandResult::Error(msg) => RespValue::Error(Bytes::from(format!("ERR {}", msg))),
+            CommandResult::WrongType => RespValue::Error(Bytes::from(
+                "WRONGTYPE Operation against a key holding the wrong kind of value",
+            )),
             CommandResult::Null => RespValue::Null,
             CommandResult::Scan(cursor, keys) => RespValue::Array(vec![
-                RespValue::BulkString(Some(cursor.to_string().into_bytes())),
+                RespValue::BulkString(Some(Bytes::from(cursor.to_string()))),
                 RespValue::Array(
                     keys.into_iter()
                         .map(|k| RespValue::BulkString(Some(k)))
@@ -117,7 +118,7 @@ mod tests {
     fn test_ok_to_resp() {
         let result = CommandResult::Ok;
         let resp: RespValue = result.into();
-        assert_eq!(resp, RespValue::SimpleString("OK".to_string()));
+        assert_eq!(resp, RespValue::SimpleString(Bytes::from(b"OK" as &[u8])));
     }
 
     #[test]
@@ -129,9 +130,12 @@ mod tests {
 
     #[test]
     fn test_value_to_resp() {
-        let result = CommandResult::Value(Some(b"hello".to_vec()));
+        let result = CommandResult::Value(Some(Bytes::from(b"hello" as &[u8])));
         let resp: RespValue = result.into();
-        assert_eq!(resp, RespValue::BulkString(Some(b"hello".to_vec())));
+        assert_eq!(
+            resp,
+            RespValue::BulkString(Some(bytes::Bytes::from(b"hello" as &[u8])))
+        );
     }
 
     #[test]
@@ -144,17 +148,17 @@ mod tests {
     #[test]
     fn test_array_to_resp() {
         let result = CommandResult::Array(vec![
-            Some(b"a".to_vec()),
+            Some(Bytes::from(b"a" as &[u8])),
             None,
-            Some(b"b".to_vec()),
+            Some(Bytes::from(b"b" as &[u8])),
         ]);
         let resp: RespValue = result.into();
         assert_eq!(
             resp,
             RespValue::Array(vec![
-                RespValue::BulkString(Some(b"a".to_vec())),
+                RespValue::BulkString(Some(bytes::Bytes::from(b"a" as &[u8]))),
                 RespValue::Null,
-                RespValue::BulkString(Some(b"b".to_vec())),
+                RespValue::BulkString(Some(bytes::Bytes::from(b"b" as &[u8]))),
             ])
         );
     }
@@ -162,32 +166,35 @@ mod tests {
     #[test]
     fn test_kv_array_to_resp() {
         let result = CommandResult::KeyValueArray(vec![
-            (b"field1".to_vec(), b"value1".to_vec()),
-            (b"field2".to_vec(), b"value2".to_vec()),
+            (Bytes::from(b"field1" as &[u8]), Bytes::from(b"value1" as &[u8])),
+            (Bytes::from(b"field2" as &[u8]), Bytes::from(b"value2" as &[u8])),
         ]);
         let resp: RespValue = result.into();
         assert_eq!(
             resp,
             RespValue::Array(vec![
-                RespValue::BulkString(Some(b"field1".to_vec())),
-                RespValue::BulkString(Some(b"value1".to_vec())),
-                RespValue::BulkString(Some(b"field2".to_vec())),
-                RespValue::BulkString(Some(b"value2".to_vec())),
+                RespValue::BulkString(Some(bytes::Bytes::from(b"field1" as &[u8]))),
+                RespValue::BulkString(Some(bytes::Bytes::from(b"value1" as &[u8]))),
+                RespValue::BulkString(Some(bytes::Bytes::from(b"field2" as &[u8]))),
+                RespValue::BulkString(Some(bytes::Bytes::from(b"value2" as &[u8]))),
             ])
         );
     }
 
     #[test]
     fn test_scan_to_resp() {
-        let result = CommandResult::Scan(42, vec![b"key1".to_vec(), b"key2".to_vec()]);
+        let result = CommandResult::Scan(
+            42,
+            vec![Bytes::from(b"key1" as &[u8]), Bytes::from(b"key2" as &[u8])],
+        );
         let resp: RespValue = result.into();
         assert_eq!(
             resp,
             RespValue::Array(vec![
-                RespValue::BulkString(Some(b"42".to_vec())),
+                RespValue::BulkString(Some(bytes::Bytes::from(b"42" as &[u8]))),
                 RespValue::Array(vec![
-                    RespValue::BulkString(Some(b"key1".to_vec())),
-                    RespValue::BulkString(Some(b"key2".to_vec())),
+                    RespValue::BulkString(Some(bytes::Bytes::from(b"key1" as &[u8]))),
+                    RespValue::BulkString(Some(bytes::Bytes::from(b"key2" as &[u8]))),
                 ]),
             ])
         );
