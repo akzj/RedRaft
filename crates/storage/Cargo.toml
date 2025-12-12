@@ -21,6 +21,7 @@ thiserror = { workspace = true }
 anyhow.workspace = true
 bytes = { workspace = true }
 crc32fast = { workspace = true }
+crc = { workspace = true }
 serde_json = { workspace = true }
 zstd = "0.13.3"
 async-trait.workspace = true

@@ -10,8 +10,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
 use raft::{
-    ClusterConfig, Event, Network,
-    RaftCallbacks, RaftId, RaftState, RaftStateOptions, RequestId,
+    ClusterConfig, Event, Network, RaftCallbacks, RaftId, RaftState, RaftStateOptions, RequestId,
     Storage,
 };
 
@@ -20,10 +19,7 @@ use crate::router::ShardRouter;
 use crate::snapshot_transfer::SnapshotTransferManager;
 use crate::state_machine::KVStateMachine;
 use resp::{Command, CommandType, RespValue};
-use storage::{
-    ApplyResult as StoreApplyResult, RedisStore,
-    traits::KeyStore,
-};
+use storage::{traits::KeyStore, ApplyResult as StoreApplyResult, RedisStore};
 
 /// Pending request tracker
 #[derive(Clone)]
@@ -211,7 +207,7 @@ impl RedRaftNode {
         let mut options = RaftStateOptions::default();
         options.id = raft_id.clone();
         let timers = self.driver.get_timer_service();
-        
+
         // Create state machine with all dependencies (implements RaftCallbacks directly)
         let state_machine = Arc::new(KVStateMachine::with_pending_requests(
             self.redis_store.clone(),
@@ -549,23 +545,31 @@ pub(crate) async fn generate_snapshot_file_async(
     store: Arc<storage::store::HybridStore>,
     snapshot_config: crate::config::SnapshotConfig,
 ) -> Result<(), String> {
-    use std::io::Write;
     use crc32fast::Hasher as Crc32Hasher;
-    
+    use std::io::Write;
+
     info!(
         "Generating snapshot file for shard {} transfer {}",
         shard_id, transfer_id
     );
 
     // Get transfer state to access chunk_index and snapshot_path
-    let state = transfer_manager.get_transfer_state(transfer_id)
+    let state = transfer_manager
+        .get_transfer_state(transfer_id)
         .ok_or_else(|| format!("Transfer {} not found", transfer_id))?;
-    
+
     let (snapshot_path, chunk_index) = match state {
-        crate::snapshot_transfer::SnapshotTransferState::Preparing { snapshot_path, chunk_index, .. } => {
-            (snapshot_path, chunk_index)
+        crate::snapshot_transfer::SnapshotTransferState::Preparing {
+            snapshot_path,
+            chunk_index,
+            ..
+        } => (snapshot_path, chunk_index),
+        _ => {
+            return Err(format!(
+                "Transfer {} is not in Preparing state",
+                transfer_id
+            ))
         }
-        _ => return Err(format!("Transfer {} is not in Preparing state", transfer_id)),
     };
 
     // Create channel for receiving snapshot data
@@ -621,11 +625,14 @@ pub(crate) async fn generate_snapshot_file_async(
 
             // Write header length (u32) + header + compressed data
             let header_len = header_bytes.len() as u32;
-            writer.write_all(&header_len.to_le_bytes())
+            writer
+                .write_all(&header_len.to_le_bytes())
                 .map_err(|e| format!("Failed to write header length: {}", e))?;
-            writer.write_all(&header_bytes)
+            writer
+                .write_all(&header_bytes)
                 .map_err(|e| format!("Failed to write header: {}", e))?;
-            writer.write_all(&compressed)
+            writer
+                .write_all(&compressed)
                 .map_err(|e| format!("Failed to write compressed data: {}", e))?;
 
             // Update file offset (header_len (4) + header_bytes + compressed)
@@ -686,11 +693,14 @@ pub(crate) async fn generate_snapshot_file_async(
                 }
                 _ => {
                     // Serialize entry using bincode
-                    let serialized = bincode::serde::encode_to_vec(&entry, bincode::config::standard())
-                        .map_err(|e| format!("Failed to serialize entry: {}", e))?;
-                    
+                    let serialized =
+                        bincode::serde::encode_to_vec(&entry, bincode::config::standard())
+                            .map_err(|e| format!("Failed to serialize entry: {}", e))?;
+
                     // Check if adding this entry would exceed chunk size
-                    if chunk_buffer.len() + serialized.len() > chunk_size && !chunk_buffer.is_empty() {
+                    if chunk_buffer.len() + serialized.len() > chunk_size
+                        && !chunk_buffer.is_empty()
+                    {
                         // Write current chunk
                         write_chunk(&chunk_buffer, false)?;
                         chunk_buffer.clear();
@@ -705,11 +715,14 @@ pub(crate) async fn generate_snapshot_file_async(
             }
         }
 
-        writer.flush()
+        writer
+            .flush()
             .map_err(|e| format!("Failed to flush snapshot file: {}", e))?;
-        
+
         // Sync file to disk
-        writer.get_ref().sync_all()
+        writer
+            .get_ref()
+            .sync_all()
             .map_err(|e| format!("Failed to sync snapshot file: {}", e))?;
 
         Ok::<(u64, u64), String>((total_uncompressed_size, total_compressed_size))
@@ -719,7 +732,7 @@ pub(crate) async fn generate_snapshot_file_async(
     // This ensures state consistency - snapshot object (RocksDB snapshot + Memory COW)
     // is created before returning metadata, preventing state changes
     let shard_id_str = shard_id.to_string();
-    
+
     // Use block_in_place to wait synchronously for snapshot object creation
     // create_snapshot uses spawn_blocking internally and signals via oneshot when snapshot is ready
     // We block here to ensure snapshot object is created in synchronous context
@@ -728,9 +741,7 @@ pub(crate) async fn generate_snapshot_file_async(
         // Block on the async create_snapshot call
         // This will wait for the snapshot object to be created (via oneshot in create_snapshot)
         // before returning, ensuring state consistency
-        tokio::runtime::Handle::current().block_on(
-            store.create_snapshot(&shard_id_str, tx)
-        )
+        tokio::runtime::Handle::current().block_on(store.create_snapshot(&shard_id_str, tx))
     })
     .map_err(|e| format!("Failed to create snapshot: {}", e))?;
 
@@ -756,7 +767,6 @@ pub(crate) async fn generate_snapshot_file_async(
 
     Ok(())
 }
-
 
 /// Convert StoreApplyResult to RespValue
 fn apply_result_to_resp(result: StoreApplyResult) -> RespValue {
