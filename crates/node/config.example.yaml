@@ -1,0 +1,65 @@
+# RedRaft Node Configuration
+# Example configuration file
+
+# Node configuration
+node:
+  node_id: "node1"
+  shard_count: 3
+
+# Network configuration
+network:
+  redis_addr: "127.0.0.1:6379"
+  grpc_addr: "127.0.0.1:50051"
+
+# Storage configuration
+storage:
+  data_dir: "./data"
+
+# Snapshot configuration
+snapshot:
+  # Chunk size in bytes (uncompressed), default: 64MB
+  chunk_size: 67108864
+  # ZSTD compression level (1-22), default: 3
+  zstd_level: 3
+  # Chunk wait check interval in milliseconds, default: 100ms
+  chunk_check_interval_ms: 100
+  # Chunk wait timeout in seconds, default: 300s (5 minutes)
+  chunk_timeout_secs: 300
+  # Snapshot transfer directory base path
+  transfer_dir: "./data/snapshot_transfers"
+
+# Raft configuration
+raft:
+  # Request timeout in seconds, default: 5s
+  request_timeout_secs: 5
+  # Election timeout in milliseconds, default: 1000ms
+  election_timeout_ms: 1000
+  # Heartbeat timeout in milliseconds, default: 100ms
+  heartbeat_timeout_ms: 100
+  # Leader transfer timeout in milliseconds, default: 5000ms
+  leader_transfer_timeout_ms: 5000
+  # Apply log timeout in milliseconds, default: 1000ms
+  apply_log_timeout_ms: 1000
+  # Config change timeout in milliseconds, default: 10000ms
+  config_change_timeout_ms: 10000
+
+# Pilot configuration (optional)
+pilot:
+  pilot_addr: "http://127.0.0.1:8080"
+  # Heartbeat interval in seconds, default: 10s
+  heartbeat_interval_secs: 10
+  # Routing table refresh interval in seconds, default: 30s
+  routing_refresh_interval_secs: 30
+  # Request timeout in seconds, default: 5s
+  request_timeout_secs: 5
+
+# Server configuration
+server:
+  # Routing table sync interval in seconds, default: 5s
+  routing_sync_interval_secs: 5
+
+# Logging configuration
+log:
+  # Log level: trace, debug, info, warn, error, default: info
+  level: "info"
+

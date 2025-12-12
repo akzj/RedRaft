@@ -19,6 +19,7 @@ use storage::{
     traits::{ApplyResult as StoreApplyResult, StoreError, KeyStore, SnapshotStore},
 };
 
+use crate::config::Config;
 use crate::node::PendingRequests;
 use crate::snapshot_transfer::SnapshotTransferManager;
 
@@ -42,6 +43,8 @@ pub struct KVStateMachine {
     timers: raft::multi_raft_driver::Timers,
     /// Snapshot transfer manager
     snapshot_transfer_manager: Arc<SnapshotTransferManager>,
+    /// Configuration
+    config: Config,
 }
 
 impl KVStateMachine {
@@ -52,6 +55,7 @@ impl KVStateMachine {
         network: Arc<dyn Network>,
         timers: raft::multi_raft_driver::Timers,
         snapshot_transfer_manager: Arc<SnapshotTransferManager>,
+        config: Config,
     ) -> Self {
         Self {
             store,
@@ -63,6 +67,7 @@ impl KVStateMachine {
             network,
             timers,
             snapshot_transfer_manager,
+            config,
         }
     }
 
@@ -74,6 +79,7 @@ impl KVStateMachine {
         timers: raft::multi_raft_driver::Timers,
         snapshot_transfer_manager: Arc<SnapshotTransferManager>,
         pending_requests: PendingRequests,
+        config: Config,
     ) -> Self {
         Self {
             store,
@@ -85,6 +91,7 @@ impl KVStateMachine {
             network,
             timers,
             snapshot_transfer_manager,
+            config,
         }
     }
 
@@ -399,9 +406,8 @@ impl SnapshotStorage for KVStateMachine {
             ))
         })?;
 
-        // Create snapshot directory and file path
-        let snapshot_dir =
-            std::path::PathBuf::from(format!("./data/snapshot_transfers/{}", transfer_id));
+        // Create snapshot directory and file path (use configured transfer_dir)
+        let snapshot_dir = self.config.snapshot.transfer_dir.join(&transfer_id);
         std::fs::create_dir_all(&snapshot_dir).map_err(|e| {
             raft::StorageError::SnapshotCreationFailed(format!(
                 "Failed to create snapshot directory: {}",
@@ -436,6 +442,7 @@ impl SnapshotStorage for KVStateMachine {
         // Clone store - HybridStore implements both RedisStore and SnapshotStore
         let store = self.store.clone();
 
+        let snapshot_config = self.config.snapshot.clone();
         tokio::spawn(async move {
             // Generate snapshot file in background using channel
             if let Err(e) = crate::node::generate_snapshot_file_async(
@@ -443,6 +450,7 @@ impl SnapshotStorage for KVStateMachine {
                 &transfer_id_clone,
                 &snapshot_transfer_manager,
                 store,
+                snapshot_config,
             )
             .await
             {
@@ -532,25 +540,55 @@ impl TimerService for KVStateMachine {
     }
 
     fn set_leader_transfer_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
+        // Use configured timeout if duration is zero, otherwise use the passed duration
+        let timeout = if dur.as_secs() == 0 && dur.subsec_nanos() == 0 {
+            self.config.raft.leader_transfer_timeout()
+        } else {
+            dur
+        };
         self.timers
-            .add_timer(from, Event::LeaderTransferTimeout, dur)
+            .add_timer(from, Event::LeaderTransferTimeout, timeout)
     }
 
     fn set_election_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
-        self.timers.add_timer(from, Event::ElectionTimeout, dur)
+        // Use configured timeout if duration is zero, otherwise use the passed duration
+        let timeout = if dur.as_secs() == 0 && dur.subsec_nanos() == 0 {
+            self.config.raft.election_timeout()
+        } else {
+            dur
+        };
+        self.timers.add_timer(from, Event::ElectionTimeout, timeout)
     }
 
     fn set_heartbeat_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
-        self.timers.add_timer(from, Event::HeartbeatTimeout, dur)
+        // Use configured timeout if duration is zero, otherwise use the passed duration
+        let timeout = if dur.as_secs() == 0 && dur.subsec_nanos() == 0 {
+            self.config.raft.heartbeat_timeout()
+        } else {
+            dur
+        };
+        self.timers.add_timer(from, Event::HeartbeatTimeout, timeout)
     }
 
     fn set_apply_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
-        self.timers.add_timer(from, Event::ApplyLogTimeout, dur)
+        // Use configured timeout if duration is zero, otherwise use the passed duration
+        let timeout = if dur.as_secs() == 0 && dur.subsec_nanos() == 0 {
+            self.config.raft.apply_log_timeout()
+        } else {
+            dur
+        };
+        self.timers.add_timer(from, Event::ApplyLogTimeout, timeout)
     }
 
     fn set_config_change_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
+        // Use configured timeout if duration is zero, otherwise use the passed duration
+        let timeout = if dur.as_secs() == 0 && dur.subsec_nanos() == 0 {
+            self.config.raft.config_change_timeout()
+        } else {
+            dur
+        };
         self.timers
-            .add_timer(from, Event::ConfigChangeTimeout, dur)
+            .add_timer(from, Event::ConfigChangeTimeout, timeout)
     }
 }
 

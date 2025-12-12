@@ -4,23 +4,20 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
 
-use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
 use raft::{
-    message::{PreVoteRequest, PreVoteResponse},
-    traits::ClientResult,
-    ClusterConfig, ClusterConfigStorage, Event, HardStateStorage, LogEntryStorage, Network,
-    RaftCallbacks, RaftId, RaftState, RaftStateOptions, RequestId, SnapshotStorage, StateMachine,
-    Storage, StorageResult, TimerService,
+    ClusterConfig, Event, Network,
+    RaftCallbacks, RaftId, RaftState, RaftStateOptions, RequestId,
+    Storage,
 };
 
+use crate::config::Config;
 use crate::router::ShardRouter;
-use crate::snapshot_transfer::{SnapshotMetadata, SnapshotTransferManager};
+use crate::snapshot_transfer::SnapshotTransferManager;
 use crate::state_machine::KVStateMachine;
 use resp::{Command, CommandType, RespValue};
 use storage::{
@@ -105,6 +102,8 @@ pub struct RedRaftNode {
     pilot_client: Arc<RwLock<Option<Arc<crate::pilot_client::PilotClient>>>>,
     /// Snapshot transfer manager
     snapshot_transfer_manager: Arc<SnapshotTransferManager>,
+    /// Configuration
+    config: Config,
 }
 
 impl RedRaftNode {
@@ -114,6 +113,7 @@ impl RedRaftNode {
         network: Arc<dyn Network>,
         redis_store: Arc<storage::store::HybridStore>,
         shard_count: usize,
+        config: Config,
     ) -> Self {
         Self {
             node_id: node_id.clone(),
@@ -126,6 +126,7 @@ impl RedRaftNode {
             pending_requests: PendingRequests::new(),
             pilot_client: Arc::new(RwLock::new(None)),
             snapshot_transfer_manager: Arc::new(SnapshotTransferManager::new()),
+            config,
         }
     }
 
@@ -219,6 +220,7 @@ impl RedRaftNode {
             timers,
             self.snapshot_transfer_manager.clone(),
             self.pending_requests.clone(),
+            self.config.clone(),
         ));
         self.state_machines
             .lock()
@@ -474,7 +476,8 @@ impl RedRaftNode {
         }
 
         // Wait for Raft commit and return result
-        match tokio::time::timeout(Duration::from_secs(5), result_rx).await {
+        let timeout = self.config.raft.request_timeout();
+        match tokio::time::timeout(timeout, result_rx).await {
             Ok(Ok(result)) => Ok(apply_result_to_resp(result)),
             Ok(Err(_)) => {
                 // Channel closed - node may be shutting down
@@ -544,6 +547,7 @@ pub(crate) async fn generate_snapshot_file_async(
     transfer_id: &str,
     transfer_manager: &SnapshotTransferManager,
     store: Arc<storage::store::HybridStore>,
+    snapshot_config: crate::config::SnapshotConfig,
 ) -> Result<(), String> {
     use std::io::Write;
     use crc32fast::Hasher as Crc32Hasher;
@@ -579,9 +583,9 @@ pub(crate) async fn generate_snapshot_file_async(
             .map_err(|e| format!("Failed to create snapshot file: {}", e))?;
         let mut writer = BufWriter::new(file);
 
-        // Chunk configuration
-        const CHUNK_SIZE: usize = 64 * 1024 * 1024; // 64MB uncompressed
-        const ZSTD_LEVEL: i32 = 3;
+        // Chunk configuration from config (clone values for closure)
+        let chunk_size = snapshot_config.chunk_size;
+        let zstd_level = snapshot_config.zstd_level;
 
         let mut chunk_buffer = Vec::new();
         let mut chunk_index_counter = 0u32;
@@ -590,9 +594,10 @@ pub(crate) async fn generate_snapshot_file_async(
         let mut total_compressed_size = 0u64;
 
         // Helper function to write a chunk
+        let zstd_level = zstd_level; // Capture for closure
         let mut write_chunk = |buffer: &[u8], is_last: bool| -> Result<(), String> {
             // Compress with zstd
-            let compressed = zstd::encode_all(buffer, ZSTD_LEVEL)
+            let compressed = zstd::encode_all(buffer, zstd_level)
                 .map_err(|e| format!("Failed to compress chunk: {}", e))?;
 
             // Calculate CRC32 of compressed data
@@ -685,7 +690,7 @@ pub(crate) async fn generate_snapshot_file_async(
                         .map_err(|e| format!("Failed to serialize entry: {}", e))?;
                     
                     // Check if adding this entry would exceed chunk size
-                    if chunk_buffer.len() + serialized.len() > CHUNK_SIZE && !chunk_buffer.is_empty() {
+                    if chunk_buffer.len() + serialized.len() > chunk_size && !chunk_buffer.is_empty() {
                         // Write current chunk
                         write_chunk(&chunk_buffer, false)?;
                         chunk_buffer.clear();

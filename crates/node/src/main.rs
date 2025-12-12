@@ -14,6 +14,7 @@ use tracing_subscriber::FmtSubscriber;
 use raft::network::MultiRaftNetwork;
 use raft::storage::FileStorage;
 
+use redraft::config::Config;
 use redraft::node::RedRaftNode;
 use redraft::pilot_client::{PilotClient, PilotClientConfig};
 use redraft::server::RedisServer;
@@ -58,14 +59,53 @@ struct Args {
     /// Other node addresses (for cluster, used when no pilot)
     #[arg(long)]
     peers: Vec<String>,
+
+    /// Configuration file path (YAML format)
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
+    // Load configuration from file if specified, otherwise use defaults
+    let mut config = if let Some(config_path) = &args.config {
+        info!("Loading configuration from: {:?}", config_path);
+        Config::from_file(config_path)?
+    } else {
+        Config::default()
+    };
+
+    // Override config with command line arguments
+    if !args.node_id.is_empty() {
+        config.node.node_id = args.node_id.clone();
+    }
+    if !args.redis_addr.is_empty() {
+        config.network.redis_addr = args.redis_addr.clone();
+    }
+    if !args.grpc_addr.is_empty() {
+        config.network.grpc_addr = args.grpc_addr.clone();
+    }
+    if !args.data_dir.as_os_str().is_empty() {
+        config.storage.data_dir = args.data_dir.clone();
+    }
+    if args.shard_count > 0 {
+        config.node.shard_count = args.shard_count;
+    }
+    if !args.log_level.is_empty() {
+        config.log.level = args.log_level.clone();
+    }
+    if let Some(pilot_addr) = &args.pilot_addr {
+        config.pilot = Some(redraft::config::PilotConfig {
+            pilot_addr: pilot_addr.clone(),
+            heartbeat_interval_secs: args.heartbeat_interval,
+            ..Default::default()
+        });
+    }
+
     // Initialize logging
-    let level = match args.log_level.as_str() {
+    let level = match config.log.level.as_str() {
         "trace" => Level::TRACE,
         "debug" => Level::DEBUG,
         "info" => Level::INFO,
@@ -77,57 +117,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    info!("Starting RedRaft node: {}", args.node_id);
-    info!("Redis server: {}", args.redis_addr);
-    info!("gRPC server: {}", args.grpc_addr);
-    info!("Data directory: {:?}", args.data_dir);
+    info!("Starting RedRaft node: {}", config.node.node_id);
+    info!("Redis server: {}", config.network.redis_addr);
+    info!("gRPC server: {}", config.network.grpc_addr);
+    info!("Data directory: {:?}", config.storage.data_dir);
 
     // Create data directory
-    std::fs::create_dir_all(&args.data_dir)?;
+    std::fs::create_dir_all(&config.storage.data_dir)?;
 
     // Create storage backend
-    let options = raft::storage::FileStorageOptions::with_base_dir(args.data_dir.clone());
+    let options = raft::storage::FileStorageOptions::with_base_dir(config.storage.data_dir.clone());
     let (file_storage, _log_receiver) = FileStorage::new(options)?;
     let storage = Arc::new(file_storage);
 
     // Create network layer
     let network_options =
-        raft::network::MultiRaftNetworkOptions::default().with_node_id(args.node_id.clone());
+        raft::network::MultiRaftNetworkOptions::default().with_node_id(config.node.node_id.clone());
     let network = Arc::new(MultiRaftNetwork::new(network_options));
 
     // Create Redis store
     let redis_store = Arc::new(HybridStore::new(
         storage::snapshot::SnapshotConfig::default(),
-        args.data_dir.clone(),
+        config.storage.data_dir.clone(),
     )?);
 
-    // Create RedRaft node
+    // Create RedRaft node (pass config for internal use)
     let node = Arc::new(RedRaftNode::new(
-        args.node_id.clone(),
+        config.node.node_id.clone(),
         storage,
         network,
         redis_store,
-        args.shard_count,
+        config.node.shard_count,
+        config.clone(),
     ));
 
     // Start node
     node.start().await?;
 
     // If Pilot address specified, connect to Pilot
-    let _pilot_client = if let Some(pilot_addr) = args.pilot_addr {
-        info!("Connecting to pilot at {}", pilot_addr);
+    let _pilot_client = if let Some(pilot_config) = &config.pilot {
+        info!("Connecting to pilot at {}", pilot_config.pilot_addr);
 
-        let config = PilotClientConfig {
-            pilot_addr,
-            heartbeat_interval_secs: args.heartbeat_interval,
-            ..Default::default()
+        let pilot_client_config = PilotClientConfig {
+            pilot_addr: pilot_config.pilot_addr.clone(),
+            heartbeat_interval_secs: pilot_config.heartbeat_interval_secs,
+            routing_refresh_interval_secs: pilot_config.routing_refresh_interval_secs,
+            request_timeout_secs: pilot_config.request_timeout_secs,
         };
 
         let client = Arc::new(PilotClient::new(
-            config,
-            args.node_id.clone(),
-            args.grpc_addr.clone(),
-            args.redis_addr.clone(),
+            pilot_client_config,
+            config.node.node_id.clone(),
+            config.network.grpc_addr.clone(),
+            config.network.redis_addr.clone(),
         ));
 
         // Connect and initialize
@@ -156,9 +198,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Start routing table sync task
                 let node_clone = node.clone();
                 let routing_table = client.routing_table();
+                let sync_interval = config.server.routing_sync_interval();
                 tokio::spawn(async move {
-                    use tokio::time::{interval, Duration};
-                    let mut interval = interval(Duration::from_secs(5));
+                    use tokio::time::interval;
+                    let mut interval = interval(sync_interval);
                     loop {
                         interval.tick().await;
                         let table = routing_table.read().clone();
@@ -198,7 +241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create and start Redis server
-    let addr: SocketAddr = args.redis_addr.parse()?;
+    let addr: SocketAddr = config.network.redis_addr.parse()?;
     let server = RedisServer::new(node, addr);
 
     info!("RedRaft node is ready!");
