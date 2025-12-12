@@ -9,6 +9,7 @@ license = "MIT"
 # RESP protocol (for Command type)
 resp = { path = "../resp" }
 # Workspace dependencies
+rr-core = { path = "../rr-core" }
 parking_lot = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 bincode = { workspace = true }

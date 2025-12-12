@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/rr-core",
     "crates/raft",
     "crates/node",
     "crates/resp",

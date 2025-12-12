@@ -11,7 +11,8 @@
 //! - **Snapshot Operations**: See `snapshot.rs` for snapshot operations
 
 use crate::rocksdb::key_encoding::apply_index_key;
-use crate::shard::{slot_for_key, ShardId, TOTAL_SLOTS};
+use rr_core::shard::{ShardId, ShardRouting, TOTAL_SLOTS};
+use rr_core::routing::RoutingTable;
 use anyhow::Result;
 use parking_lot::RwLock;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, WriteOptions, DB};
@@ -21,13 +22,10 @@ use std::sync::Arc;
 use tracing::info;
 
 /// Shard metadata stored in RocksDB
-#[derive(Debug, Clone)]
-pub struct ShardMetadata {
-    pub shard_id: ShardId,
-    pub slot_start: u32,
-    pub slot_end: u32,
-    pub apply_index: Option<u64>,
-}
+///
+/// This is a wrapper around ShardRouting that adds RocksDB-specific metadata.
+/// The routing information is now managed by the core::routing module.
+pub type ShardMetadata = ShardRouting;
 
 /// Column Family name for a shard
 fn shard_cf_name(shard_id: &ShardId) -> String {
@@ -101,11 +99,11 @@ impl ShardedRocksDB {
 
     /// Calculate shard ID for a key
     pub fn shard_for_key(&self, key: &[u8]) -> Result<ShardId> {
-        let slot = slot_for_key(key);
+        let slot = RoutingTable::slot_for_key(key);
 
         let metadata = self.shard_metadata.read();
         for (shard_id, metadata) in metadata.iter() {
-            if slot >= metadata.slot_start && slot < metadata.slot_end {
+            if metadata.contains_slot(slot) {
                 return Ok(shard_id.clone());
             }
         }

@@ -1,0 +1,14 @@
+[package]
+name = "rr-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core routing and shard management for distributed storage"
+license = "MIT"
+
+[dependencies]
+# Workspace dependencies
+serde = { workspace = true, features = ["derive"] }
+parking_lot = { workspace = true }
+crc = { workspace = true }
+thiserror = { workspace = true }
+
