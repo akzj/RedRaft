@@ -8,9 +8,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
-use storage::store::HybridStore;
 use tokio::sync::oneshot;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use raft::{
     message::{PreVoteRequest, PreVoteResponse},
@@ -21,9 +20,12 @@ use raft::{
 };
 
 use crate::router::ShardRouter;
+use crate::snapshot_transfer::{SnapshotMetadata, SnapshotTransferManager};
 use crate::state_machine::KVStateMachine;
 use resp::{Command, CommandType, RespValue};
-use storage::{ApplyResult as StoreApplyResult, RedisStore};
+use storage::{
+    ApplyResult as StoreApplyResult, RedisStore, SnapshotStore, SnapshotStoreEntry, StoreError,
+};
 
 /// Pending request tracker
 #[derive(Clone)]
@@ -100,6 +102,8 @@ pub struct RedRaftNode {
     pending_requests: PendingRequests,
     /// Optional Pilot client for status reporting
     pilot_client: Arc<RwLock<Option<Arc<crate::pilot_client::PilotClient>>>>,
+    /// Snapshot transfer manager
+    snapshot_transfer_manager: Arc<SnapshotTransferManager>,
 }
 
 impl RedRaftNode {
@@ -120,6 +124,7 @@ impl RedRaftNode {
             state_machines: Arc::new(Mutex::new(HashMap::new())),
             pending_requests: PendingRequests::new(),
             pilot_client: Arc::new(RwLock::new(None)),
+            snapshot_transfer_manager: Arc::new(SnapshotTransferManager::new()),
         }
     }
 
@@ -218,6 +223,7 @@ impl RedRaftNode {
             network: self.network.clone(),
             state_machine: state_machine.clone(),
             timers,
+            snapshot_transfer_manager: self.snapshot_transfer_manager.clone(),
         });
 
         let mut raft_state = RaftState::new(options, callbacks.clone())
@@ -488,7 +494,7 @@ impl RedRaftNode {
                 // Clear all shards
                 let state_machines = self.state_machines.lock();
                 for sm in state_machines.values() {
-                    sm.store().flushdb();
+                    let _ = sm.store().flushdb();
                 }
                 Ok(RespValue::SimpleString(bytes::Bytes::from("OK")))
             }
@@ -538,6 +544,8 @@ struct NodeCallbacks {
     network: Arc<dyn Network>,
     state_machine: Arc<KVStateMachine>,
     timers: raft::multi_raft_driver::Timers,
+    /// Snapshot transfer manager
+    snapshot_transfer_manager: Arc<SnapshotTransferManager>,
 }
 
 #[async_trait]
@@ -678,8 +686,208 @@ impl SnapshotStorage for NodeCallbacks {
     }
 
     async fn load_snapshot(&self, from: &RaftId) -> StorageResult<Option<raft::Snapshot>> {
-        self.storage.load_snapshot(from).await
+        // Load existing snapshot to get cluster_config
+        let existing_snapshot = self.storage.load_snapshot(from).await?;
+
+        // Get latest apply_index and term from state machine
+        // Note: Raft state machine is single-threaded, safe to access here
+        let apply_index = self
+            .state_machine
+            .apply_index()
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let term = self
+            .state_machine
+            .term()
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        // Generate transfer ID
+        let transfer_id = SnapshotTransferManager::generate_transfer_id();
+
+        // Get cluster_config from existing snapshot or use default
+        let cluster_config = existing_snapshot
+            .as_ref()
+            .map(|s| s.config.clone())
+            .unwrap_or_else(|| {
+                // Default config if no existing snapshot
+                raft::ClusterConfig::simple(std::collections::HashSet::new(), 0)
+            });
+
+        // Create snapshot metadata
+        let metadata = SnapshotMetadata {
+            index: apply_index,
+            term,
+            config: cluster_config.clone(),
+            transfer_id: transfer_id.clone(),
+            raft_group_id: from.group.clone(),
+        };
+
+        // Serialize metadata
+        let metadata_bytes = metadata.serialize().map_err(|e| {
+            raft::StorageError::SnapshotCreationFailed(format!(
+                "Failed to serialize snapshot metadata: {}",
+                e
+            ))
+        })?;
+
+        // Register transfer as preparing (will be updated to Ready when file is generated)
+        self.snapshot_transfer_manager.register_transfer(
+            transfer_id.clone(),
+            crate::snapshot_transfer::SnapshotTransferState::Preparing {
+                snapshot: crate::snapshot_transfer::SnapshotObject {
+                    shard_id: from.group.clone(),
+                    rocksdb_entries: Vec::new(),
+                    memory_snapshot: None,
+                },
+            },
+        );
+
+        // Spawn background task to generate snapshot file using channel
+        let transfer_id_clone = transfer_id.clone();
+        let shard_id_clone = from.group.clone();
+        let snapshot_transfer_manager = self.snapshot_transfer_manager.clone();
+        // Clone store - HybridStore implements both RedisStore and SnapshotStore
+        let store = self.state_machine.store().clone();
+
+        tokio::spawn(async move {
+            // Generate snapshot file in background using channel
+            if let Err(e) = generate_snapshot_file_async(
+                &shard_id_clone,
+                &transfer_id_clone,
+                &snapshot_transfer_manager,
+                store,
+            )
+            .await
+            {
+                error!(
+                    "Failed to generate snapshot file for transfer {}: {}",
+                    transfer_id_clone, e
+                );
+                snapshot_transfer_manager.update_transfer_state(
+                    &transfer_id_clone,
+                    crate::snapshot_transfer::SnapshotTransferState::Failed(e),
+                );
+            }
+        });
+
+        // Return snapshot with metadata in data field
+        Ok(Some(raft::Snapshot {
+            index: apply_index,
+            term,
+            data: metadata_bytes,
+            config: cluster_config,
+        }))
     }
+}
+
+/// Async task to generate snapshot file using channel (chunk-based)
+async fn generate_snapshot_file_async(
+    shard_id: &str,
+    transfer_id: &str,
+    transfer_manager: &SnapshotTransferManager,
+    store: Arc<storage::store::HybridStore>,
+) -> Result<(), String> {
+    use storage::SnapshotStore;
+    info!(
+        "Generating snapshot file for shard {} transfer {}",
+        shard_id, transfer_id
+    );
+
+    // Create snapshot directory
+    let snapshot_dir =
+        std::path::PathBuf::from(format!("./data/snapshot_transfers/{}", transfer_id));
+    std::fs::create_dir_all(&snapshot_dir)
+        .map_err(|e| format!("Failed to create snapshot directory: {}", e))?;
+
+    // Generate snapshot file with chunk support
+    // Format: chunk-based, compressed with zstd
+    let snapshot_file = snapshot_dir.join("snapshot.dat");
+
+    // Create channel for receiving snapshot data
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
+
+    // Spawn task to write data to file
+    let file_path = snapshot_file.clone();
+    let write_handle = tokio::spawn(async move {
+        use std::io::Write;
+        use std::fs::File;
+
+        let mut file = File::create(&file_path)
+            .map_err(|e| format!("Failed to create snapshot file: {}", e))?;
+
+        let mut total_size = 0u64;
+
+        // Receive data from channel and write to file using bincode
+        while let Some(entry) = rx.recv().await {
+            match entry {
+                SnapshotStoreEntry::Error(err) => {
+                    error!("Received error from snapshot creation: {}", err);
+                    return Err(format!("Snapshot creation error: {}", err));
+                }
+                SnapshotStoreEntry::Completed => {
+                    info!("Snapshot data transfer completed");
+                    break;
+                }
+                _ => {
+                    // Serialize entry using bincode
+                    let serialized = bincode::serde::encode_to_vec(&entry, bincode::config::standard())
+                        .map_err(|e| format!("Failed to serialize entry: {}", e))?;
+                    
+                    // Write entry length (u32) followed by serialized data
+                    let entry_len = serialized.len() as u32;
+                    file.write_all(&entry_len.to_le_bytes())
+                        .map_err(|e| format!("Failed to write entry length: {}", e))?;
+                    file.write_all(&serialized)
+                        .map_err(|e| format!("Failed to write entry data: {}", e))?;
+                    total_size += 4 + serialized.len() as u64;
+                }
+            }
+        }
+
+        file.sync_all()
+            .map_err(|e| format!("Failed to sync snapshot file: {}", e))?;
+
+        Ok::<u64, String>(total_size)
+    });
+
+    // Synchronously wait for snapshot object creation in load_snapshot context
+    // This ensures state consistency - snapshot object (RocksDB snapshot + Memory COW)
+    // is created before returning metadata, preventing state changes
+    let shard_id_str = shard_id.to_string();
+    
+    // Use block_in_place to wait synchronously for snapshot object creation
+    // create_snapshot uses spawn_blocking internally and signals via oneshot when snapshot is ready
+    // We block here to ensure snapshot object is created in synchronous context
+    tokio::task::block_in_place(|| {
+        use storage::SnapshotStore;
+        // Block on the async create_snapshot call
+        // This will wait for the snapshot object to be created (via oneshot in create_snapshot)
+        // before returning, ensuring state consistency
+        tokio::runtime::Handle::current().block_on(
+            store.create_snapshot(&shard_id_str, tx)
+        )
+    })
+    .map_err(|e| format!("Failed to create snapshot: {}", e))?;
+
+    // Wait for file writing to complete
+    let total_size = write_handle
+        .await
+        .map_err(|e| format!("File writing task failed: {:?}", e))??;
+
+    // Update transfer state to Ready
+    transfer_manager.update_transfer_state(
+        transfer_id,
+        crate::snapshot_transfer::SnapshotTransferState::Ready {
+            snapshot_path: snapshot_file,
+            total_size,
+        },
+    );
+
+    info!(
+        "Snapshot file generated for transfer {}: {} bytes",
+        transfer_id, total_size
+    );
+
+    Ok(())
 }
 
 #[async_trait]

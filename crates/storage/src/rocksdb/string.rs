@@ -16,7 +16,7 @@ use tracing::error;
 
 impl ShardedRocksDB {
     /// GET: Get string value from specific shard
-    pub fn get(&self, shard_id: ShardId, key: &[u8]) -> Option<Vec<u8>> {
+    pub fn get(&self, shard_id: &ShardId, key: &[u8]) -> Option<Vec<u8>> {
         let cf = self.get_cf(shard_id)?;
         let db_key = string_key(key);
         match self.db.get_cf(cf, &db_key) {
@@ -29,7 +29,7 @@ impl ShardedRocksDB {
     }
 
     /// SET: Set string value in specific shard
-    pub fn set(&self, shard_id: ShardId, key: &[u8], value: Vec<u8>) -> Result<(), String> {
+    pub fn set(&self, shard_id: &ShardId, key: &[u8], value: Vec<u8>) -> Result<(), String> {
         self.set_with_index(shard_id, key, value, None)
     }
 
@@ -40,12 +40,14 @@ impl ShardedRocksDB {
     /// apply_index, the write is skipped (idempotent).
     pub fn set_with_index(
         &self,
-        shard_id: ShardId,
+        shard_id: &ShardId,
         key: &[u8],
         value: Vec<u8>,
         apply_index: Option<u64>,
     ) -> Result<(), String> {
-        let cf = self.get_or_create_cf(shard_id)?;
+        let cf = self
+            .get_or_create_cf(shard_id)
+            .map_err(|e| format!("RocksDB SET (with index) error: {}", e))?;
         let db_key = string_key(key);
 
         // If apply_index is provided, check for duplicate commit
@@ -76,14 +78,14 @@ impl ShardedRocksDB {
     }
 
     /// SETNX: Set if not exists
-    pub fn setnx(&self, shard_id: ShardId, key: &[u8], value: Vec<u8>) -> Result<bool, String> {
+    pub fn setnx(&self, shard_id: &ShardId, key: &[u8], value: Vec<u8>) -> Result<bool, String> {
         self.setnx_with_index(shard_id, key, value, None)
     }
 
     /// SETNX with apply_index: Atomically set if not exists and update apply_index
     pub fn setnx_with_index(
         &self,
-        shard_id: ShardId,
+        shard_id: &ShardId,
         key: &[u8],
         value: Vec<u8>,
         apply_index: Option<u64>,
@@ -122,12 +124,12 @@ impl ShardedRocksDB {
     }
 
     /// DEL: Delete key from specific shard
-    pub fn del(&self, shard_id: ShardId, key: &[u8]) -> bool {
+    pub fn del(&self, shard_id: &ShardId, key: &[u8]) -> bool {
         self.del_with_index(shard_id, key, None)
     }
 
     /// DEL with apply_index: Atomically delete key and update apply_index
-    pub fn del_with_index(&self, shard_id: ShardId, key: &[u8], apply_index: Option<u64>) -> bool {
+    pub fn del_with_index(&self, shard_id: &ShardId, key: &[u8], apply_index: Option<u64>) -> bool {
         if let Some(cf) = self.get_cf(shard_id) {
             let db_key = string_key(key);
             if self.db.get_cf(cf, &db_key).ok().flatten().is_some() {
@@ -159,14 +161,14 @@ impl ShardedRocksDB {
     }
 
     /// INCR/INCRBY
-    pub fn incrby(&self, shard_id: ShardId, key: &[u8], delta: i64) -> StoreResult<i64> {
+    pub fn incrby(&self, shard_id: &ShardId, key: &[u8], delta: i64) -> StoreResult<i64> {
         self.incrby_with_index(shard_id, key, delta, None)
     }
 
     /// INCRBY with apply_index: Atomically increment and update apply_index
     pub fn incrby_with_index(
         &self,
-        shard_id: ShardId,
+        shard_id: &ShardId,
         key: &[u8],
         delta: i64,
         apply_index: Option<u64>,
@@ -226,14 +228,14 @@ impl ShardedRocksDB {
     }
 
     /// APPEND
-    pub fn append(&self, shard_id: ShardId, key: &[u8], value: &[u8]) -> usize {
+    pub fn append(&self, shard_id: &ShardId, key: &[u8], value: &[u8]) -> usize {
         self.append_with_index(shard_id, key, value, None)
     }
 
     /// APPEND with apply_index: Atomically append and update apply_index
     pub fn append_with_index(
         &self,
-        shard_id: ShardId,
+        shard_id: &ShardId,
         key: &[u8],
         value: &[u8],
         apply_index: Option<u64>,
@@ -283,7 +285,7 @@ impl ShardedRocksDB {
     }
 
     /// STRLEN
-    pub fn strlen(&self, shard_id: ShardId, key: &[u8]) -> usize {
+    pub fn strlen(&self, shard_id: &ShardId, key: &[u8]) -> usize {
         if let Some(cf) = self.get_cf(shard_id) {
             let db_key = string_key(key);
             if let Ok(Some(value)) = self.db.get_cf(cf, &db_key) {

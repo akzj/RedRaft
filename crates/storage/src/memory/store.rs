@@ -471,6 +471,8 @@ impl MemStoreCow {
 ///
 /// Contains all data structures (List, Set, ZSet, Bitmap) in a unified store
 /// with type detection and COW support.
+/// 
+#[derive(Clone)]
 pub struct ShardStore {
     /// Unified store for all data types with COW support
     pub store: MemStoreCow,

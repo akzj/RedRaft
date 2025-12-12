@@ -8,7 +8,7 @@ use rocksdb::WriteBatch;
 
 impl ShardedRocksDB {
     /// Create snapshot for a specific shard
-    pub fn create_shard_snapshot(&self, shard_id: ShardId) -> Result<Vec<u8>, String> {
+    pub fn create_shard_snapshot(&self, shard_id: &ShardId) -> Result<Vec<u8>, String> {
         let cf = self
             .get_cf(shard_id)
             .ok_or_else(|| format!("Shard {} not found", shard_id))?;
@@ -32,7 +32,7 @@ impl ShardedRocksDB {
     }
 
     /// Restore shard from snapshot
-    pub fn restore_shard_snapshot(&self, shard_id: ShardId, data: &[u8]) -> Result<(), String> {
+    pub fn restore_shard_snapshot(&self, shard_id: &ShardId, data: &[u8]) -> Result<(), String> {
         let cf = self
             .get_cf(shard_id)
             .ok_or_else(|| format!("Shard {} not found", shard_id))?;

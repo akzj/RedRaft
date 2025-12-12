@@ -17,7 +17,16 @@ These protocols are separate from Raft consensus protocols (which are defined in
 
 Used for transferring split snapshots during shard splitting operations.
 
-- `TransferSplitSnapshot`: Stream-based, chunked transfer of snapshot data
+**Pull-based Transfer Flow:**
+1. Leader sends `InstallSnapshotRequest` (metadata only: index, term, config)
+2. Follower receives request and calls `process_snapshot` callback
+3. Follower actively calls `PullSnapshotData` to request snapshot data
+4. Leader streams snapshot data chunks via server streaming
+5. Follower receives chunks and applies to Redis store
+
+- `PullSnapshotData`: Follower actively pulls snapshot data (server streaming)
+  - Supports resume from offset for retry scenarios
+  - Follower controls transfer rate
 - `GetTransferProgress`: Query the progress of an ongoing transfer
 
 ### MigrationService
@@ -51,8 +60,8 @@ proto = { path = "../proto" }
 use proto::node::{
     split_snapshot_service_server::{SplitSnapshotService, SplitSnapshotServiceServer},
     split_snapshot_service_client::SplitSnapshotServiceClient,
-    TransferSplitSnapshotRequest,
-    TransferSplitSnapshotResponse,
+    PullSnapshotDataRequest,
+    PullSnapshotDataResponse,
     // ... other types
 };
 ```

@@ -20,22 +20,22 @@ use tracing::info;
 pub struct SegmentMetadata {
     /// Shard ID
     pub shard_id: ShardId,
-    
+
     /// Apply index for this segment
     pub apply_index: u64,
-    
+
     /// Number of chunks
     pub chunk_count: u32,
-    
+
     /// Total size (uncompressed) in bytes
     pub total_size: u64,
-    
+
     /// Created timestamp
     pub created_at: u64,
-    
+
     /// Checksums for each chunk (CRC32)
     pub checksums: Vec<u32>,
-    
+
     /// Chunk file information
     pub chunks: Vec<ChunkInfo>,
 }
@@ -45,13 +45,13 @@ pub struct SegmentMetadata {
 pub struct ChunkInfo {
     /// Chunk ID
     pub chunk_id: u32,
-    
+
     /// File name
     pub file_name: String,
-    
+
     /// Size in bytes (compressed)
     pub size: u64,
-    
+
     /// CRC32 checksum
     pub crc32: u32,
 }
@@ -66,9 +66,8 @@ pub struct SegmentGenerator {
 
 impl SegmentGenerator {
     pub fn new(config: SnapshotConfig, segments_dir: PathBuf) -> Self {
-        std::fs::create_dir_all(&segments_dir)
-            .expect("Failed to create segments directory");
-        
+        std::fs::create_dir_all(&segments_dir).expect("Failed to create segments directory");
+
         Self {
             config,
             segments_dir,
@@ -83,12 +82,12 @@ impl SegmentGenerator {
         if self.is_generating {
             return false;
         }
-        
+
         // Check WAL size threshold
         if wal_size >= self.config.wal_size_threshold {
             return true;
         }
-        
+
         // Check time interval
         if let Some(last_time) = self.last_generate_time {
             if last_time.elapsed().as_secs() >= self.config.segment_interval_secs {
@@ -98,87 +97,88 @@ impl SegmentGenerator {
             // First time, generate if WAL is not empty
             return wal_size > 0;
         }
-        
+
         false
     }
 
     /// Generate segment for a shard (read lock, doesn't block writes)
     pub fn generate_segment(
         &mut self,
-        shard_id: ShardId,
+        shard_id: &ShardId,
         memory_store: &MemStoreCow,
         apply_index: u64,
     ) -> Result<SegmentMetadata, String> {
         // Mark as generating
         self.is_generating = true;
-        
+
         // Get read lock to clone COW base
         let cow_base = {
             let base = memory_store.base.read();
             base.clone() // Clone the HashMap (keys and DataCow references)
         };
-        
+
         // Create shard directory
         let shard_dir = self.segments_dir.join(format!("shard_{}", shard_id));
         std::fs::create_dir_all(&shard_dir)
             .map_err(|e| format!("Failed to create shard directory: {}", e))?;
-        
+
         // Generate chunks
         let chunk_output_dir = shard_dir.join("temp_chunks");
         std::fs::create_dir_all(&chunk_output_dir)
             .map_err(|e| format!("Failed to create chunk output directory: {}", e))?;
-        
+
         let mut chunk_writer = ChunkWriter::new(self.config.clone(), chunk_output_dir.clone());
-        
+
         // Traverse HashMap and write entries
         for (key, data_cow) in cow_base.iter() {
             chunk_writer.add_entry(key.clone(), data_cow)?;
         }
-        
+
         // Finish writing chunks
         let chunk_files = chunk_writer.finish()?;
-        
+
         // Move chunks to segment files and calculate checksums
         let mut chunks = Vec::new();
         let mut checksums = Vec::new();
         let mut total_size = 0u64;
-        
+
         for (chunk_id, chunk_file) in chunk_files.iter().enumerate() {
             let chunk_id = (chunk_id + 1) as u32;
-            let segment_file_name = format!("shard_{}-{}.{:05}.seg", shard_id, apply_index, chunk_id);
+            let segment_file_name =
+                format!("shard_{}-{}.{:05}.seg", shard_id, apply_index, chunk_id);
             let segment_file_path = shard_dir.join(&segment_file_name);
-            
+
             // Calculate checksum
             let checksum = self.calculate_file_checksum(chunk_file)?;
             checksums.push(checksum);
-            
+
             // Get file size
             let file_size = std::fs::metadata(chunk_file)
                 .map_err(|e| format!("Failed to get chunk file metadata: {}", e))?
                 .len();
-            
+
             // Move chunk file to segment file
             std::fs::rename(chunk_file, &segment_file_path)
                 .map_err(|e| format!("Failed to move chunk to segment: {}", e))?;
-            
+
             chunks.push(ChunkInfo {
                 chunk_id,
                 file_name: segment_file_name,
                 size: file_size,
                 crc32: checksum,
             });
-            
+
             total_size += file_size;
         }
-        
+
         // Clean up temp directory
         std::fs::remove_dir_all(&chunk_output_dir)
             .map_err(|e| format!("Failed to remove temp directory: {}", e))?;
-        
+
         // Create metadata
         let metadata = SegmentMetadata {
-            shard_id,
             apply_index,
+            shard_id: shard_id.clone(),
             chunk_count: chunks.len() as u32,
             total_size,
             created_at: std::time::SystemTime::now()
@@ -188,19 +188,19 @@ impl SegmentGenerator {
             checksums,
             chunks,
         };
-        
+
         // Save metadata
         let metadata_path = shard_dir.join("metadata.json");
         let metadata_json = serde_json::to_string_pretty(&metadata)
             .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
         std::fs::write(&metadata_path, metadata_json)
             .map_err(|e| format!("Failed to write metadata: {}", e))?;
-        
+
         info!(
             "Generated segment for shard {} at apply_index {}: {} chunks, {} bytes",
             shard_id, apply_index, metadata.chunk_count, total_size
         );
-        
+
         Ok(metadata)
     }
 
@@ -212,16 +212,17 @@ impl SegmentGenerator {
         );
         let mut hasher = Crc32Hasher::new();
         let mut buffer = [0u8; 8192];
-        
+
         loop {
-            let bytes_read = file.read(&mut buffer)
+            let bytes_read = file
+                .read(&mut buffer)
                 .map_err(|e| format!("Failed to read file for checksum: {}", e))?;
             if bytes_read == 0 {
                 break;
             }
             hasher.update(&buffer[..bytes_read]);
         }
-        
+
         Ok(hasher.finalize())
     }
 
@@ -234,21 +235,21 @@ impl SegmentGenerator {
     /// Get the latest segment for a shard
     pub fn get_latest_segment(&self, shard_id: ShardId) -> Result<Option<SegmentMetadata>, String> {
         let shard_dir = self.segments_dir.join(format!("shard_{}", shard_id));
-        
+
         if !shard_dir.exists() {
             return Ok(None);
         }
-        
+
         let metadata_path = shard_dir.join("metadata.json");
         if !metadata_path.exists() {
             return Ok(None);
         }
-        
+
         let content = std::fs::read_to_string(&metadata_path)
             .map_err(|e| format!("Failed to read segment metadata: {}", e))?;
         let metadata: SegmentMetadata = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse segment metadata: {}", e))?;
-        
+
         Ok(Some(metadata))
     }
 }
@@ -270,30 +271,30 @@ impl SegmentReader {
     /// Read segment metadata for a shard
     pub fn read_metadata(&self, shard_id: ShardId) -> Result<Option<SegmentMetadata>, String> {
         let shard_dir = self.segments_dir.join(format!("shard_{}", shard_id));
-        
+
         if !shard_dir.exists() {
             return Ok(None);
         }
-        
+
         let metadata_path = shard_dir.join("metadata.json");
         if !metadata_path.exists() {
             return Ok(None);
         }
-        
+
         let content = std::fs::read_to_string(&metadata_path)
             .map_err(|e| format!("Failed to read segment metadata: {}", e))?;
-        
+
         // Verify checksum
         let metadata: SegmentMetadata = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse segment metadata: {}", e))?;
-        
+
         // Verify chunk files exist and checksums match
         for chunk_info in &metadata.chunks {
             let chunk_path = shard_dir.join(&chunk_info.file_name);
             if !chunk_path.exists() {
                 return Err(format!("Chunk file not found: {}", chunk_info.file_name));
             }
-            
+
             // Verify checksum
             let actual_checksum = self.calculate_file_checksum(&chunk_path)?;
             if actual_checksum != chunk_info.crc32 {
@@ -303,7 +304,7 @@ impl SegmentReader {
                 ));
             }
         }
-        
+
         Ok(Some(metadata))
     }
 
@@ -315,17 +316,17 @@ impl SegmentReader {
         );
         let mut hasher = Crc32Hasher::new();
         let mut buffer = [0u8; 8192];
-        
+
         loop {
-            let bytes_read = file.read(&mut buffer)
+            let bytes_read = file
+                .read(&mut buffer)
                 .map_err(|e| format!("Failed to read file for checksum: {}", e))?;
             if bytes_read == 0 {
                 break;
             }
             hasher.update(&buffer[..bytes_read]);
         }
-        
+
         Ok(hasher.finalize())
     }
 }
-

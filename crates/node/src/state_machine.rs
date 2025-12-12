@@ -11,7 +11,10 @@ use raft::{
     StateMachine, StorageResult,
 };
 use resp::Command;
-use storage::traits::{ApplyResult as StoreApplyResult, RedisStore, StoreError};
+use storage::{
+    store::HybridStore,
+    traits::{ApplyResult as StoreApplyResult, RedisStore, StoreError},
+};
 
 use crate::node::PendingRequests;
 
@@ -19,7 +22,7 @@ use crate::node::PendingRequests;
 #[derive(Clone)]
 pub struct KVStateMachine {
     /// Storage backend (supports memory or persistent storage)
-    store: Arc<dyn RedisStore>,
+    store: Arc<storage::store::HybridStore>,
     /// Last applied index (monotonically increasing, tracks Raft apply_index)
     apply_index: Arc<std::sync::atomic::AtomicU64>,
     term: Arc<std::sync::atomic::AtomicU64>,
@@ -31,7 +34,7 @@ pub struct KVStateMachine {
 
 impl KVStateMachine {
     /// Create new KV state machine with specified storage backend
-    pub fn new(store: Arc<dyn RedisStore>) -> Self {
+    pub fn new(store: Arc<HybridStore>) -> Self {
         Self {
             store,
             apply_index: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -43,7 +46,7 @@ impl KVStateMachine {
 
     /// Create KV state machine with request tracking
     pub fn with_pending_requests(
-        store: Arc<dyn RedisStore>,
+        store: Arc<HybridStore>,
         pending_requests: PendingRequests,
     ) -> Self {
         Self {
@@ -56,8 +59,18 @@ impl KVStateMachine {
     }
 
     /// Get storage backend reference (for read operations)
-    pub fn store(&self) -> &Arc<dyn RedisStore> {
+    pub fn store(&self) -> &Arc<HybridStore> {
         &self.store
+    }
+
+    /// Get apply_index reference
+    pub fn apply_index(&self) -> &Arc<std::sync::atomic::AtomicU64> {
+        &self.apply_index
+    }
+
+    /// Get term reference
+    pub fn term(&self) -> &Arc<std::sync::atomic::AtomicU64> {
+        &self.term
     }
 
     /// Update apply_index (called after applying a command)

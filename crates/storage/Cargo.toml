@@ -13,7 +13,7 @@ parking_lot = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 bincode = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true }
+tokio.workspace = true
 ordered-float = "5.1.0"
 # RocksDB for persistent storage
 rocksdb = { workspace = true }
@@ -23,6 +23,7 @@ bytes = { workspace = true }
 crc32fast = { workspace = true }
 serde_json = { workspace = true }
 zstd = "0.13.3"
+async-trait.workspace = true
 
 [dev-dependencies]
 rand = { workspace = true }

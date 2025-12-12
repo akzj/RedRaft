@@ -12,6 +12,7 @@
 
 use crate::rocksdb::key_encoding::apply_index_key;
 use crate::shard::{slot_for_key, ShardId, TOTAL_SLOTS};
+use anyhow::Result;
 use parking_lot::RwLock;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, WriteOptions, DB};
 use std::collections::HashMap;
@@ -29,8 +30,8 @@ pub struct ShardMetadata {
 }
 
 /// Column Family name for a shard
-fn shard_cf_name(shard_id: ShardId) -> String {
-    format!("shard_{:04x}", shard_id)
+fn shard_cf_name(shard_id: &ShardId) -> String {
+    format!("shard_{}", shard_id)
 }
 
 /// Sharded RocksDB Storage
@@ -42,8 +43,6 @@ pub struct ShardedRocksDB {
     pub(crate) db: Arc<DB>,
     /// Database path
     path: String,
-    /// Number of shards
-    shard_count: u32,
     /// Write options
     pub(crate) write_opts: WriteOptions,
     /// Shard metadata cache
@@ -52,9 +51,8 @@ pub struct ShardedRocksDB {
 
 impl ShardedRocksDB {
     /// Create a new ShardedRocksDB
-    pub fn new<P: AsRef<Path>>(path: P, shard_count: u32) -> Result<Self, String> {
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let path_str = path.as_ref().to_string_lossy().to_string();
-        let shard_count = shard_count.max(1);
 
         // Configure RocksDB options
         let mut opts = Options::default();
@@ -66,30 +64,13 @@ impl ShardedRocksDB {
         opts.set_max_background_jobs(4);
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
-        // Create Column Family descriptors for each shard
-        let cf_names: Vec<String> = std::iter::once("default".to_string())
-            .chain((0..shard_count).map(|id| shard_cf_name(id)))
-            .collect();
-
-        // Try to open with existing CFs, or create new
-        let cf_descriptors: Vec<ColumnFamilyDescriptor> = cf_names
-            .iter()
-            .map(|name| ColumnFamilyDescriptor::new(name, Options::default()))
-            .collect();
-
-        let db = match DB::open_cf_descriptors(&opts, &path_str, cf_descriptors) {
+        let db = match DB::open(&opts, &path_str) {
             Ok(db) => db,
             Err(_) => {
                 // First time open, create the database
                 let mut db = DB::open(&opts, &path_str)
                     .map_err(|e| format!("Failed to open RocksDB: {}", e))?;
 
-                // Create shard Column Families
-                for shard_id in 0..shard_count {
-                    let cf_name = shard_cf_name(shard_id);
-                    db.create_cf(&cf_name, &Options::default())
-                        .map_err(|e| format!("Failed to create CF {}: {}", cf_name, e))?;
-                }
                 db
             }
         };
@@ -99,34 +80,10 @@ impl ShardedRocksDB {
 
         // Initialize shard metadata
         let mut shard_metadata = HashMap::new();
-        let slots_per_shard = TOTAL_SLOTS / shard_count;
-        for shard_id in 0..shard_count {
-            let slot_start = shard_id * slots_per_shard;
-            let slot_end = if shard_id == shard_count - 1 {
-                TOTAL_SLOTS
-            } else {
-                (shard_id + 1) * slots_per_shard
-            };
-            shard_metadata.insert(
-                shard_id,
-                ShardMetadata {
-                    shard_id,
-                    slot_start,
-                    slot_end,
-                    apply_index: None,
-                },
-            );
-        }
-
-        info!(
-            "ShardedRocksDB opened at: {} with {} shards",
-            path_str, shard_count
-        );
 
         Ok(Self {
             db: Arc::new(db),
             path: path_str,
-            shard_count,
             write_opts,
             shard_metadata: Arc::new(RwLock::new(shard_metadata)),
         })
@@ -134,7 +91,7 @@ impl ShardedRocksDB {
 
     /// Get shard count
     pub fn shard_count(&self) -> u32 {
-        self.shard_count
+        self.shard_metadata.read().len() as u32
     }
 
     /// Get database path
@@ -143,19 +100,27 @@ impl ShardedRocksDB {
     }
 
     /// Calculate shard ID for a key
-    pub fn shard_for_key(&self, key: &[u8]) -> ShardId {
+    pub fn shard_for_key(&self, key: &[u8]) -> Result<ShardId> {
         let slot = slot_for_key(key);
-        slot % self.shard_count
+
+        let metadata = self.shard_metadata.read();
+        for (shard_id, metadata) in metadata.iter() {
+            if slot >= metadata.slot_start && slot < metadata.slot_end {
+                return Ok(shard_id.clone());
+            }
+        }
+
+        return Err(anyhow::anyhow!("Shard not found"));
     }
 
     /// Get Column Family handle for shard
-    pub(crate) fn get_cf(&self, shard_id: ShardId) -> Option<&ColumnFamily> {
+    pub(crate) fn get_cf(&self, shard_id: &ShardId) -> Option<&ColumnFamily> {
         let cf_name = shard_cf_name(shard_id);
         self.db.cf_handle(&cf_name)
     }
 
     /// Get or create Column Family for shard
-    pub(crate) fn get_or_create_cf(&self, shard_id: ShardId) -> Result<&ColumnFamily, String> {
+    pub(crate) fn get_or_create_cf(&self, shard_id: &ShardId) -> Result<&ColumnFamily, String> {
         let cf_name = shard_cf_name(shard_id);
         if let Some(cf) = self.db.cf_handle(&cf_name) {
             Ok(cf)
@@ -167,18 +132,18 @@ impl ShardedRocksDB {
     // ==================== Shard Management ====================
 
     /// Set apply index for shard
-    pub fn set_shard_apply_index(&self, shard_id: ShardId, apply_index: u64) {
+    pub fn set_shard_apply_index(&self, shard_id: &ShardId, apply_index: u64) {
         let mut metadata = self.shard_metadata.write();
-        if let Some(meta) = metadata.get_mut(&shard_id) {
+        if let Some(meta) = metadata.get_mut(shard_id) {
             meta.apply_index = Some(apply_index);
         }
     }
 
     /// Get apply index for shard (from cache, fallback to DB)
-    pub fn get_shard_apply_index(&self, shard_id: ShardId) -> Option<u64> {
+    pub fn get_shard_apply_index(&self, shard_id: &ShardId) -> Option<u64> {
         // Try cache first
         let metadata = self.shard_metadata.read();
-        if let Some(index) = metadata.get(&shard_id).and_then(|m| m.apply_index) {
+        if let Some(index) = metadata.get(shard_id).and_then(|m| m.apply_index) {
             return Some(index);
         }
         drop(metadata);
@@ -188,7 +153,7 @@ impl ShardedRocksDB {
     }
 
     /// Get apply_index from RocksDB (not from cache)
-    fn get_apply_index_from_db(&self, shard_id: ShardId) -> Result<Option<u64>, String> {
+    fn get_apply_index_from_db(&self, shard_id: &ShardId) -> Result<Option<u64>, String> {
         let cf = self
             .get_cf(shard_id)
             .ok_or_else(|| format!("Shard {} not found", shard_id))?;
@@ -214,7 +179,7 @@ impl ShardedRocksDB {
     /// Helper: Check if apply_index should be skipped (idempotent check)
     pub(crate) fn should_skip_apply_index(
         &self,
-        shard_id: ShardId,
+        shard_id: &ShardId,
         new_index: u64,
     ) -> Result<bool, String> {
         let current_index = self.get_apply_index_from_db(shard_id)?;
@@ -238,7 +203,7 @@ impl ShardedRocksDB {
     }
 
     /// Atomically update apply_index in RocksDB (without data write)
-    pub fn update_apply_index(&self, shard_id: ShardId, apply_index: u64) -> Result<(), String> {
+    pub fn update_apply_index(&self, shard_id: &ShardId, apply_index: u64) -> Result<(), String> {
         let cf = self.get_or_create_cf(shard_id)?;
         let index_key = apply_index_key();
 
@@ -267,14 +232,14 @@ impl ShardedRocksDB {
     }
 
     /// Get shard metadata
-    pub fn get_shard_metadata(&self, shard_id: ShardId) -> Option<ShardMetadata> {
+    pub fn get_shard_metadata(&self, shard_id: &ShardId) -> Option<ShardMetadata> {
         let metadata = self.shard_metadata.read();
-        metadata.get(&shard_id).cloned()
+        metadata.get(shard_id).cloned()
     }
 
     /// Get all active shards
     pub fn get_active_shards(&self) -> Vec<ShardId> {
-        (0..self.shard_count).collect()
+        self.shard_metadata.read().keys().cloned().collect()
     }
 }
 
@@ -283,7 +248,6 @@ impl Clone for ShardedRocksDB {
         Self {
             db: Arc::clone(&self.db),
             path: self.path.clone(),
-            shard_count: self.shard_count,
             write_opts: {
                 let mut opts = WriteOptions::default();
                 opts.set_sync(false);
@@ -303,7 +267,7 @@ mod tests {
 
     fn create_temp_db() -> ShardedRocksDB {
         let path = format!("/tmp/sharded_rocksdb_test_{}", rand::random::<u64>());
-        ShardedRocksDB::new(&path, 4).unwrap()
+        ShardedRocksDB::new(&path).unwrap()
     }
 
     fn cleanup_db(db: &ShardedRocksDB) {
@@ -317,16 +281,22 @@ mod tests {
         let db = create_temp_db();
 
         // Test in shard 0
-        db.set(0, b"key1", b"value1".to_vec()).unwrap();
-        assert_eq!(db.get(0, b"key1"), Some(b"value1".to_vec()));
+        db.set(&"shard_0".into(), b"key1", b"value1".to_vec())
+            .unwrap();
+        assert_eq!(db.get(&"shard_0".into(), b"key1"), Some(b"value1".to_vec()));
 
         // Test SETNX
-        assert!(!db.setnx(0, b"key1", b"value2".to_vec()).unwrap());
-        assert!(db.setnx(0, b"key2", b"value2".to_vec()).unwrap());
+        assert!(!db
+            .setnx(&"shard_0".into(), b"key1", b"value2".to_vec())
+            .unwrap());
+        assert!(db
+            .setnx(&"shard_0".into(), b"key2", b"value2".to_vec())
+            .unwrap());
 
         // Test INCR
-        db.set(0, b"counter", b"10".to_vec()).unwrap();
-        assert_eq!(db.incrby(0, b"counter", 5).unwrap(), 15);
+        db.set(&"shard_0".into(), b"counter", b"10".to_vec())
+            .unwrap();
+        assert_eq!(db.incrby(&"shard_0".into(), b"counter", 5).unwrap(), 15);
 
         cleanup_db(&db);
     }
@@ -337,16 +307,19 @@ mod tests {
 
         // Test in shard 1
         assert!(db.hset(
-            1,
+            &"shard_1".into(),
             b"myhash",
             b"field1".as_ref(),
             Bytes::from(b"value1".to_vec())
         ));
-        assert_eq!(db.hget(1, b"myhash", b"field1"), Some(b"value1".to_vec()));
+        assert_eq!(
+            db.hget(&"shard_1".into(), b"myhash", b"field1"),
+            Some(b"value1".to_vec())
+        );
 
         // Test HMSET
         db.hmset(
-            1,
+            &"shard_1".into(),
             b"myhash",
             vec![
                 (b"field2".as_ref(), Bytes::from(b"value2".to_vec())),
@@ -354,10 +327,10 @@ mod tests {
             ],
         );
 
-        assert_eq!(db.hlen(1, b"myhash"), 3);
+        assert_eq!(db.hlen(&"shard_1".into(), b"myhash"), 3);
 
         // Test HGETALL
-        let all = db.hgetall(1, b"myhash");
+        let all = db.hgetall(&"shard_1".into(), b"myhash");
         assert_eq!(all.len(), 3);
 
         cleanup_db(&db);
@@ -368,18 +341,25 @@ mod tests {
         let db = create_temp_db();
 
         // Add data to shard 2
-        db.set(2, b"key1", b"value1".to_vec()).unwrap();
-        db.hset(2, b"hash1", b"f1".as_ref(), Bytes::from("v1"));
+        db.set(&"shard_2".into(), b"key1", b"value1".to_vec())
+            .unwrap();
+        db.hset(
+            &"shard_2".into(),
+            b"hash1",
+            b"f1".as_ref(),
+            Bytes::from("v1"),
+        );
 
         // Create snapshot
-        let snapshot = db.create_shard_snapshot(2).unwrap();
+        let snapshot = db.create_shard_snapshot(&"shard_2".into()).unwrap();
 
         // Clear and restore
-        db.del(2, b"key1");
-        assert!(db.get(2, b"key1").is_none());
+        db.del(&"shard_2".into(), b"key1");
+        assert!(db.get(&"shard_2".into(), b"key1").is_none());
 
-        db.restore_shard_snapshot(2, &snapshot).unwrap();
-        assert_eq!(db.get(2, b"key1"), Some(b"value1".to_vec()));
+        db.restore_shard_snapshot(&"shard_2".into(), &snapshot)
+            .unwrap();
+        assert_eq!(db.get(&"shard_2".into(), b"key1"), Some(b"value1".to_vec()));
 
         cleanup_db(&db);
     }

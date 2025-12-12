@@ -6,7 +6,7 @@
 //! - Metadata: shard_id -> [apply_index_begin, apply_index_end)
 //! - Timed rotation + metadata file
 
-use crate::shard::{shard_for_key, ShardId};
+use crate::shard::{slot_for_key, ShardId};
 use crate::snapshot::SnapshotConfig;
 use resp::Command;
 use serde::{Deserialize, Serialize};
@@ -135,8 +135,10 @@ impl WalWriter {
         command: &Command,
         key: &[u8],
     ) -> Result<(), String> {
-        // Calculate shard_id from key
-        let shard_id = shard_for_key(key, self.config.shard_count);
+        // Calculate shard_id from key using slot_for_key
+        // For WAL, we use a simple hash-based shard calculation
+        let slot = slot_for_key(key);
+        let shard_id = format!("shard_{}", slot % self.config.shard_count);
 
         // Serialize command
         let command_bytes = bincode::serde::encode_to_vec(command, bincode::config::standard())

@@ -11,9 +11,13 @@
 //! - `SnapshotStore`: Snapshot operations
 //! - `RedisStore`: Combines all traits with command execution
 
+use anyhow::Result;
+use async_trait::async_trait;
 use resp::Command;
 
 use bytes::Bytes;
+
+use crate::shard::ShardId;
 
 // ============================================================================
 // Error Types
@@ -41,7 +45,7 @@ pub enum ApplyResult {
 }
 
 /// Redis storage error
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StoreError {
     /// Key not found
     KeyNotFound,
@@ -55,6 +59,9 @@ pub enum StoreError {
     Internal(String),
     /// Operation not supported
     NotSupported,
+
+    /// Shard not found
+    ShardNotFound(ShardId),
 }
 
 impl std::fmt::Display for StoreError {
@@ -71,6 +78,7 @@ impl std::fmt::Display for StoreError {
             StoreError::NotSupported => write!(f, "operation not supported"),
             StoreError::InvalidArgument(msg) => write!(f, "invalid argument: {}", msg),
             StoreError::Internal(msg) => write!(f, "internal error: {}", msg),
+            StoreError::ShardNotFound(shard_id) => write!(f, "shard not found: {}", shard_id),
         }
     }
 }
@@ -489,7 +497,31 @@ pub trait KeyStore: Send + Sync {
 // Snapshot Store Trait
 // ============================================================================
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum SnapshotStoreEntry {
+    // key, field, value
+    Hash(bytes::Bytes, bytes::Bytes, bytes::Bytes),
+    // key, first element
+    List(bytes::Bytes, bytes::Bytes),
+    // key, element
+    Set(bytes::Bytes, bytes::Bytes),
+    // key, score, element
+    ZSet(bytes::Bytes, f64, bytes::Bytes),
+
+    // key, bitmap
+    Bitmap(bytes::Bytes, bytes::Bytes),
+    // key, value
+    String(bytes::Bytes, bytes::Bytes),
+
+    // Error
+    Error(StoreError),
+
+    // Success
+    Completed,
+}
+
 /// Snapshot operations for persistence and replication
+#[async_trait]
 pub trait SnapshotStore: Send + Sync {
     /// Flush data to disk for snapshot creation
     ///
@@ -502,7 +534,11 @@ pub trait SnapshotStore: Send + Sync {
     ///
     /// # Returns
     /// Empty vector (data is already on disk, no need to return it)
-    fn create_snapshot(&self, shard_id: &str) -> Result<Vec<u8>, String>;
+    async fn create_snapshot(
+        &self,
+        shard_id: &ShardId,
+        channel: tokio::sync::mpsc::Sender<SnapshotStoreEntry>,
+    ) -> Result<()>;
 
     /// Restore from snapshot data
     fn restore_from_snapshot(&self, snapshot: &[u8]) -> Result<(), String>;

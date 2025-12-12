@@ -19,21 +19,21 @@ use rocksdb::{ColumnFamily, WriteBatch};
 
 impl ShardedRocksDB {
     /// HGET
-    pub fn hget(&self, shard_id: ShardId, key: &[u8], field: &[u8]) -> Option<Vec<u8>> {
+    pub fn hget(&self, shard_id: &ShardId, key: &[u8], field: &[u8]) -> Option<Vec<u8>> {
         let cf = self.get_cf(shard_id)?;
         let db_key = hash_field_key(key, field);
         self.db.get_cf(cf, &db_key).ok().flatten()
     }
 
     /// HSET
-    pub fn hset(&self, shard_id: ShardId, key: &[u8], field: &[u8], value: Bytes) -> bool {
+    pub fn hset(&self, shard_id: &ShardId, key: &[u8], field: &[u8], value: Bytes) -> bool {
         self.hset_with_index(shard_id, key, field.as_ref(), value, None)
     }
 
     /// HSET with apply_index: Atomically set hash field and update apply_index
     pub fn hset_with_index(
         &self,
-        shard_id: ShardId,
+        shard_id: &ShardId,
         key: &[u8],
         field: &[u8],
         value: Bytes,
@@ -80,14 +80,14 @@ impl ShardedRocksDB {
     }
 
     /// HMSET
-    pub fn hmset(&self, shard_id: ShardId, key: &[u8], fvs: Vec<(&[u8], Bytes)>) {
+    pub fn hmset(&self, shard_id: &ShardId, key: &[u8], fvs: Vec<(&[u8], Bytes)>) {
         self.hmset_with_index(shard_id, key, fvs, None)
     }
 
     /// HMSET with apply_index: Atomically set multiple hash fields and update apply_index
     pub fn hmset_with_index(
         &self,
-        shard_id: ShardId,
+        shard_id: &ShardId,
         key: &[u8],
         fvs: Vec<(&[u8], Bytes)>,
         apply_index: Option<u64>,
@@ -133,14 +133,14 @@ impl ShardedRocksDB {
     }
 
     /// HDEL
-    pub fn hdel(&self, shard_id: ShardId, key: &[u8], fields: &[&[u8]]) -> usize {
+    pub fn hdel(&self, shard_id: &ShardId, key: &[u8], fields: &[&[u8]]) -> usize {
         self.hdel_with_index(shard_id, key, fields, None)
     }
 
     /// HDEL with apply_index: Atomically delete hash fields and update apply_index
     pub fn hdel_with_index(
         &self,
-        shard_id: ShardId,
+        shard_id: &ShardId,
         key: &[u8],
         fields: &[&[u8]],
         apply_index: Option<u64>,
@@ -196,7 +196,7 @@ impl ShardedRocksDB {
     }
 
     /// HEXISTS
-    pub fn hexists(&self, shard_id: ShardId, key: &[u8], field: &[u8]) -> bool {
+    pub fn hexists(&self, shard_id: &ShardId, key: &[u8], field: &[u8]) -> bool {
         if let Some(cf) = self.get_cf(shard_id) {
             let db_key = hash_field_key(key, field);
             return self.db.get_cf(cf, &db_key).ok().flatten().is_some();
@@ -205,7 +205,7 @@ impl ShardedRocksDB {
     }
 
     /// HGETALL
-    pub fn hgetall(&self, shard_id: ShardId, key: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    pub fn hgetall(&self, shard_id: &ShardId, key: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
         let mut result = Vec::new();
         if let Some(cf) = self.get_cf(shard_id) {
             let prefix = hash_field_prefix(key);
@@ -226,7 +226,7 @@ impl ShardedRocksDB {
     }
 
     /// HKEYS
-    pub fn hkeys(&self, shard_id: ShardId, key: &[u8]) -> Vec<Vec<u8>> {
+    pub fn hkeys(&self, shard_id: &ShardId, key: &[u8]) -> Vec<Vec<u8>> {
         let mut result = Vec::new();
         if let Some(cf) = self.get_cf(shard_id) {
             let prefix = hash_field_prefix(key);
@@ -247,7 +247,7 @@ impl ShardedRocksDB {
     }
 
     /// HVALS
-    pub fn hvals(&self, shard_id: ShardId, key: &[u8]) -> Vec<Vec<u8>> {
+    pub fn hvals(&self, shard_id: &ShardId, key: &[u8]) -> Vec<Vec<u8>> {
         let mut result = Vec::new();
         if let Some(cf) = self.get_cf(shard_id) {
             let prefix = hash_field_prefix(key);
@@ -266,7 +266,7 @@ impl ShardedRocksDB {
     }
 
     /// HLEN
-    pub fn hlen(&self, shard_id: ShardId, key: &[u8]) -> usize {
+    pub fn hlen(&self, shard_id: &ShardId, key: &[u8]) -> usize {
         if let Some(cf) = self.get_cf(shard_id) {
             let meta_key = hash_meta_key(key);
             if let Ok(Some(value)) = self.db.get_cf(cf, &meta_key) {
@@ -280,7 +280,7 @@ impl ShardedRocksDB {
     /// HINCRBY
     pub fn hincrby(
         &self,
-        shard_id: ShardId,
+        shard_id: &ShardId,
         key: &[u8],
         field: &[u8],
         delta: i64,
@@ -291,7 +291,7 @@ impl ShardedRocksDB {
     /// HINCRBY with apply_index: Atomically increment hash field and update apply_index
     pub fn hincrby_with_index(
         &self,
-        shard_id: ShardId,
+        shard_id: &ShardId,
         key: &[u8],
         field: &[u8],
         delta: i64,

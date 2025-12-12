@@ -64,12 +64,12 @@ impl<R: Read> RespParser<R> {
                 let num = num_str.parse::<i128>().map_err(|_| {
                     RespError::InvalidFormat(format!("Invalid integer: {}", num_str))
                 })?;
-
+                
                 // Check if within i64 range
                 if num > i64::MAX as i128 || num < i64::MIN as i128 {
                     return Err(RespError::IntegerOverflow);
                 }
-
+                
                 Ok(RespValue::Integer(num as i64))
             }
             '$' => {
@@ -188,7 +188,7 @@ mod tests {
         let data = b"+OK\rHI\r\n";
         let mut parser = RespParser::new(Cursor::new(data));
         assert!(parser.parse().is_err());
-
+        
         // Test that simple string cannot contain LF
         let data = b"+OK\nHI\r\n";
         let mut parser = RespParser::new(Cursor::new(data));
@@ -201,7 +201,7 @@ mod tests {
         let data = format!(":{}\r\n", i64::MAX as i128 + 1);
         let mut parser = RespParser::new(Cursor::new(data.as_bytes()));
         assert!(matches!(parser.parse(), Err(RespError::IntegerOverflow)));
-
+        
         // Test integer within normal range
         let data = format!(":{}\r\n", i64::MAX);
         let mut parser = RespParser::new(Cursor::new(data.as_bytes()));
