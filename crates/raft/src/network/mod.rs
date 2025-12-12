@@ -364,7 +364,42 @@ impl MultiRaftNetwork {
         });
     }
 
+    /// Set message dispatcher (required before starting server or getting Raft service)
+    pub fn set_dispatcher(&mut self, dispatch: Arc<dyn MessageDispatcher>) {
+        self.dispatch = Some(dispatch);
+    }
+
+    /// Get Raft service for adding to a gRPC server builder
+    /// 
+    /// This allows the business layer to create a gRPC server and add both
+    /// Raft services and business services to it, sharing the same port.
+    /// 
+    /// # Example
+    /// ```rust,no_run
+    /// use tonic::transport::Server;
+    /// 
+    /// let mut network = MultiRaftNetwork::new(options);
+    /// network.set_dispatcher(dispatch);
+    /// 
+    /// let raft_service = network.get_raft_service();
+    /// 
+    /// // Business layer creates server and adds services
+    /// Server::builder()
+    ///     .add_service(raft_service)
+    ///     .add_service(business_service)  // Business service
+    ///     .serve(addr)
+    ///     .await?;
+    /// ```
+    pub fn get_raft_service(&self) -> RaftServiceServer<MultiRaftNetwork> {
+        if self.dispatch.is_none() {
+            warn!("Raft service requested but dispatcher not set. Messages may fail to dispatch.");
+        }
+        RaftServiceServer::new(self.clone())
+    }
+
     // Start gRPC server (usually called in application main function)
+    // This method is kept for backward compatibility, but consider using
+    // get_raft_service() instead to allow business layer to add additional services.
     pub async fn start_grpc_server(&mut self, dispatch: Arc<dyn MessageDispatcher>) -> Result<()> {
         if self.dispatch.is_some() {
             return Err(anyhow::anyhow!("gRPC server already running"));

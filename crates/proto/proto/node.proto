@@ -1,0 +1,275 @@
+syntax = "proto3";
+
+package node;
+
+// ============================================================================
+// Node-to-Node Services
+// ============================================================================
+// This file defines protocols for communication between nodes,
+// such as snapshot transfer, data migration, and other operational operations.
+// These are separate from Raft consensus protocols (defined in raft/proto/pb.proto).
+
+// ============================================================================
+// Split Snapshot Transfer Service
+// ============================================================================
+// Used for transferring split snapshots during shard splitting operations.
+
+/// Split snapshot transfer service
+service SplitSnapshotService {
+    /// Transfer split snapshot (streaming, chunked)
+    /// Transfers snapshot data in chunks to support large snapshots
+    rpc TransferSplitSnapshot(stream TransferSplitSnapshotRequest) 
+        returns (TransferSplitSnapshotResponse);
+    
+    /// Query transfer progress
+    rpc GetTransferProgress(GetTransferProgressRequest) 
+        returns (GetTransferProgressResponse);
+}
+
+/// Split snapshot transfer request (one chunk)
+message TransferSplitSnapshotRequest {
+    /// Source shard ID
+    string source_shard_id = 1;
+    /// Target shard ID
+    string target_shard_id = 2;
+    /// Split point slot
+    uint32 split_slot = 3;
+    /// Snapshot index (Raft index when snapshot was created)
+    uint64 snapshot_index = 4;
+    /// Snapshot term (Raft term when snapshot was created)
+    uint64 snapshot_term = 5;
+    /// Chunk data (typically 1MB per chunk)
+    bytes chunk_data = 6;
+    /// Whether this is the last chunk
+    bool is_last_chunk = 7;
+    /// Chunk index (0-based)
+    uint32 chunk_index = 8;
+    /// Total number of chunks
+    uint32 total_chunks = 9;
+    /// Chunk checksum (CRC32 or SHA256)
+    bytes checksum = 10;
+    /// Transfer ID (unique identifier for this transfer)
+    string transfer_id = 11;
+}
+
+/// Split snapshot transfer response
+message TransferSplitSnapshotResponse {
+    /// Whether chunk was received successfully
+    bool success = 1;
+    /// Error message (if failed)
+    string error_message = 2;
+    /// Total bytes received so far
+    uint64 received_bytes = 3;
+    /// Number of chunks received
+    uint32 received_chunks = 4;
+}
+
+/// Get transfer progress request
+message GetTransferProgressRequest {
+    /// Transfer ID
+    string transfer_id = 1;
+}
+
+/// Get transfer progress response
+message GetTransferProgressResponse {
+    /// Transfer status
+    TransferStatus status = 1;
+    /// Total bytes received
+    uint64 received_bytes = 2;
+    /// Total bytes expected
+    uint64 total_bytes = 3;
+    /// Number of chunks received
+    uint32 received_chunks = 4;
+    /// Total number of chunks
+    uint32 total_chunks = 5;
+    /// Error message (if failed)
+    string error_message = 6;
+}
+
+/// Transfer status
+enum TransferStatus {
+    TRANSFER_STATUS_UNSPECIFIED = 0;
+    /// Transfer in progress
+    IN_PROGRESS = 1;
+    /// Transfer completed successfully
+    COMPLETED = 2;
+    /// Transfer failed
+    FAILED = 3;
+    /// Transfer not found
+    NOT_FOUND = 4;
+}
+
+// ============================================================================
+// Data Migration Service
+// ============================================================================
+// Used for migrating data between nodes during rebalancing or node removal.
+
+/// Data migration service
+service MigrationService {
+    /// Start data migration
+    rpc StartMigration(StartMigrationRequest) returns (StartMigrationResponse);
+    
+    /// Transfer migration data (streaming)
+    rpc TransferMigrationData(stream MigrationDataChunk) 
+        returns (MigrationDataResponse);
+    
+    /// Complete migration
+    rpc CompleteMigration(CompleteMigrationRequest) 
+        returns (CompleteMigrationResponse);
+    
+    /// Cancel migration
+    rpc CancelMigration(CancelMigrationRequest) 
+        returns (CancelMigrationResponse);
+}
+
+/// Start migration request
+message StartMigrationRequest {
+    /// Migration task ID
+    string task_id = 1;
+    /// Source shard ID
+    string source_shard_id = 2;
+    /// Target node ID
+    string target_node_id = 3;
+    /// Slot range to migrate
+    SlotRange slot_range = 4;
+}
+
+/// Slot range
+message SlotRange {
+    /// Start slot (inclusive)
+    uint32 start_slot = 1;
+    /// End slot (exclusive)
+    uint32 end_slot = 2;
+}
+
+/// Start migration response
+message StartMigrationResponse {
+    /// Whether migration was started successfully
+    bool success = 1;
+    /// Error message (if failed)
+    string error_message = 2;
+}
+
+/// Migration data chunk
+message MigrationDataChunk {
+    /// Migration task ID
+    string task_id = 1;
+    /// Chunk index
+    uint32 chunk_index = 2;
+    /// Whether this is the last chunk
+    bool is_last_chunk = 3;
+    /// Chunk data
+    bytes data = 4;
+    /// Chunk checksum
+    bytes checksum = 5;
+}
+
+/// Migration data response
+message MigrationDataResponse {
+    /// Whether chunk was received successfully
+    bool success = 1;
+    /// Error message (if failed)
+    string error_message = 2;
+    /// Total bytes received
+    uint64 received_bytes = 3;
+}
+
+/// Complete migration request
+message CompleteMigrationRequest {
+    /// Migration task ID
+    string task_id = 1;
+}
+
+/// Complete migration response
+message CompleteMigrationResponse {
+    /// Whether migration was completed successfully
+    bool success = 1;
+    /// Error message (if failed)
+    string error_message = 2;
+}
+
+/// Cancel migration request
+message CancelMigrationRequest {
+    /// Migration task ID
+    string task_id = 1;
+}
+
+/// Cancel migration response
+message CancelMigrationResponse {
+    /// Whether migration was cancelled successfully
+    bool success = 1;
+    /// Error message (if failed)
+    string error_message = 2;
+}
+
+// ============================================================================
+// Health Check Service
+// ============================================================================
+// Used for health checks and status queries between nodes.
+
+/// Health check service
+service HealthService {
+    /// Health check
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+    
+    /// Get node status
+    rpc GetNodeStatus(GetNodeStatusRequest) returns (GetNodeStatusResponse);
+}
+
+/// Health check request
+message HealthCheckRequest {
+    /// Optional: specific service to check
+    string service = 1;
+}
+
+/// Health check response
+message HealthCheckResponse {
+    /// Health status
+    HealthStatus status = 1;
+    /// Optional message
+    string message = 2;
+}
+
+/// Health status
+enum HealthStatus {
+    HEALTH_STATUS_UNSPECIFIED = 0;
+    /// Healthy
+    HEALTHY = 1;
+    /// Degraded (some issues but still operational)
+    DEGRADED = 2;
+    /// Unhealthy
+    UNHEALTHY = 3;
+}
+
+/// Get node status request
+message GetNodeStatusRequest {
+    // Empty for now, can be extended
+}
+
+/// Get node status response
+message GetNodeStatusResponse {
+    /// Node ID
+    string node_id = 1;
+    /// Node status
+    NodeStatus status = 2;
+    /// Number of shards managed
+    uint32 shard_count = 3;
+    /// Total memory usage (bytes)
+    uint64 memory_usage = 4;
+    /// CPU usage percentage
+    double cpu_usage = 5;
+}
+
+/// Node status
+enum NodeStatus {
+    NODE_STATUS_UNSPECIFIED = 0;
+    /// Node is running normally
+    RUNNING = 1;
+    /// Node is starting up
+    STARTING = 2;
+    /// Node is shutting down
+    SHUTTING_DOWN = 3;
+    /// Node is in maintenance mode
+    MAINTENANCE = 4;
+}
+

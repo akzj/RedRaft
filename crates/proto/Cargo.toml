@@ -1,0 +1,19 @@
+[package]
+name = "proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared gRPC protocol definitions for node-to-node communication"
+
+[dependencies]
+# gRPC/Protobuf support
+tonic = { workspace = true }
+prost = { workspace = true }
+tonic-prost = { workspace = true }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14.2"
+

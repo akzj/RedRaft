@@ -1428,6 +1428,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "serde",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
 name = "pulldown-cmark"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
