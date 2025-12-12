@@ -97,7 +97,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create Redis store
     let redis_store = Arc::new(HybridStore::new(
-        args.shard_count as u32,
         storage::snapshot::SnapshotConfig::default(),
         args.data_dir.clone(),
     )?);

@@ -9,9 +9,9 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use uuid::Uuid;
+use tokio::sync::Notify;
 
 use raft::ClusterConfig;
-use storage::memory::DataCow;
 
 /// Snapshot metadata for pull-based transfer
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +71,76 @@ impl std::fmt::Debug for SnapshotObject {
     }
 }
 
+/// Chunk metadata (header information)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkMetadata {
+    /// Chunk index (0-based)
+    pub chunk_index: u32,
+    /// Uncompressed chunk size in bytes
+    pub uncompressed_size: u32,
+    /// Compressed chunk size in bytes
+    pub compressed_size: u32,
+    /// CRC32 checksum of compressed data
+    pub crc32: u32,
+    /// File offset where this chunk starts (including header)
+    pub file_offset: u64,
+    /// Whether this is the last chunk
+    pub is_last: bool,
+}
+
+/// Chunk index information (in-memory)
+#[derive(Debug, Clone)]
+pub struct ChunkIndex {
+    /// Chunk metadata list (ordered by chunk_index)
+    pub chunks: Vec<ChunkMetadata>,
+    /// Total uncompressed size
+    pub total_uncompressed_size: u64,
+    /// Total compressed size
+    pub total_compressed_size: u64,
+    /// Number of chunks generated so far
+    pub generated_chunks: u32,
+    /// Whether generation is complete
+    pub is_complete: bool,
+    /// Error message if generation failed
+    pub error: Option<String>,
+    /// Notify when new chunk is available
+    pub notify: Arc<Notify>,
+}
+
+impl ChunkIndex {
+    pub fn new() -> Self {
+        Self {
+            chunks: Vec::new(),
+            total_uncompressed_size: 0,
+            total_compressed_size: 0,
+            generated_chunks: 0,
+            is_complete: false,
+            error: None,
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Get chunk metadata by index
+    pub fn get_chunk(&self, chunk_index: u32) -> Option<&ChunkMetadata> {
+        self.chunks.get(chunk_index as usize)
+    }
+
+    /// Get the highest available chunk index
+    pub fn highest_chunk_index(&self) -> Option<u32> {
+        if self.chunks.is_empty() {
+            None
+        } else {
+            Some(self.chunks.len() as u32 - 1)
+        }
+    }
+}
+
+impl Default for ChunkIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Snapshot transfer state
 #[derive(Debug, Clone)]
 pub enum SnapshotTransferState {
@@ -78,6 +148,10 @@ pub enum SnapshotTransferState {
     Preparing {
         /// Snapshot object (created synchronously)
         snapshot: SnapshotObject,
+        /// Snapshot file path
+        snapshot_path: std::path::PathBuf,
+        /// Chunk index (in-memory)
+        chunk_index: Arc<RwLock<ChunkIndex>>,
     },
     /// Transfer is ready (snapshot file is ready for pull)
     Ready {
@@ -85,11 +159,14 @@ pub enum SnapshotTransferState {
         snapshot_path: std::path::PathBuf,
         /// Total size in bytes
         total_size: u64,
+        /// Chunk index (in-memory)
+        chunk_index: Arc<RwLock<ChunkIndex>>,
     },
     /// Transfer is in progress
     InProgress {
         snapshot_path: std::path::PathBuf,
         total_size: u64,
+        chunk_index: Arc<RwLock<ChunkIndex>>,
     },
     /// Transfer completed
     Completed,
@@ -139,6 +216,18 @@ impl SnapshotTransferManager {
         self.transfers.read().get(transfer_id).cloned()
     }
 
+    /// Get chunk index for a transfer
+    pub fn get_chunk_index(&self, transfer_id: &str) -> Option<Arc<RwLock<ChunkIndex>>> {
+        self.transfers.read().get(transfer_id).and_then(|state| {
+            match state {
+                SnapshotTransferState::Preparing { chunk_index, .. } => Some(chunk_index.clone()),
+                SnapshotTransferState::Ready { chunk_index, .. } => Some(chunk_index.clone()),
+                SnapshotTransferState::InProgress { chunk_index, .. } => Some(chunk_index.clone()),
+                _ => None,
+            }
+        })
+    }
+
     /// Remove completed or failed transfer
     pub fn remove_transfer(&self, transfer_id: &str) {
         self.transfers.write().remove(transfer_id);
@@ -159,6 +248,130 @@ impl SnapshotTransferManager {
 impl Default for SnapshotTransferManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Read a chunk from snapshot file by index
+pub fn read_chunk_from_file(
+    snapshot_path: &std::path::Path,
+    chunk_index: u32,
+    chunk_metadata: &ChunkMetadata,
+) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::fs::File;
+    use crc32fast::Hasher as Crc32Hasher;
+
+    let mut file = File::open(snapshot_path)
+        .map_err(|e| format!("Failed to open snapshot file: {}", e))?;
+
+    // Seek to chunk start (skip header)
+    // Header format: header_len (u32) + header_bytes
+    file.seek(SeekFrom::Start(chunk_metadata.file_offset))
+        .map_err(|e| format!("Failed to seek to chunk offset: {}", e))?;
+
+    // Read header length
+    let mut header_len_bytes = [0u8; 4];
+    file.read_exact(&mut header_len_bytes)
+        .map_err(|e| format!("Failed to read header length: {}", e))?;
+    let header_len = u32::from_le_bytes(header_len_bytes) as usize;
+
+    // Skip header (we already have metadata)
+    file.seek(SeekFrom::Current(header_len as i64))
+        .map_err(|e| format!("Failed to skip header: {}", e))?;
+
+    // Read compressed data
+    let mut compressed_data = vec![0u8; chunk_metadata.compressed_size as usize];
+    file.read_exact(&mut compressed_data)
+        .map_err(|e| format!("Failed to read compressed data: {}", e))?;
+
+    // Verify CRC32
+    let mut hasher = Crc32Hasher::new();
+    hasher.update(&compressed_data);
+    let calculated_crc32 = hasher.finalize();
+    if calculated_crc32 != chunk_metadata.crc32 {
+        return Err(format!(
+            "CRC32 mismatch for chunk {}: expected {}, got {}",
+            chunk_index, chunk_metadata.crc32, calculated_crc32
+        ));
+    }
+
+    // Decompress
+    let decompressed = zstd::decode_all(compressed_data.as_slice())
+        .map_err(|e| format!("Failed to decompress chunk: {}", e))?;
+
+    if decompressed.len() != chunk_metadata.uncompressed_size as usize {
+        return Err(format!(
+            "Decompressed size mismatch for chunk {}: expected {}, got {}",
+            chunk_index,
+            chunk_metadata.uncompressed_size,
+            decompressed.len()
+        ));
+    }
+
+    Ok(decompressed)
+}
+
+/// Wait for a chunk to be available (with timeout and error checking)
+pub async fn wait_for_chunk(
+    chunk_index: &Arc<RwLock<ChunkIndex>>,
+    target_chunk_index: u32,
+    check_interval: std::time::Duration,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    use tokio::time::{sleep, Instant};
+
+    let start = Instant::now();
+
+    loop {
+        // Check if chunk is available
+        {
+            let index = chunk_index.read();
+            
+            // Check for errors
+            if let Some(ref error) = index.error {
+                return Err(format!("Snapshot generation failed: {}", error));
+            }
+
+            // Check if chunk exists
+            if let Some(_) = index.get_chunk(target_chunk_index) {
+                return Ok(());
+            }
+
+            // Check if generation is complete but chunk doesn't exist
+            if index.is_complete {
+                return Err(format!(
+                    "Chunk {} not found, but generation is complete (only {} chunks generated)",
+                    target_chunk_index,
+                    index.generated_chunks
+                ));
+            }
+
+            // Check timeout
+            if start.elapsed() > timeout {
+                return Err(format!(
+                    "Timeout waiting for chunk {} (waited {:?})",
+                    target_chunk_index,
+                    timeout
+                ));
+            }
+        }
+
+        // Wait for notification or check interval
+        let notify = {
+            let index = chunk_index.read();
+            index.notify.clone()
+        };
+        
+        tokio::select! {
+            _ = notify.notified() => {
+                // New chunk available, check again
+                continue;
+            }
+            _ = sleep(check_interval) => {
+                // Periodic check
+                continue;
+            }
+        }
     }
 }
 

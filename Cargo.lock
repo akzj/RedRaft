@@ -1546,6 +1546,7 @@ dependencies = [
  "bincode",
  "bytes",
  "clap",
+ "crc32fast",
  "parking_lot",
  "pilot",
  "raft",
@@ -1563,6 +1564,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

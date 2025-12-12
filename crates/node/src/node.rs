@@ -24,7 +24,8 @@ use crate::snapshot_transfer::{SnapshotMetadata, SnapshotTransferManager};
 use crate::state_machine::KVStateMachine;
 use resp::{Command, CommandType, RespValue};
 use storage::{
-    ApplyResult as StoreApplyResult, RedisStore, SnapshotStore, SnapshotStoreEntry, StoreError,
+    ApplyResult as StoreApplyResult, RedisStore,
+    traits::KeyStore,
 };
 
 /// Pending request tracker
@@ -91,7 +92,7 @@ pub struct RedRaftNode {
     /// Storage backend
     storage: Arc<dyn Storage>,
 
-    redis_store: Arc<dyn RedisStore>,
+    redis_store: Arc<storage::store::HybridStore>,
     /// Network layer
     network: Arc<dyn Network>,
     /// Shard Router
@@ -111,7 +112,7 @@ impl RedRaftNode {
         node_id: String,
         storage: Arc<dyn Storage>,
         network: Arc<dyn Network>,
-        redis_store: Arc<dyn RedisStore>,
+        redis_store: Arc<storage::store::HybridStore>,
         shard_count: usize,
     ) -> Self {
         Self {
@@ -198,14 +199,6 @@ impl RedRaftNode {
 
         // Create state machine (using memory store, can be replaced with RocksDB later)
 
-        let state_machine = Arc::new(KVStateMachine::with_pending_requests(
-            self.redis_store.clone(),
-            self.pending_requests.clone(),
-        ));
-        self.state_machines
-            .lock()
-            .insert(shard_id.clone(), state_machine.clone());
-
         // Create cluster configuration
         let voters: HashSet<RaftId> = nodes
             .iter()
@@ -217,14 +210,22 @@ impl RedRaftNode {
         let mut options = RaftStateOptions::default();
         options.id = raft_id.clone();
         let timers = self.driver.get_timer_service();
-        let callbacks: Arc<dyn RaftCallbacks> = Arc::new(NodeCallbacks {
-            node_id: self.node_id.clone(),
-            storage: self.storage.clone(),
-            network: self.network.clone(),
-            state_machine: state_machine.clone(),
+        
+        // Create state machine with all dependencies (implements RaftCallbacks directly)
+        let state_machine = Arc::new(KVStateMachine::with_pending_requests(
+            self.redis_store.clone(),
+            self.storage.clone(),
+            self.network.clone(),
             timers,
-            snapshot_transfer_manager: self.snapshot_transfer_manager.clone(),
-        });
+            self.snapshot_transfer_manager.clone(),
+            self.pending_requests.clone(),
+        ));
+        self.state_machines
+            .lock()
+            .insert(shard_id.clone(), state_machine.clone());
+
+        // Use state_machine directly as RaftCallbacks
+        let callbacks: Arc<dyn RaftCallbacks> = state_machine.clone();
 
         let mut raft_state = RaftState::new(options, callbacks.clone())
             .await
@@ -494,6 +495,7 @@ impl RedRaftNode {
                 // Clear all shards
                 let state_machines = self.state_machines.lock();
                 for sm in state_machines.values() {
+                    // HybridStore implements RedisStore, so we can call flushdb directly
                     let _ = sm.store().flushdb();
                 }
                 Ok(RespValue::SimpleString(bytes::Bytes::from("OK")))
@@ -536,294 +538,144 @@ impl raft::multi_raft_driver::HandleEventTrait for RaftGroupHandler {
     }
 }
 
-/// Node callback implementation
-struct NodeCallbacks {
-    #[allow(dead_code)]
-    node_id: String,
-    storage: Arc<dyn Storage>,
-    network: Arc<dyn Network>,
-    state_machine: Arc<KVStateMachine>,
-    timers: raft::multi_raft_driver::Timers,
-    /// Snapshot transfer manager
-    snapshot_transfer_manager: Arc<SnapshotTransferManager>,
-}
-
-#[async_trait]
-impl raft::traits::EventNotify for NodeCallbacks {
-    async fn on_state_changed(
-        &self,
-        _from: &RaftId,
-        _role: raft::Role,
-    ) -> Result<(), raft::error::StateChangeError> {
-        Ok(())
-    }
-
-    async fn on_node_removed(
-        &self,
-        _node_id: &RaftId,
-    ) -> Result<(), raft::error::StateChangeError> {
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl raft::traits::Network for NodeCallbacks {
-    async fn send_request_vote_request(
-        &self,
-        from: &RaftId,
-        target: &RaftId,
-        args: raft::RequestVoteRequest,
-    ) -> raft::RpcResult<()> {
-        self.network
-            .send_request_vote_request(from, target, args)
-            .await
-    }
-
-    async fn send_request_vote_response(
-        &self,
-        from: &RaftId,
-        target: &RaftId,
-        args: raft::RequestVoteResponse,
-    ) -> raft::RpcResult<()> {
-        self.network
-            .send_request_vote_response(from, target, args)
-            .await
-    }
-
-    async fn send_append_entries_request(
-        &self,
-        from: &RaftId,
-        target: &RaftId,
-        args: raft::AppendEntriesRequest,
-    ) -> raft::RpcResult<()> {
-        self.network
-            .send_append_entries_request(from, target, args)
-            .await
-    }
-
-    async fn send_append_entries_response(
-        &self,
-        from: &RaftId,
-        target: &RaftId,
-        args: raft::AppendEntriesResponse,
-    ) -> raft::RpcResult<()> {
-        self.network
-            .send_append_entries_response(from, target, args)
-            .await
-    }
-
-    async fn send_install_snapshot_request(
-        &self,
-        from: &RaftId,
-        target: &RaftId,
-        args: raft::InstallSnapshotRequest,
-    ) -> raft::RpcResult<()> {
-        self.network
-            .send_install_snapshot_request(from, target, args)
-            .await
-    }
-
-    async fn send_install_snapshot_response(
-        &self,
-        from: &RaftId,
-        target: &RaftId,
-        args: raft::InstallSnapshotResponse,
-    ) -> raft::RpcResult<()> {
-        self.network
-            .send_install_snapshot_response(from, target, args)
-            .await
-    }
-
-    async fn send_pre_vote_request(
-        &self,
-        from: &RaftId,
-        target: &RaftId,
-        args: PreVoteRequest,
-    ) -> raft::RpcResult<()> {
-        self.network.send_pre_vote_request(from, target, args).await
-    }
-
-    async fn send_pre_vote_response(
-        &self,
-        from: &RaftId,
-        target: &RaftId,
-        args: PreVoteResponse,
-    ) -> raft::RpcResult<()> {
-        self.network
-            .send_pre_vote_response(from, target, args)
-            .await
-    }
-}
-
-#[async_trait]
-impl raft::traits::EventSender for NodeCallbacks {
-    async fn send(&self, _target: RaftId, _event: raft::Event) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl Storage for NodeCallbacks {}
-#[async_trait]
-impl HardStateStorage for NodeCallbacks {
-    async fn save_hard_state(
-        &self,
-        from: &RaftId,
-        hard_state: raft::HardState,
-    ) -> StorageResult<()> {
-        self.storage.save_hard_state(from, hard_state).await
-    }
-
-    async fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<raft::HardState>> {
-        self.storage.load_hard_state(from).await
-    }
-}
-
-#[async_trait]
-impl SnapshotStorage for NodeCallbacks {
-    async fn save_snapshot(&self, from: &RaftId, snap: raft::Snapshot) -> StorageResult<()> {
-        self.storage.save_snapshot(from, snap).await
-    }
-
-    async fn load_snapshot(&self, from: &RaftId) -> StorageResult<Option<raft::Snapshot>> {
-        // Load existing snapshot to get cluster_config
-        let existing_snapshot = self.storage.load_snapshot(from).await?;
-
-        // Get latest apply_index and term from state machine
-        // Note: Raft state machine is single-threaded, safe to access here
-        let apply_index = self
-            .state_machine
-            .apply_index()
-            .load(std::sync::atomic::Ordering::SeqCst);
-        let term = self
-            .state_machine
-            .term()
-            .load(std::sync::atomic::Ordering::SeqCst);
-
-        // Generate transfer ID
-        let transfer_id = SnapshotTransferManager::generate_transfer_id();
-
-        // Get cluster_config from existing snapshot or use default
-        let cluster_config = existing_snapshot
-            .as_ref()
-            .map(|s| s.config.clone())
-            .unwrap_or_else(|| {
-                // Default config if no existing snapshot
-                raft::ClusterConfig::simple(std::collections::HashSet::new(), 0)
-            });
-
-        // Create snapshot metadata
-        let metadata = SnapshotMetadata {
-            index: apply_index,
-            term,
-            config: cluster_config.clone(),
-            transfer_id: transfer_id.clone(),
-            raft_group_id: from.group.clone(),
-        };
-
-        // Serialize metadata
-        let metadata_bytes = metadata.serialize().map_err(|e| {
-            raft::StorageError::SnapshotCreationFailed(format!(
-                "Failed to serialize snapshot metadata: {}",
-                e
-            ))
-        })?;
-
-        // Register transfer as preparing (will be updated to Ready when file is generated)
-        self.snapshot_transfer_manager.register_transfer(
-            transfer_id.clone(),
-            crate::snapshot_transfer::SnapshotTransferState::Preparing {
-                snapshot: crate::snapshot_transfer::SnapshotObject {
-                    shard_id: from.group.clone(),
-                    rocksdb_entries: Vec::new(),
-                    memory_snapshot: None,
-                },
-            },
-        );
-
-        // Spawn background task to generate snapshot file using channel
-        let transfer_id_clone = transfer_id.clone();
-        let shard_id_clone = from.group.clone();
-        let snapshot_transfer_manager = self.snapshot_transfer_manager.clone();
-        // Clone store - HybridStore implements both RedisStore and SnapshotStore
-        let store = self.state_machine.store().clone();
-
-        tokio::spawn(async move {
-            // Generate snapshot file in background using channel
-            if let Err(e) = generate_snapshot_file_async(
-                &shard_id_clone,
-                &transfer_id_clone,
-                &snapshot_transfer_manager,
-                store,
-            )
-            .await
-            {
-                error!(
-                    "Failed to generate snapshot file for transfer {}: {}",
-                    transfer_id_clone, e
-                );
-                snapshot_transfer_manager.update_transfer_state(
-                    &transfer_id_clone,
-                    crate::snapshot_transfer::SnapshotTransferState::Failed(e),
-                );
-            }
-        });
-
-        // Return snapshot with metadata in data field
-        Ok(Some(raft::Snapshot {
-            index: apply_index,
-            term,
-            data: metadata_bytes,
-            config: cluster_config,
-        }))
-    }
-}
-
-/// Async task to generate snapshot file using channel (chunk-based)
-async fn generate_snapshot_file_async(
+/// Async task to generate snapshot file using channel (chunk-based with zstd compression)
+pub(crate) async fn generate_snapshot_file_async(
     shard_id: &str,
     transfer_id: &str,
     transfer_manager: &SnapshotTransferManager,
     store: Arc<storage::store::HybridStore>,
 ) -> Result<(), String> {
-    use storage::SnapshotStore;
+    use std::io::Write;
+    use crc32fast::Hasher as Crc32Hasher;
+    
     info!(
         "Generating snapshot file for shard {} transfer {}",
         shard_id, transfer_id
     );
 
-    // Create snapshot directory
-    let snapshot_dir =
-        std::path::PathBuf::from(format!("./data/snapshot_transfers/{}", transfer_id));
-    std::fs::create_dir_all(&snapshot_dir)
-        .map_err(|e| format!("Failed to create snapshot directory: {}", e))?;
-
-    // Generate snapshot file with chunk support
-    // Format: chunk-based, compressed with zstd
-    let snapshot_file = snapshot_dir.join("snapshot.dat");
+    // Get transfer state to access chunk_index and snapshot_path
+    let state = transfer_manager.get_transfer_state(transfer_id)
+        .ok_or_else(|| format!("Transfer {} not found", transfer_id))?;
+    
+    let (snapshot_path, chunk_index) = match state {
+        crate::snapshot_transfer::SnapshotTransferState::Preparing { snapshot_path, chunk_index, .. } => {
+            (snapshot_path, chunk_index)
+        }
+        _ => return Err(format!("Transfer {} is not in Preparing state", transfer_id)),
+    };
 
     // Create channel for receiving snapshot data
     let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
 
-    // Spawn task to write data to file
-    let file_path = snapshot_file.clone();
+    // Spawn task to write data to file in chunks
+    let file_path = snapshot_path.clone();
+    let chunk_index_clone = chunk_index.clone();
+    let transfer_id_clone = transfer_id.to_string();
     let write_handle = tokio::spawn(async move {
-        use std::io::Write;
         use std::fs::File;
+        use std::io::BufWriter;
 
-        let mut file = File::create(&file_path)
+        let file = File::create(&file_path)
             .map_err(|e| format!("Failed to create snapshot file: {}", e))?;
+        let mut writer = BufWriter::new(file);
 
-        let mut total_size = 0u64;
+        // Chunk configuration
+        const CHUNK_SIZE: usize = 64 * 1024 * 1024; // 64MB uncompressed
+        const ZSTD_LEVEL: i32 = 3;
 
-        // Receive data from channel and write to file using bincode
+        let mut chunk_buffer = Vec::new();
+        let mut chunk_index_counter = 0u32;
+        let mut current_file_offset = 0u64;
+        let mut total_uncompressed_size = 0u64;
+        let mut total_compressed_size = 0u64;
+
+        // Helper function to write a chunk
+        let mut write_chunk = |buffer: &[u8], is_last: bool| -> Result<(), String> {
+            // Compress with zstd
+            let compressed = zstd::encode_all(buffer, ZSTD_LEVEL)
+                .map_err(|e| format!("Failed to compress chunk: {}", e))?;
+
+            // Calculate CRC32 of compressed data
+            let mut hasher = Crc32Hasher::new();
+            hasher.update(&compressed);
+            let crc32 = hasher.finalize();
+
+            // Write chunk header (metadata)
+            let header = crate::snapshot_transfer::ChunkMetadata {
+                chunk_index: chunk_index_counter,
+                uncompressed_size: buffer.len() as u32,
+                compressed_size: compressed.len() as u32,
+                crc32,
+                file_offset: current_file_offset,
+                is_last,
+            };
+
+            // Serialize header with bincode
+            let header_bytes = bincode::serde::encode_to_vec(&header, bincode::config::standard())
+                .map_err(|e| format!("Failed to serialize chunk header: {}", e))?;
+
+            // Write header length (u32) + header + compressed data
+            let header_len = header_bytes.len() as u32;
+            writer.write_all(&header_len.to_le_bytes())
+                .map_err(|e| format!("Failed to write header length: {}", e))?;
+            writer.write_all(&header_bytes)
+                .map_err(|e| format!("Failed to write header: {}", e))?;
+            writer.write_all(&compressed)
+                .map_err(|e| format!("Failed to write compressed data: {}", e))?;
+
+            // Update file offset (header_len (4) + header_bytes + compressed)
+            let chunk_size = 4 + header_bytes.len() + compressed.len();
+            current_file_offset += chunk_size as u64;
+
+            // Update chunk index
+            {
+                let mut index = chunk_index_clone.write();
+                index.chunks.push(header.clone());
+                index.total_uncompressed_size += buffer.len() as u64;
+                index.total_compressed_size += compressed.len() as u64;
+                index.generated_chunks = chunk_index_counter + 1;
+                if is_last {
+                    index.is_complete = true;
+                }
+            }
+
+            // Notify that new chunk is available
+            chunk_index_clone.read().notify.notify_waiters();
+
+            chunk_index_counter += 1;
+            total_uncompressed_size += buffer.len() as u64;
+            total_compressed_size += compressed.len() as u64;
+
+            info!(
+                "Chunk {} written for transfer {}: {} bytes (uncompressed) -> {} bytes (compressed)",
+                chunk_index_counter - 1,
+                transfer_id_clone,
+                buffer.len(),
+                compressed.len()
+            );
+
+            Ok(())
+        };
+
+        // Collect entries into chunks
         while let Some(entry) = rx.recv().await {
             match entry {
-                SnapshotStoreEntry::Error(err) => {
+                storage::SnapshotStoreEntry::Error(err) => {
                     error!("Received error from snapshot creation: {}", err);
+                    let mut index = chunk_index_clone.write();
+                    index.error = Some(format!("Snapshot creation error: {}", err));
+                    index.notify.notify_waiters();
                     return Err(format!("Snapshot creation error: {}", err));
                 }
-                SnapshotStoreEntry::Completed => {
+                storage::SnapshotStoreEntry::Completed => {
+                    // Write remaining data as last chunk
+                    if !chunk_buffer.is_empty() {
+                        write_chunk(&chunk_buffer, true)?;
+                        chunk_buffer.clear();
+                    } else {
+                        // Write empty last chunk if no data
+                        write_chunk(&[], true)?;
+                    }
                     info!("Snapshot data transfer completed");
                     break;
                 }
@@ -832,21 +684,30 @@ async fn generate_snapshot_file_async(
                     let serialized = bincode::serde::encode_to_vec(&entry, bincode::config::standard())
                         .map_err(|e| format!("Failed to serialize entry: {}", e))?;
                     
+                    // Check if adding this entry would exceed chunk size
+                    if chunk_buffer.len() + serialized.len() > CHUNK_SIZE && !chunk_buffer.is_empty() {
+                        // Write current chunk
+                        write_chunk(&chunk_buffer, false)?;
+                        chunk_buffer.clear();
+                    }
+
+                    // Add entry to chunk buffer
                     // Write entry length (u32) followed by serialized data
                     let entry_len = serialized.len() as u32;
-                    file.write_all(&entry_len.to_le_bytes())
-                        .map_err(|e| format!("Failed to write entry length: {}", e))?;
-                    file.write_all(&serialized)
-                        .map_err(|e| format!("Failed to write entry data: {}", e))?;
-                    total_size += 4 + serialized.len() as u64;
+                    chunk_buffer.extend_from_slice(&entry_len.to_le_bytes());
+                    chunk_buffer.extend_from_slice(&serialized);
                 }
             }
         }
 
-        file.sync_all()
+        writer.flush()
+            .map_err(|e| format!("Failed to flush snapshot file: {}", e))?;
+        
+        // Sync file to disk
+        writer.get_ref().sync_all()
             .map_err(|e| format!("Failed to sync snapshot file: {}", e))?;
 
-        Ok::<u64, String>(total_size)
+        Ok::<(u64, u64), String>((total_uncompressed_size, total_compressed_size))
     });
 
     // Synchronously wait for snapshot object creation in load_snapshot context
@@ -869,7 +730,7 @@ async fn generate_snapshot_file_async(
     .map_err(|e| format!("Failed to create snapshot: {}", e))?;
 
     // Wait for file writing to complete
-    let total_size = write_handle
+    let (total_uncompressed, total_compressed) = write_handle
         .await
         .map_err(|e| format!("File writing task failed: {:?}", e))??;
 
@@ -877,169 +738,20 @@ async fn generate_snapshot_file_async(
     transfer_manager.update_transfer_state(
         transfer_id,
         crate::snapshot_transfer::SnapshotTransferState::Ready {
-            snapshot_path: snapshot_file,
-            total_size,
+            snapshot_path: snapshot_path.clone(),
+            total_size: total_compressed,
+            chunk_index,
         },
     );
 
     info!(
-        "Snapshot file generated for transfer {}: {} bytes",
-        transfer_id, total_size
+        "Snapshot file generated for transfer {}: {} bytes (uncompressed) -> {} bytes (compressed)",
+        transfer_id, total_uncompressed, total_compressed
     );
 
     Ok(())
 }
 
-#[async_trait]
-impl ClusterConfigStorage for NodeCallbacks {
-    async fn save_cluster_config(&self, from: &RaftId, conf: ClusterConfig) -> StorageResult<()> {
-        self.storage.save_cluster_config(from, conf).await
-    }
-
-    async fn load_cluster_config(&self, from: &RaftId) -> StorageResult<ClusterConfig> {
-        self.storage.load_cluster_config(from).await
-    }
-}
-
-#[async_trait]
-impl LogEntryStorage for NodeCallbacks {
-    async fn append_log_entries(
-        &self,
-        from: &RaftId,
-        entries: &[raft::LogEntry],
-    ) -> StorageResult<()> {
-        self.storage.append_log_entries(from, entries).await
-    }
-
-    async fn get_log_entries(
-        &self,
-        from: &RaftId,
-        low: u64,
-        high: u64,
-    ) -> StorageResult<Vec<raft::LogEntry>> {
-        self.storage.get_log_entries(from, low, high).await
-    }
-
-    async fn get_log_entries_term(
-        &self,
-        from: &RaftId,
-        low: u64,
-        high: u64,
-    ) -> StorageResult<Vec<(u64, u64)>> {
-        self.storage.get_log_entries_term(from, low, high).await
-    }
-
-    async fn truncate_log_suffix(&self, from: &RaftId, idx: u64) -> StorageResult<()> {
-        self.storage.truncate_log_suffix(from, idx).await
-    }
-
-    async fn truncate_log_prefix(&self, from: &RaftId, idx: u64) -> StorageResult<()> {
-        self.storage.truncate_log_prefix(from, idx).await
-    }
-
-    async fn get_last_log_index(&self, from: &RaftId) -> StorageResult<(u64, u64)> {
-        self.storage.get_last_log_index(from).await
-    }
-
-    async fn get_log_term(&self, from: &RaftId, idx: u64) -> StorageResult<u64> {
-        self.storage.get_log_term(from, idx).await
-    }
-}
-
-#[async_trait]
-impl StateMachine for NodeCallbacks {
-    async fn apply_command(
-        &self,
-        from: &RaftId,
-        index: u64,
-        term: u64,
-        cmd: raft::Command,
-    ) -> raft::ApplyResult<()> {
-        self.state_machine
-            .apply_command(from, index, term, cmd)
-            .await
-    }
-
-    fn process_snapshot(
-        &self,
-        from: &RaftId,
-        index: u64,
-        term: u64,
-        data: Vec<u8>,
-        config: ClusterConfig,
-        request_id: raft::RequestId,
-        oneshot: tokio::sync::oneshot::Sender<raft::SnapshotResult<()>>,
-    ) {
-        self.state_machine
-            .process_snapshot(from, index, term, data, config, request_id, oneshot)
-    }
-
-    async fn create_snapshot(
-        &self,
-        from: &RaftId,
-        cluster_config: ClusterConfig,
-        saver: std::sync::Arc<dyn SnapshotStorage>,
-    ) -> StorageResult<(u64, u64)> {
-        self.state_machine
-            .create_snapshot(from, cluster_config, saver)
-            .await
-    }
-
-    async fn client_response(
-        &self,
-        from: &RaftId,
-        request_id: raft::RequestId,
-        result: ClientResult<u64>,
-    ) -> ClientResult<()> {
-        self.state_machine
-            .client_response(from, request_id, result)
-            .await
-    }
-
-    async fn read_index_response(
-        &self,
-        from: &RaftId,
-        request_id: raft::RequestId,
-        result: ClientResult<u64>,
-    ) -> ClientResult<()> {
-        self.state_machine
-            .read_index_response(from, request_id, result)
-            .await
-    }
-}
-
-impl TimerService for NodeCallbacks {
-    fn del_timer(&self, _from: &RaftId, timer_id: raft::TimerId) {
-        self.timers.del_timer(timer_id);
-    }
-
-    fn set_leader_transfer_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
-        self.timers
-            .add_timer(from, raft::Event::LeaderTransferTimeout, dur)
-    }
-
-    fn set_election_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
-        self.timers
-            .add_timer(from, raft::Event::ElectionTimeout, dur)
-    }
-
-    fn set_heartbeat_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
-        self.timers
-            .add_timer(from, raft::Event::HeartbeatTimeout, dur)
-    }
-
-    fn set_apply_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
-        self.timers
-            .add_timer(from, raft::Event::ApplyLogTimeout, dur)
-    }
-
-    fn set_config_change_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
-        self.timers
-            .add_timer(from, raft::Event::ConfigChangeTimeout, dur)
-    }
-}
-
-impl RaftCallbacks for NodeCallbacks {}
 
 /// Convert StoreApplyResult to RespValue
 fn apply_result_to_resp(result: StoreApplyResult) -> RespValue {

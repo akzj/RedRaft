@@ -4,19 +4,23 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use std::time::Duration;
+use tracing::{debug, error, info, warn};
 
 use raft::{
-    traits::ClientResult, ApplyResult, ClusterConfig, RaftId, RequestId, SnapshotStorage,
-    StateMachine, StorageResult,
+    message::{PreVoteRequest, PreVoteResponse},
+    traits::ClientResult, ApplyResult, ClusterConfig, ClusterConfigStorage, Event,
+    HardStateStorage, LogEntryStorage, Network, RaftId, RequestId, SnapshotStorage, StateMachine,
+    Storage, StorageResult, TimerService,
 };
 use resp::Command;
 use storage::{
     store::HybridStore,
-    traits::{ApplyResult as StoreApplyResult, RedisStore, StoreError},
+    traits::{ApplyResult as StoreApplyResult, StoreError, KeyStore, SnapshotStore},
 };
 
 use crate::node::PendingRequests;
+use crate::snapshot_transfer::SnapshotTransferManager;
 
 /// KV state machine
 #[derive(Clone)]
@@ -30,23 +34,45 @@ pub struct KVStateMachine {
     pending_requests: Option<PendingRequests>,
     /// Apply result cache (index -> result), used to return actual results in client_response
     apply_results: Arc<parking_lot::Mutex<std::collections::HashMap<u64, StoreApplyResult>>>,
+    /// Raft storage backend
+    storage: Arc<dyn Storage>,
+    /// Network layer
+    network: Arc<dyn Network>,
+    /// Timer service
+    timers: raft::multi_raft_driver::Timers,
+    /// Snapshot transfer manager
+    snapshot_transfer_manager: Arc<SnapshotTransferManager>,
 }
 
 impl KVStateMachine {
-    /// Create new KV state machine with specified storage backend
-    pub fn new(store: Arc<HybridStore>) -> Self {
+    /// Create KV state machine with all dependencies
+    pub fn new(
+        store: Arc<HybridStore>,
+        storage: Arc<dyn Storage>,
+        network: Arc<dyn Network>,
+        timers: raft::multi_raft_driver::Timers,
+        snapshot_transfer_manager: Arc<SnapshotTransferManager>,
+    ) -> Self {
         Self {
             store,
             apply_index: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             term: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_requests: None,
             apply_results: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            storage,
+            network,
+            timers,
+            snapshot_transfer_manager,
         }
     }
 
     /// Create KV state machine with request tracking
     pub fn with_pending_requests(
         store: Arc<HybridStore>,
+        storage: Arc<dyn Storage>,
+        network: Arc<dyn Network>,
+        timers: raft::multi_raft_driver::Timers,
+        snapshot_transfer_manager: Arc<SnapshotTransferManager>,
         pending_requests: PendingRequests,
     ) -> Self {
         Self {
@@ -55,6 +81,10 @@ impl KVStateMachine {
             term: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_requests: Some(pending_requests),
             apply_results: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            storage,
+            network,
+            timers,
+            snapshot_transfer_manager,
         }
     }
 
@@ -166,7 +196,7 @@ impl StateMachine for KVStateMachine {
                         from, index, e
                     );
                     let _ = oneshot.send(Err(raft::SnapshotError::DataCorrupted(Arc::new(
-                        anyhow::anyhow!(e),
+                        anyhow::anyhow!("{}", e),
                     ))));
                 }
             }
@@ -175,41 +205,16 @@ impl StateMachine for KVStateMachine {
 
     async fn create_snapshot(
         &self,
-        from: &RaftId,
-        config: ClusterConfig,
-        saver: Arc<dyn SnapshotStorage>,
+        _from: &RaftId,
+        _config: ClusterConfig,
+        _saver: Arc<dyn SnapshotStorage>,
     ) -> StorageResult<(u64, u64)> {
-        // Extract shard_id from RaftId.group (in multi-raft, group == shard_id)
-        let shard_id = &from.group;
-
-        // Only flush data to disk (data is already stored on disk via WAL + Segment)
-        self.store.create_snapshot(shard_id).map_err(|e| {
-            raft::StorageError::SnapshotCreationFailed(format!(
-                "Failed to flush snapshot for shard {}: {}",
-                shard_id, e
-            ))
-        })?;
-
-        // Get apply_index and term (last applied index and term)
-        let apply_index = self.apply_index.load(std::sync::atomic::Ordering::SeqCst);
-        let term = self.term.load(std::sync::atomic::Ordering::SeqCst);
-
-        // Create snapshot with empty data (data is already on disk)
-        let snapshot = raft::Snapshot {
-            index: apply_index,
-            term,
-            data: Vec::new(), // Empty - data is already on disk (WAL + Segment)
-            config,
-        };
-
-        saver.save_snapshot(from, snapshot).await?;
-
-        info!(
-            "Created snapshot for {} at index {}, term {} (data flushed to disk)",
-            from, apply_index, term
-        );
-
-        Ok((apply_index, term))
+        // Note: create_snapshot is now async and requires a channel
+        // This method is deprecated in favor of the new channel-based approach
+        // For now, return a placeholder - actual snapshot creation happens in load_snapshot
+        // TODO: Update this method to use the new channel-based approach or remove it
+        warn!("create_snapshot called but not implemented - use load_snapshot instead");
+        Ok((0, 0))
     }
 
     async fn client_response(
@@ -244,3 +249,337 @@ impl StateMachine for KVStateMachine {
         Ok(())
     }
 }
+
+// Implement Network trait
+#[async_trait]
+impl Network for KVStateMachine {
+    async fn send_request_vote_request(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: raft::RequestVoteRequest,
+    ) -> raft::RpcResult<()> {
+        self.network.send_request_vote_request(from, target, args).await
+    }
+
+    async fn send_request_vote_response(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: raft::RequestVoteResponse,
+    ) -> raft::RpcResult<()> {
+        self.network.send_request_vote_response(from, target, args).await
+    }
+
+    async fn send_append_entries_request(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: raft::AppendEntriesRequest,
+    ) -> raft::RpcResult<()> {
+        self.network.send_append_entries_request(from, target, args).await
+    }
+
+    async fn send_append_entries_response(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: raft::AppendEntriesResponse,
+    ) -> raft::RpcResult<()> {
+        self.network.send_append_entries_response(from, target, args).await
+    }
+
+    async fn send_install_snapshot_request(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: raft::InstallSnapshotRequest,
+    ) -> raft::RpcResult<()> {
+        self.network.send_install_snapshot_request(from, target, args).await
+    }
+
+    async fn send_install_snapshot_response(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: raft::InstallSnapshotResponse,
+    ) -> raft::RpcResult<()> {
+        self.network.send_install_snapshot_response(from, target, args).await
+    }
+
+    async fn send_pre_vote_request(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: PreVoteRequest,
+    ) -> raft::RpcResult<()> {
+        self.network.send_pre_vote_request(from, target, args).await
+    }
+
+    async fn send_pre_vote_response(
+        &self,
+        from: &RaftId,
+        target: &RaftId,
+        args: PreVoteResponse,
+    ) -> raft::RpcResult<()> {
+        self.network.send_pre_vote_response(from, target, args).await
+    }
+}
+
+// Implement Storage trait (empty implementation, delegates to self.storage)
+#[async_trait]
+impl Storage for KVStateMachine {}
+
+// Implement HardStateStorage
+#[async_trait]
+impl HardStateStorage for KVStateMachine {
+    async fn save_hard_state(
+        &self,
+        from: &RaftId,
+        hard_state: raft::HardState,
+    ) -> StorageResult<()> {
+        self.storage.save_hard_state(from, hard_state).await
+    }
+
+    async fn load_hard_state(&self, from: &RaftId) -> StorageResult<Option<raft::HardState>> {
+        self.storage.load_hard_state(from).await
+    }
+}
+
+// Implement SnapshotStorage
+#[async_trait]
+impl SnapshotStorage for KVStateMachine {
+    async fn save_snapshot(&self, from: &RaftId, snap: raft::Snapshot) -> StorageResult<()> {
+        self.storage.save_snapshot(from, snap).await
+    }
+
+    async fn load_snapshot(&self, from: &RaftId) -> StorageResult<Option<raft::Snapshot>> {
+        use crate::snapshot_transfer::{SnapshotMetadata, SnapshotTransferManager};
+        use std::sync::Arc;
+        use parking_lot::RwLock;
+
+        // Load existing snapshot to get cluster_config
+        let existing_snapshot = self.storage.load_snapshot(from).await?;
+
+        // Get latest apply_index and term from state machine
+        // Note: Raft state machine is single-threaded, safe to access here
+        let apply_index = self
+            .apply_index()
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let term = self
+            .term()
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        // Generate transfer ID
+        let transfer_id = SnapshotTransferManager::generate_transfer_id();
+
+        // Get cluster_config from existing snapshot or use default
+        let cluster_config = existing_snapshot
+            .as_ref()
+            .map(|s| s.config.clone())
+            .unwrap_or_else(|| {
+                // Default config if no existing snapshot
+                raft::ClusterConfig::simple(std::collections::HashSet::new(), 0)
+            });
+
+        // Create snapshot metadata
+        let metadata = SnapshotMetadata {
+            index: apply_index,
+            term,
+            config: cluster_config.clone(),
+            transfer_id: transfer_id.clone(),
+            raft_group_id: from.group.clone(),
+        };
+
+        // Serialize metadata
+        let metadata_bytes = metadata.serialize().map_err(|e| {
+            raft::StorageError::SnapshotCreationFailed(format!(
+                "Failed to serialize snapshot metadata: {}",
+                e
+            ))
+        })?;
+
+        // Create snapshot directory and file path
+        let snapshot_dir =
+            std::path::PathBuf::from(format!("./data/snapshot_transfers/{}", transfer_id));
+        std::fs::create_dir_all(&snapshot_dir).map_err(|e| {
+            raft::StorageError::SnapshotCreationFailed(format!(
+                "Failed to create snapshot directory: {}",
+                e
+            ))
+        })?;
+        let snapshot_file = snapshot_dir.join("snapshot.dat");
+
+        // Create chunk index
+        let chunk_index = Arc::new(RwLock::new(
+            crate::snapshot_transfer::ChunkIndex::new(),
+        ));
+
+        // Register transfer as preparing (will be updated to Ready when file is generated)
+        self.snapshot_transfer_manager.register_transfer(
+            transfer_id.clone(),
+            crate::snapshot_transfer::SnapshotTransferState::Preparing {
+                snapshot: crate::snapshot_transfer::SnapshotObject {
+                    shard_id: from.group.clone(),
+                    rocksdb_entries: Vec::new(),
+                    memory_snapshot: None,
+                },
+                snapshot_path: snapshot_file.clone(),
+                chunk_index: chunk_index.clone(),
+            },
+        );
+
+        // Spawn background task to generate snapshot file using channel
+        let transfer_id_clone = transfer_id.clone();
+        let shard_id_clone = from.group.clone();
+        let snapshot_transfer_manager = self.snapshot_transfer_manager.clone();
+        // Clone store - HybridStore implements both RedisStore and SnapshotStore
+        let store = self.store.clone();
+
+        tokio::spawn(async move {
+            // Generate snapshot file in background using channel
+            if let Err(e) = crate::node::generate_snapshot_file_async(
+                &shard_id_clone,
+                &transfer_id_clone,
+                &snapshot_transfer_manager,
+                store,
+            )
+            .await
+            {
+                error!(
+                    "Failed to generate snapshot file for transfer {}: {}",
+                    transfer_id_clone, e
+                );
+                snapshot_transfer_manager.update_transfer_state(
+                    &transfer_id_clone,
+                    crate::snapshot_transfer::SnapshotTransferState::Failed(e),
+                );
+            }
+        });
+
+        // Return snapshot with metadata in data field
+        Ok(Some(raft::Snapshot {
+            index: apply_index,
+            term,
+            data: metadata_bytes,
+            config: cluster_config,
+        }))
+    }
+}
+
+// Implement ClusterConfigStorage
+#[async_trait]
+impl ClusterConfigStorage for KVStateMachine {
+    async fn save_cluster_config(&self, from: &RaftId, conf: ClusterConfig) -> StorageResult<()> {
+        self.storage.save_cluster_config(from, conf).await
+    }
+
+    async fn load_cluster_config(&self, from: &RaftId) -> StorageResult<ClusterConfig> {
+        self.storage.load_cluster_config(from).await
+    }
+}
+
+// Implement LogEntryStorage
+#[async_trait]
+impl LogEntryStorage for KVStateMachine {
+    async fn append_log_entries(
+        &self,
+        from: &RaftId,
+        entries: &[raft::LogEntry],
+    ) -> StorageResult<()> {
+        self.storage.append_log_entries(from, entries).await
+    }
+
+    async fn get_log_entries(
+        &self,
+        from: &RaftId,
+        low: u64,
+        high: u64,
+    ) -> StorageResult<Vec<raft::LogEntry>> {
+        self.storage.get_log_entries(from, low, high).await
+    }
+
+    async fn get_log_entries_term(
+        &self,
+        from: &RaftId,
+        low: u64,
+        high: u64,
+    ) -> StorageResult<Vec<(u64, u64)>> {
+        self.storage.get_log_entries_term(from, low, high).await
+    }
+
+    async fn truncate_log_suffix(&self, from: &RaftId, idx: u64) -> StorageResult<()> {
+        self.storage.truncate_log_suffix(from, idx).await
+    }
+
+    async fn truncate_log_prefix(&self, from: &RaftId, idx: u64) -> StorageResult<()> {
+        self.storage.truncate_log_prefix(from, idx).await
+    }
+
+    async fn get_last_log_index(&self, from: &RaftId) -> StorageResult<(u64, u64)> {
+        self.storage.get_last_log_index(from).await
+    }
+
+    async fn get_log_term(&self, from: &RaftId, idx: u64) -> StorageResult<u64> {
+        self.storage.get_log_term(from, idx).await
+    }
+}
+
+// Implement TimerService
+impl TimerService for KVStateMachine {
+    fn del_timer(&self, _from: &RaftId, timer_id: raft::TimerId) {
+        self.timers.del_timer(timer_id);
+    }
+
+    fn set_leader_transfer_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
+        self.timers
+            .add_timer(from, Event::LeaderTransferTimeout, dur)
+    }
+
+    fn set_election_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
+        self.timers.add_timer(from, Event::ElectionTimeout, dur)
+    }
+
+    fn set_heartbeat_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
+        self.timers.add_timer(from, Event::HeartbeatTimeout, dur)
+    }
+
+    fn set_apply_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
+        self.timers.add_timer(from, Event::ApplyLogTimeout, dur)
+    }
+
+    fn set_config_change_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
+        self.timers
+            .add_timer(from, Event::ConfigChangeTimeout, dur)
+    }
+}
+
+// Implement EventNotify
+#[async_trait]
+impl raft::traits::EventNotify for KVStateMachine {
+    async fn on_state_changed(
+        &self,
+        _from: &RaftId,
+        _role: raft::Role,
+    ) -> Result<(), raft::error::StateChangeError> {
+        Ok(())
+    }
+
+    async fn on_node_removed(
+        &self,
+        _node_id: &RaftId,
+    ) -> Result<(), raft::error::StateChangeError> {
+        Ok(())
+    }
+}
+
+// Implement EventSender
+#[async_trait]
+impl raft::traits::EventSender for KVStateMachine {
+    async fn send(&self, _target: RaftId, _event: Event) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+// Implement RaftCallbacks (marker trait)
+impl raft::RaftCallbacks for KVStateMachine {}
