@@ -49,7 +49,9 @@ impl SnapshotStore for HybridStore {
                 Some(handler) => handler,
                 None => {
                     let err = StoreError::Internal(format!("Column Family {} not found", cf_name));
-                    send_error(err.clone());
+                    send_error(err);
+                    // Signal error to unblock waiting thread (must send before return)
+                    let _ = tx.send(());
                     return;
                 }
             };

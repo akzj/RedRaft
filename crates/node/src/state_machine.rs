@@ -9,14 +9,15 @@ use tracing::{debug, error, info, warn};
 
 use raft::{
     message::{PreVoteRequest, PreVoteResponse},
-    traits::ClientResult, ApplyResult, ClusterConfig, ClusterConfigStorage, Event,
-    HardStateStorage, LogEntryStorage, Network, RaftId, RequestId, SnapshotStorage, StateMachine,
-    Storage, StorageResult, TimerService,
+    traits::ClientResult,
+    ApplyResult, ClusterConfig, ClusterConfigStorage, Event, HardStateStorage, LogEntryStorage,
+    Network, RaftId, RequestId, SnapshotStorage, StateMachine, Storage, StorageResult,
+    TimerService,
 };
 use resp::Command;
 use storage::{
     store::HybridStore,
-    traits::{ApplyResult as StoreApplyResult, StoreError, KeyStore, SnapshotStore},
+    traits::{ApplyResult as StoreApplyResult, KeyStore, SnapshotStore, StoreError},
 };
 
 use crate::config::Config;
@@ -266,7 +267,9 @@ impl Network for KVStateMachine {
         target: &RaftId,
         args: raft::RequestVoteRequest,
     ) -> raft::RpcResult<()> {
-        self.network.send_request_vote_request(from, target, args).await
+        self.network
+            .send_request_vote_request(from, target, args)
+            .await
     }
 
     async fn send_request_vote_response(
@@ -275,7 +278,9 @@ impl Network for KVStateMachine {
         target: &RaftId,
         args: raft::RequestVoteResponse,
     ) -> raft::RpcResult<()> {
-        self.network.send_request_vote_response(from, target, args).await
+        self.network
+            .send_request_vote_response(from, target, args)
+            .await
     }
 
     async fn send_append_entries_request(
@@ -284,7 +289,9 @@ impl Network for KVStateMachine {
         target: &RaftId,
         args: raft::AppendEntriesRequest,
     ) -> raft::RpcResult<()> {
-        self.network.send_append_entries_request(from, target, args).await
+        self.network
+            .send_append_entries_request(from, target, args)
+            .await
     }
 
     async fn send_append_entries_response(
@@ -293,7 +300,9 @@ impl Network for KVStateMachine {
         target: &RaftId,
         args: raft::AppendEntriesResponse,
     ) -> raft::RpcResult<()> {
-        self.network.send_append_entries_response(from, target, args).await
+        self.network
+            .send_append_entries_response(from, target, args)
+            .await
     }
 
     async fn send_install_snapshot_request(
@@ -302,7 +311,9 @@ impl Network for KVStateMachine {
         target: &RaftId,
         args: raft::InstallSnapshotRequest,
     ) -> raft::RpcResult<()> {
-        self.network.send_install_snapshot_request(from, target, args).await
+        self.network
+            .send_install_snapshot_request(from, target, args)
+            .await
     }
 
     async fn send_install_snapshot_response(
@@ -311,7 +322,9 @@ impl Network for KVStateMachine {
         target: &RaftId,
         args: raft::InstallSnapshotResponse,
     ) -> raft::RpcResult<()> {
-        self.network.send_install_snapshot_response(from, target, args).await
+        self.network
+            .send_install_snapshot_response(from, target, args)
+            .await
     }
 
     async fn send_pre_vote_request(
@@ -329,7 +342,9 @@ impl Network for KVStateMachine {
         target: &RaftId,
         args: PreVoteResponse,
     ) -> raft::RpcResult<()> {
-        self.network.send_pre_vote_response(from, target, args).await
+        self.network
+            .send_pre_vote_response(from, target, args)
+            .await
     }
 }
 
@@ -362,20 +377,16 @@ impl SnapshotStorage for KVStateMachine {
 
     async fn load_snapshot(&self, from: &RaftId) -> StorageResult<Option<raft::Snapshot>> {
         use crate::snapshot_transfer::{SnapshotMetadata, SnapshotTransferManager};
-        use std::sync::Arc;
         use parking_lot::RwLock;
+        use std::sync::Arc;
 
         // Load existing snapshot to get cluster_config
         let existing_snapshot = self.storage.load_snapshot(from).await?;
 
         // Get latest apply_index and term from state machine
         // Note: Raft state machine is single-threaded, safe to access here
-        let apply_index = self
-            .apply_index()
-            .load(std::sync::atomic::Ordering::SeqCst);
-        let term = self
-            .term()
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let apply_index = self.apply_index().load(std::sync::atomic::Ordering::SeqCst);
+        let term = self.term().load(std::sync::atomic::Ordering::SeqCst);
 
         // Generate transfer ID
         let transfer_id = SnapshotTransferManager::generate_transfer_id();
@@ -417,39 +428,72 @@ impl SnapshotStorage for KVStateMachine {
         let snapshot_file = snapshot_dir.join("snapshot.dat");
 
         // Create chunk index
-        let chunk_index = Arc::new(RwLock::new(
-            crate::snapshot_transfer::ChunkIndex::new(),
-        ));
+        let chunk_index = Arc::new(RwLock::new(crate::snapshot_transfer::ChunkIndex::new()));
 
-        // Register transfer as preparing (will be updated to Ready when file is generated)
+        // Create channel for receiving snapshot data
+        // This channel will be used by create_snapshot to send snapshot entries
+        let (tx, rx) = tokio::sync::mpsc::channel(1024);
+
+        // Synchronously create snapshot object in load_snapshot context
+        // This ensures state consistency - snapshot object (RocksDB snapshot + Memory COW)
+        // is created before returning metadata, preventing state changes
+        // Note: Raft state machine is single-threaded, safe to create snapshot here
+        use storage::SnapshotStore;
+        let shard_id_str = from.group.clone();
+
+        info!(
+            "Creating snapshot object for shard {} transfer {} (synchronous)",
+            shard_id_str, transfer_id
+        );
+
+        // Block on create_snapshot to ensure snapshot object is created synchronously
+        // create_snapshot uses spawn_blocking internally and signals via oneshot when snapshot is ready
+        // We block here to ensure snapshot object is created in synchronous context
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.store.create_snapshot(&shard_id_str, tx))
+        })
+        .map_err(|e| {
+            raft::StorageError::SnapshotCreationFailed(format!(
+                "Failed to create snapshot object: {}",
+                e
+            ))
+        })?;
+
+        info!(
+            "Snapshot object created for shard {} transfer {}",
+            shard_id_str, transfer_id
+        );
+
+        // Register transfer as preparing (snapshot object is already created)
+        // The snapshot object is now consistent and won't change
         self.snapshot_transfer_manager.register_transfer(
             transfer_id.clone(),
-            crate::snapshot_transfer::SnapshotTransferState::Preparing {
-                snapshot: crate::snapshot_transfer::SnapshotObject {
-                    shard_id: from.group.clone(),
-                    rocksdb_entries: Vec::new(),
-                    memory_snapshot: None,
-                },
+            crate::snapshot_transfer::SnapshotTransferState::Generating {
                 snapshot_path: snapshot_file.clone(),
                 chunk_index: chunk_index.clone(),
             },
         );
 
-        // Spawn background task to generate snapshot file using channel
+        // Spawn background task to generate snapshot file from channel
+        // Snapshot object is already created, now we just need to write data to file
         let transfer_id_clone = transfer_id.clone();
         let shard_id_clone = from.group.clone();
         let snapshot_transfer_manager = self.snapshot_transfer_manager.clone();
-        // Clone store - HybridStore implements both RedisStore and SnapshotStore
-        let store = self.store.clone();
-
         let snapshot_config = self.config.snapshot.clone();
+
+        info!(
+            "Spawning background task to generate snapshot file for shard {} transfer {}",
+            shard_id_clone, transfer_id_clone
+        );
+
         tokio::spawn(async move {
             // Generate snapshot file in background using channel
-            if let Err(e) = crate::node::generate_snapshot_file_async(
+            if let Err(e) = crate::snapshot_transfer::generate_snapshot_file_async(
                 &shard_id_clone,
                 &transfer_id_clone,
                 &snapshot_transfer_manager,
-                store,
+                rx,
                 snapshot_config,
             )
             .await
@@ -567,7 +611,8 @@ impl TimerService for KVStateMachine {
         } else {
             dur
         };
-        self.timers.add_timer(from, Event::HeartbeatTimeout, timeout)
+        self.timers
+            .add_timer(from, Event::HeartbeatTimeout, timeout)
     }
 
     fn set_apply_timer(&self, from: &RaftId, dur: Duration) -> raft::TimerId {
