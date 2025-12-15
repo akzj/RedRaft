@@ -9,6 +9,6 @@ pub mod routing;
 pub mod shard;
 
 // Re-export commonly used types
-pub use routing::{RaftGroup, RaftRole, RoutingTable};
+pub use routing::{RaftGroup, RoutingTable};
 pub use shard::{ShardId, ShardRouting, TOTAL_SLOTS};
 

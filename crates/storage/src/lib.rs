@@ -6,7 +6,7 @@ pub mod store;
 pub mod traits;
 
 // Re-export rr-core types for convenience
-pub use rr_core::routing::{RaftGroup, RaftRole, RoutingTable};
+pub use rr_core::routing::{RaftGroup, RoutingTable};
 pub use rr_core::shard::{ShardId, ShardRouting, TOTAL_SLOTS};
 
 // Re-export commonly used types

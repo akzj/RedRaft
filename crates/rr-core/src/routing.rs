@@ -9,28 +9,19 @@ use crate::shard::{ShardId, ShardRouting, TOTAL_SLOTS};
 use crc::{Crc, CRC_16_XMODEM};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, string};
 use thiserror::Error;
+
+use raft::{GroupId, NodeId};
 
 /// CRC16 calculator for Redis Cluster (XMODEM variant)
 static CRC16: Crc<u16> = Crc::<u16>::new(&CRC_16_XMODEM);
-
-/// Raft role in a group
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RaftRole {
-    /// Leader node
-    Leader,
-    /// Follower node
-    Follower,
-    /// Candidate node (during election)
-    Candidate,
-}
 
 /// Node address information
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeAddress {
     /// Node ID
-    pub node_id: String,
+    pub node_id: NodeId,
     /// gRPC address
     pub grpc_addr: String,
     /// Redis address (optional)
@@ -42,24 +33,21 @@ pub struct NodeAddress {
 /// Contains information about a Raft group, including its members and leader.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RaftGroup {
-    /// Raft group ID (typically same as shard_id)
-    pub raft_id: String,
+    /// Raft group ID (typically same as shard_id, shard_id == raft_id == group_id in this system)
+    pub group_id: GroupId,
     /// Current leader node ID (None if no leader)
-    pub leader_node_id: Option<String>,
+    pub leader_node_id: Option<NodeId>,
     /// All nodes in this raft group
     pub nodes: Vec<NodeAddress>,
-    /// Current role of this node in the group (if this node is part of the group)
-    pub role: Option<RaftRole>,
 }
 
 impl RaftGroup {
     /// Create a new RaftGroup
-    pub fn new(raft_id: String) -> Self {
+    pub fn new(raft_id: GroupId) -> Self {
         Self {
-            raft_id,
+            group_id: raft_id,
             leader_node_id: None,
             nodes: Vec::new(),
-            role: None,
         }
     }
 
@@ -120,10 +108,10 @@ pub struct RoutingTable {
     /// Sorted shard routings by slot_start (for O(log n) binary search by slot)
     /// This is maintained in sorted order for efficient slot-based lookups
     sorted_routings: Arc<RwLock<Vec<ShardRouting>>>,
-    /// Raft group information: raft_id -> RaftGroup
+    /// Raft group information: raft_id -> RaftGroup (shard_id == raft_id == group_id in this system)
     raft_groups: Arc<RwLock<HashMap<String, RaftGroup>>>,
-    /// Shard to Raft ID mapping: shard_id -> raft_id
-    shard_to_raft: Arc<RwLock<HashMap<ShardId, String>>>,
+    /// Node address information: node_id -> NodeAddress (for gRPC address lookup)
+    node_addresses: Arc<RwLock<HashMap<NodeId, NodeAddress>>>,
 }
 
 impl RoutingTable {
@@ -133,7 +121,7 @@ impl RoutingTable {
             shard_routings: Arc::new(RwLock::new(HashMap::new())),
             sorted_routings: Arc::new(RwLock::new(Vec::new())),
             raft_groups: Arc::new(RwLock::new(HashMap::new())),
-            shard_to_raft: Arc::new(RwLock::new(HashMap::new())),
+            node_addresses: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -221,7 +209,6 @@ impl RoutingTable {
     /// Updates both the hash map and rebuilds the sorted list.
     pub fn remove_shard_routing(&self, shard_id: &ShardId) {
         self.shard_routings.write().remove(shard_id);
-        self.shard_to_raft.write().remove(shard_id);
         self.rebuild_sorted_routings();
     }
 
@@ -234,19 +221,11 @@ impl RoutingTable {
     /// - `Ok(String)`: The leader node_id
     /// - `Err(RoutingError)`: If shard or leader is not found
     pub fn find_leader_for_shard(&self, shard_id: &ShardId) -> Result<String, RoutingError> {
-        // First, find the raft_id for this shard
-        let raft_id = self
-            .shard_to_raft
-            .read()
-            .get(shard_id)
-            .cloned()
-            .ok_or_else(|| RoutingError::RaftGroupNotFound(shard_id.clone()))?;
-
-        // Then, find the leader in the raft group
+        // shard_id == raft_id == group_id in this system, so we can directly use shard_id
         let groups = self.raft_groups.read();
         let group = groups
-            .get(&raft_id)
-            .ok_or_else(|| RoutingError::RaftGroupNotFound(raft_id.clone()))?;
+            .get(shard_id)
+            .ok_or_else(|| RoutingError::RaftGroupNotFound(shard_id.clone()))?;
 
         group
             .leader_node_id
@@ -259,17 +238,11 @@ impl RoutingTable {
         &self,
         shard_id: &ShardId,
     ) -> Result<NodeAddress, RoutingError> {
-        let raft_id = self
-            .shard_to_raft
-            .read()
-            .get(shard_id)
-            .cloned()
-            .ok_or_else(|| RoutingError::RaftGroupNotFound(shard_id.clone()))?;
-
+        // shard_id == raft_id == group_id in this system, so we can directly use shard_id
         let groups = self.raft_groups.read();
         let group = groups
-            .get(&raft_id)
-            .ok_or_else(|| RoutingError::RaftGroupNotFound(raft_id))?;
+            .get(shard_id)
+            .ok_or_else(|| RoutingError::RaftGroupNotFound(shard_id.clone()))?;
 
         group
             .get_leader_address()
@@ -279,23 +252,43 @@ impl RoutingTable {
 
     /// Add or update raft group
     pub fn add_raft_group(&self, group: RaftGroup) {
-        let raft_id = group.raft_id.clone();
+        let raft_id = group.group_id.clone();
         self.raft_groups.write().insert(raft_id.clone(), group);
     }
 
-    /// Get raft group
-    pub fn get_raft_group(&self, raft_id: &str) -> Option<RaftGroup> {
-        self.raft_groups.read().get(raft_id).cloned()
+    /// Get raft group by shard_id (shard_id == raft_id == group_id in this system)
+    pub fn get_raft_group(&self, shard_id: &str) -> Option<RaftGroup> {
+        self.raft_groups.read().get(shard_id).cloned()
     }
 
-    /// Remove raft group
-    pub fn remove_raft_group(&self, raft_id: &str) {
-        self.raft_groups.write().remove(raft_id);
+    /// Remove raft group by shard_id (shard_id == raft_id == group_id in this system)
+    pub fn remove_raft_group(&self, shard_id: &str) {
+        self.raft_groups.write().remove(shard_id);
     }
 
-    /// Associate a shard with a raft group
-    pub fn associate_shard_with_raft(&self, shard_id: ShardId, raft_id: String) {
-        self.shard_to_raft.write().insert(shard_id, raft_id);
+    /// Add or update node address
+    pub fn add_node_address(&self, address: NodeAddress) {
+        self.node_addresses
+            .write()
+            .insert(address.node_id.clone(), address);
+    }
+
+    /// Get node address by node_id
+    pub fn get_node_address(&self, node_id: &NodeId) -> Option<NodeAddress> {
+        self.node_addresses.read().get(node_id).cloned()
+    }
+
+    /// Get gRPC address by node_id
+    pub fn get_grpc_address(&self, node_id: &NodeId) -> Option<String> {
+        self.node_addresses
+            .read()
+            .get(node_id)
+            .map(|addr| addr.grpc_addr.clone())
+    }
+
+    /// Remove node address
+    pub fn remove_node_address(&self, node_id: &NodeId) {
+        self.node_addresses.write().remove(node_id);
     }
 
     /// Get all shard routings
@@ -400,9 +393,7 @@ mod tests {
         group.set_leader("node1".to_string());
         table.add_raft_group(group);
 
-        // Associate shard with raft group
-        table.associate_shard_with_raft("shard_0".to_string(), "raft_0".to_string());
-
+        // shard_id == raft_id == group_id, so we can directly use shard_id to find the group
         // Find leader
         let leader = table.find_leader_for_shard(&"shard_0".to_string()).unwrap();
         assert_eq!(leader, "node1");
@@ -411,7 +402,7 @@ mod tests {
     #[test]
     fn test_raft_group_operations() {
         let mut group = RaftGroup::new("raft_0".to_string());
-        assert_eq!(group.raft_id, "raft_0");
+        assert_eq!(group.group_id, "raft_0");
         assert!(group.leader_node_id.is_none());
 
         group.add_node(NodeAddress {

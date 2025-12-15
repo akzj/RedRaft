@@ -227,6 +227,7 @@ impl RedRaftNode {
             timers,
             self.snapshot_transfer_manager.clone(),
             self.pending_requests.clone(),
+            self.routing_table.clone(),
             self.config.clone(),
         ));
         self.state_machines

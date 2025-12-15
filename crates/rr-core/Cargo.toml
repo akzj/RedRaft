@@ -11,4 +11,5 @@ serde = { workspace = true, features = ["derive"] }
 parking_lot = { workspace = true }
 crc = { workspace = true }
 thiserror = { workspace = true }
+raft = { path = "../raft" }
 

@@ -88,7 +88,8 @@ pub enum Event {
 }
 
 /// Raft node role
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
 pub enum Role {
     Follower,
     Candidate,
