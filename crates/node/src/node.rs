@@ -152,6 +152,11 @@ impl RedRaftNode {
         self.router.clone()
     }
 
+    /// Get snapshot transfer manager
+    pub fn snapshot_transfer_manager(&self) -> &Arc<SnapshotTransferManager> {
+        &self.snapshot_transfer_manager
+    }
+
     /// Get existing Raft group
     ///
     /// Used for business request routing, will not create new Raft groups.

@@ -8,6 +8,7 @@ pub mod pilot_client;
 pub mod router;
 pub mod server;
 pub mod snapshot_transfer;
+pub mod snapshot_service;
 pub mod state_machine;
 
 pub use config::{Config, ConfigError};

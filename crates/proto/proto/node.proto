@@ -11,12 +11,12 @@ package node;
 // raft/proto/pb.proto).
 
 // ============================================================================
-// Split Snapshot Transfer Service
+// Snapshot Transfer Service
 // ============================================================================
-// Used for transferring split snapshots during shard splitting operations.
+// Used for transferring snapshots from Leader to Follower.
 
-/// Split snapshot transfer service
-service SplitSnapshotService {
+/// Snapshot transfer service
+service SnapshotService {
   /// Pull snapshot data (server streaming)
   /// Follower actively pulls snapshot data from Leader after receiving
   /// InstallSnapshotRequest This allows Follower to control the transfer rate

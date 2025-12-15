@@ -48,6 +48,11 @@ reqwest = { version = "0.12", features = ["json"] }
 # Pilot types (for shared types like RaftGroupStatus)
 pilot = { path = "../pilot" }
 
+# gRPC protocol definitions
+proto = { path = "../proto" }
+tonic = { workspace = true }
+tokio-stream = "0.1"
+
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 bytes.workspace = true

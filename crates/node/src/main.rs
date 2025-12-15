@@ -8,16 +8,18 @@ use std::sync::Arc;
 
 use clap::Parser;
 use storage::store::HybridStore;
-use tracing::{info, warn, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use raft::network::MultiRaftNetwork;
 use raft::storage::FileStorage;
+use tonic::transport::Server;
 
 use redraft::config::Config;
 use redraft::node::RedRaftNode;
 use redraft::pilot_client::{PilotClient, PilotClientConfig};
 use redraft::server::RedisServer;
+use redraft::snapshot_service::SnapshotServiceImpl;
 
 /// RedRaft node configuration
 #[derive(Parser, Debug)]
@@ -134,6 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let network_options =
         raft::network::MultiRaftNetworkOptions::default().with_node_id(config.node.node_id.clone());
     let network = Arc::new(MultiRaftNetwork::new(network_options));
+    let network_for_grpc = network.clone();
 
     // Create routing table (managed by node, can be synced with pilot in the future)
     let routing_table = Arc::new(rr_core::routing::RoutingTable::new());
@@ -245,6 +248,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Start gRPC server for snapshot transfer service
+    // Note: The network layer needs to have a dispatcher set up before calling get_raft_service
+    // This is typically done in the node.start() method or when creating Raft groups
+    let grpc_addr: SocketAddr = config.network.grpc_addr.parse()?;
+    let snapshot_transfer_manager = node.snapshot_transfer_manager().clone();
+
+    tokio::spawn(async move {
+        let snapshot_service = SnapshotServiceImpl::new(snapshot_transfer_manager);
+
+        // Get Raft service from network (dispatcher should be set by node.start())
+        let raft_service = network_for_grpc.get_raft_service();
+
+        // Create SnapshotService server
+        let snapshot_service_server =
+            proto::node::snapshot_service_server::SnapshotServiceServer::new(
+                snapshot_service,
+            );
+
+        info!("Starting gRPC server on {}", grpc_addr);
+        if let Err(e) = Server::builder()
+            .add_service(raft_service)
+            .add_service(snapshot_service_server)
+            .serve(grpc_addr)
+            .await
+        {
+            error!("gRPC server error: {}", e);
+        }
+    });
+
     // Create and start Redis server
     let addr: SocketAddr = config.network.redis_addr.parse()?;
     let server = RedisServer::new(node, addr);
@@ -255,6 +287,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         addr.ip(),
         addr.port()
     );
+    info!("gRPC server listening on {}", grpc_addr);
 
     // Start server (blocking)
     server.start().await?;

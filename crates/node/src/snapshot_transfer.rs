@@ -120,34 +120,53 @@ impl Default for ChunkIndex {
 }
 
 /// Snapshot transfer state
+/// Supports concurrent generation and transfer (streaming while generating)
+/// Both generation and transfer can update progress in this shared state
 #[derive(Debug, Clone)]
-pub enum SnapshotTransferState {
-    /// Transfer is being prepared (snapshot file is being generated)
-    Generating {
-        /// Snapshot file path
-        snapshot_path: std::path::PathBuf,
-        /// Chunk index (in-memory)
-        chunk_index: Arc<RwLock<ChunkIndex>>,
-    },
-    /// Transfer is ready (snapshot file is ready for pull)
-    Ready {
-        /// Snapshot file path
-        snapshot_path: std::path::PathBuf,
-        /// Total size in bytes
-        total_size: u64,
-        /// Chunk index (in-memory)
-        chunk_index: Arc<RwLock<ChunkIndex>>,
-    },
-    /// Transfer is in progress
-    InProgress {
-        snapshot_path: std::path::PathBuf,
-        total_size: u64,
-        chunk_index: Arc<RwLock<ChunkIndex>>,
-    },
-    /// Transfer completed
-    Completed,
-    /// Transfer failed
-    Failed(String),
+pub struct SnapshotTransferState {
+    /// Snapshot file path
+    pub snapshot_path: std::path::PathBuf,
+    /// Chunk index (in-memory, updated as chunks are generated/transferred)
+    pub chunk_index: Arc<RwLock<ChunkIndex>>,
+    /// Total compressed size (available after generation completes, 0 if still generating)
+    pub total_size: u64,
+    /// Error message (if failed)
+    pub error: Option<String>,
+}
+
+impl SnapshotTransferState {
+    /// Create a new transfer state
+    pub fn new(snapshot_path: std::path::PathBuf, chunk_index: Arc<RwLock<ChunkIndex>>) -> Self {
+        Self {
+            snapshot_path,
+            chunk_index,
+            total_size: 0,
+            error: None,
+        }
+    }
+
+    /// Check if transfer is completed (generation complete and no error)
+    pub fn is_completed(&self) -> bool {
+        self.error.is_none() && {
+            let index = self.chunk_index.read();
+            index.is_complete && self.total_size > 0
+        }
+    }
+
+    /// Check if transfer has failed
+    pub fn is_failed(&self) -> bool {
+        self.error.is_some()
+    }
+
+    /// Mark transfer as failed
+    pub fn mark_failed(&mut self, error: String) {
+        self.error = Some(error);
+    }
+
+    /// Update total size (called when generation completes)
+    pub fn update_total_size(&mut self, total_size: u64) {
+        self.total_size = total_size;
+    }
 }
 
 /// Snapshot transfer manager
@@ -176,7 +195,8 @@ impl SnapshotTransferManager {
         info!("Registered snapshot transfer: {}", transfer_id_clone);
     }
 
-    /// Update transfer state
+    /// Update transfer state (replaces entire state)
+    /// For updating specific fields, use update_total_size() or mark_transfer_failed()
     pub fn update_transfer_state(&self, transfer_id: &str, state: SnapshotTransferState) {
         let mut transfers = self.transfers.write();
         if transfers.contains_key(transfer_id) {
@@ -197,12 +217,42 @@ impl SnapshotTransferManager {
         self.transfers
             .read()
             .get(transfer_id)
-            .and_then(|state| match state {
-                SnapshotTransferState::Generating { chunk_index, .. } => Some(chunk_index.clone()),
-                SnapshotTransferState::Ready { chunk_index, .. } => Some(chunk_index.clone()),
-                SnapshotTransferState::InProgress { chunk_index, .. } => Some(chunk_index.clone()),
-                _ => None,
-            })
+            .map(|state| state.chunk_index.clone())
+    }
+
+    /// Get mutable reference to transfer state for updating progress
+    pub fn get_transfer_state_mut(
+        &self,
+        transfer_id: &str,
+    ) -> Option<parking_lot::RwLockWriteGuard<'_, HashMap<String, SnapshotTransferState>>> {
+        // Note: This returns a write guard, caller should drop it quickly
+        // For better API, we can add specific update methods
+        Some(self.transfers.write())
+    }
+
+    /// Update total size for a transfer (called when generation completes)
+    pub fn update_total_size(&self, transfer_id: &str, total_size: u64) {
+        let mut transfers = self.transfers.write();
+        if let Some(state) = transfers.get_mut(transfer_id) {
+            state.update_total_size(total_size);
+            info!(
+                "Updated total size for transfer {}: {} bytes",
+                transfer_id, total_size
+            );
+        } else {
+            warn!("Transfer {} not found for total size update", transfer_id);
+        }
+    }
+
+    /// Mark transfer as failed
+    pub fn mark_transfer_failed(&self, transfer_id: &str, error: String) {
+        let mut transfers = self.transfers.write();
+        if let Some(state) = transfers.get_mut(transfer_id) {
+            state.mark_failed(error.clone());
+            info!("Marked transfer {} as failed: {}", transfer_id, error);
+        } else {
+            warn!("Transfer {} not found for marking as failed", transfer_id);
+        }
     }
 
     /// Remove completed or failed transfer
@@ -275,20 +325,8 @@ pub fn read_chunk_from_file(
         ));
     }
 
-    // Decompress
-    let decompressed = zstd::decode_all(compressed_data.as_slice())
-        .map_err(|e| format!("Failed to decompress chunk: {}", e))?;
-
-    if decompressed.len() != chunk_metadata.uncompressed_size as usize {
-        return Err(format!(
-            "Decompressed size mismatch for chunk {}: expected {}, got {}",
-            chunk_index,
-            chunk_metadata.uncompressed_size,
-            decompressed.len()
-        ));
-    }
-
-    Ok(decompressed)
+    // Return compressed data (no decompression needed, data is sent in compressed form)
+    Ok(compressed_data)
 }
 
 /// Wait for a chunk to be available (with timeout and error checking)
@@ -313,7 +351,7 @@ pub async fn wait_for_chunk(
             }
 
             // Check if chunk exists
-            if let Some(_) = index.get_chunk(target_chunk_index) {
+            if index.get_chunk(target_chunk_index).is_some() {
                 return Ok(());
             }
 
@@ -362,17 +400,7 @@ fn get_transfer_state_info(
         .get_transfer_state(transfer_id)
         .ok_or_else(|| format!("Transfer {} not found", transfer_id))?;
 
-    match state {
-        SnapshotTransferState::Generating {
-            snapshot_path,
-            chunk_index,
-            ..
-        } => Ok((snapshot_path, chunk_index)),
-        _ => Err(format!(
-            "Transfer {} is not in Preparing state",
-            transfer_id
-        )),
-    }
+    Ok((state.snapshot_path, state.chunk_index))
 }
 
 /// Spawn async task to receive snapshot entries and forward to blocking channel
@@ -616,15 +644,9 @@ async fn wait_for_tasks_and_update_state(
         .await
         .map_err(|e| format!("File writing task failed: {:?}", e))??;
 
-    // Update transfer state to Ready
-    transfer_manager.update_transfer_state(
-        transfer_id,
-        SnapshotTransferState::Ready {
-            snapshot_path: snapshot_path.clone(),
-            total_size: total_compressed,
-            chunk_index,
-        },
-    );
+    // Update transfer state: mark generation as complete by updating total_size
+    // Transfer can continue while we update the state
+    transfer_manager.update_total_size(transfer_id, total_compressed);
 
     info!(
         "Snapshot file generated for transfer {}: {} bytes (uncompressed) -> {} bytes (compressed)",

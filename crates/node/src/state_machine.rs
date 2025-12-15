@@ -465,14 +465,15 @@ impl SnapshotStorage for KVStateMachine {
             shard_id_str, transfer_id
         );
 
-        // Register transfer as preparing (snapshot object is already created)
+        // Register transfer as active (snapshot object is already created)
         // The snapshot object is now consistent and won't change
+        // Transfer can start immediately even while file is still being generated
         self.snapshot_transfer_manager.register_transfer(
             transfer_id.clone(),
-            crate::snapshot_transfer::SnapshotTransferState::Generating {
-                snapshot_path: snapshot_file.clone(),
-                chunk_index: chunk_index.clone(),
-            },
+            crate::snapshot_transfer::SnapshotTransferState::new(
+                snapshot_file.clone(),
+                chunk_index.clone(),
+            ),
         );
 
         // Spawn background task to generate snapshot file from channel
@@ -502,10 +503,7 @@ impl SnapshotStorage for KVStateMachine {
                     "Failed to generate snapshot file for transfer {}: {}",
                     transfer_id_clone, e
                 );
-                snapshot_transfer_manager.update_transfer_state(
-                    &transfer_id_clone,
-                    crate::snapshot_transfer::SnapshotTransferState::Failed(e),
-                );
+                snapshot_transfer_manager.mark_transfer_failed(&transfer_id_clone, e);
             }
         });
 
