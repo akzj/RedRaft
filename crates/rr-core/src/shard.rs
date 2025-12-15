@@ -21,8 +21,6 @@ pub struct ShardRouting {
     pub slot_start: u32,
     /// End slot (exclusive)
     pub slot_end: u32,
-    /// Current apply index (optional, for metadata tracking)
-    pub apply_index: Option<u64>,
 }
 
 impl ShardRouting {
@@ -32,22 +30,6 @@ impl ShardRouting {
             shard_id,
             slot_start,
             slot_end,
-            apply_index: None,
-        }
-    }
-
-    /// Create with apply index
-    pub fn with_apply_index(
-        shard_id: ShardId,
-        slot_start: u32,
-        slot_end: u32,
-        apply_index: u64,
-    ) -> Self {
-        Self {
-            shard_id,
-            slot_start,
-            slot_end,
-            apply_index: Some(apply_index),
         }
     }
 

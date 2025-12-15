@@ -26,6 +26,8 @@ use crate::traits::StoreError;
 use anyhow::Result;
 use parking_lot::RwLock;
 use resp::Command;
+use rr_core::routing::RoutingTable;
+use rr_core::shard::{ShardRouting, TOTAL_SLOTS};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -92,6 +94,8 @@ pub struct HybridStore {
     /// Segment Generator for periodic full snapshots
     segment_generator: Arc<RwLock<SegmentGenerator>>,
 
+    routing_table: Arc<RoutingTable>,
+
     /// Snapshot configuration
     snapshot_config: SnapshotConfig,
 
@@ -101,11 +105,20 @@ pub struct HybridStore {
 
 impl HybridStore {
     /// Create a new HybridStore
-    pub fn new(snapshot_config: SnapshotConfig, data_dir: PathBuf) -> Result<Self, String> {
+    ///
+    /// # Arguments
+    /// - `snapshot_config`: Snapshot configuration
+    /// - `data_dir`: Data directory path
+    /// - `routing_table`: Routing table for shard management (managed by node)
+    pub fn new(
+        snapshot_config: SnapshotConfig,
+        data_dir: PathBuf,
+        routing_table: Arc<rr_core::routing::RoutingTable>,
+    ) -> Result<Self, String> {
         // Initialize RocksDB
         let rocksdb_path = data_dir.join("rocksdb");
         let rocksdb = Arc::new(
-            ShardedRocksDB::new(&rocksdb_path)
+            ShardedRocksDB::new(&rocksdb_path, routing_table.clone())
                 .map_err(|e| format!("Failed to initialize RocksDB: {}", e))?,
         );
 
@@ -125,15 +138,20 @@ impl HybridStore {
             shards: Arc::new(RwLock::new(HashMap::new())),
             wal_writer: Arc::new(RwLock::new(wal_writer)),
             segment_generator: Arc::new(RwLock::new(segment_generator)),
+            routing_table,
         })
     }
 
+    /// Get shard ID for a key using routing table
+    pub(crate) fn shard_for_key(&self, key: &[u8]) -> Result<ShardId, StoreError> {
+        self.routing_table
+            .find_shard_for_key(key)
+            .map_err(|e| StoreError::Internal(e.to_string()))
+    }
+
     /// Get or create shard for a key
-    pub(crate) fn get_create_shard(&self, key: &[u8]) -> Result<LockedShardedStore, StoreError> {
-        let shard_id = self
-            .rocksdb
-            .shard_for_key(key)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+    pub(crate) fn get_shard(&self, key: &[u8]) -> Result<LockedShardedStore, StoreError> {
+        let shard_id = self.shard_for_key(key)?;
         let shards = self.shards.read();
 
         let Some(shard) = shards.get(&shard_id) else {
@@ -330,9 +348,9 @@ impl HybridStore {
 mod tests {
     use super::*;
     use crate::snapshot::SnapshotConfig;
+    use bytes::Bytes;
     use resp::Command;
     use tempfile::TempDir;
-    use bytes::Bytes;
 
     #[test]
     fn test_hybrid_store_new() {
@@ -348,7 +366,8 @@ mod tests {
             zstd_level: 3,
         };
 
-        let store = HybridStore::new(config, data_dir);
+        let routing_table = Arc::new(rr_core::routing::RoutingTable::new());
+        let store = HybridStore::new(config, data_dir, routing_table);
         assert!(store.is_ok());
     }
 
@@ -366,7 +385,15 @@ mod tests {
             zstd_level: 3,
         };
 
-        let store = HybridStore::new(config, data_dir.clone()).unwrap();
+        let routing_table = Arc::new(rr_core::routing::RoutingTable::new());
+        // Add a test shard routing that covers all slots for testing
+        routing_table.add_shard_routing(ShardRouting::new(
+            "shard_0".to_string(),
+            0,
+            TOTAL_SLOTS - 1,
+        ));
+
+        let store = HybridStore::new(config, data_dir.clone(), routing_table).unwrap();
 
         // Apply a write command
         let key = b"test_key".to_vec();
@@ -444,4 +471,3 @@ mod tests {
         assert!(!HybridStore::is_write_command(&get));
     }
 }
-

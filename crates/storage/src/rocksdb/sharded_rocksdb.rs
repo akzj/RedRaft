@@ -11,20 +11,17 @@
 //! - **Snapshot Operations**: See `snapshot.rs` for snapshot operations
 
 use crate::rocksdb::key_encoding::apply_index_key;
-use rr_core::shard::{ShardId, ShardRouting, TOTAL_SLOTS};
-use rr_core::routing::RoutingTable;
 use anyhow::Result;
-use parking_lot::RwLock;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, WriteOptions, DB};
-use std::collections::HashMap;
+use rr_core::routing::RoutingTable;
+use rr_core::shard::{ShardId, ShardRouting, TOTAL_SLOTS};
 use std::path::Path;
 use std::sync::Arc;
-use tracing::info;
 
 /// Shard metadata stored in RocksDB
 ///
-/// This is a wrapper around ShardRouting that adds RocksDB-specific metadata.
-/// The routing information is now managed by the core::routing module.
+/// This is a type alias for ShardRouting for backward compatibility.
+/// The routing information is now managed by RoutingTable.
 pub type ShardMetadata = ShardRouting;
 
 /// Column Family name for a shard
@@ -43,13 +40,17 @@ pub struct ShardedRocksDB {
     path: String,
     /// Write options
     pub(crate) write_opts: WriteOptions,
-    /// Shard metadata cache
-    shard_metadata: Arc<RwLock<HashMap<ShardId, ShardMetadata>>>,
+    /// Routing table for shard management
+    routing_table: Arc<RoutingTable>,
 }
 
 impl ShardedRocksDB {
     /// Create a new ShardedRocksDB
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+    ///
+    /// # Arguments
+    /// - `path`: Database path
+    /// - `routing_table`: Routing table for shard management (managed by node)
+    pub fn new<P: AsRef<Path>>(path: P, routing_table: Arc<RoutingTable>) -> Result<Self, String> {
         let path_str = path.as_ref().to_string_lossy().to_string();
 
         // Configure RocksDB options
@@ -62,34 +63,54 @@ impl ShardedRocksDB {
         opts.set_max_background_jobs(4);
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
-        let db = match DB::open(&opts, &path_str) {
-            Ok(db) => db,
-            Err(_) => {
-                // First time open, create the database
-                let mut db = DB::open(&opts, &path_str)
-                    .map_err(|e| format!("Failed to open RocksDB: {}", e))?;
+        // List existing column families
+        let existing_cfs = DB::list_cf(&opts, &path_str).unwrap_or_default();
 
-                db
-            }
+        // Open database with column families
+        let db = if existing_cfs.is_empty() {
+            // First time open, create the database with default column family
+            DB::open(&opts, &path_str).map_err(|e| format!("Failed to open RocksDB: {}", e))?
+        } else {
+            // Open with existing column families
+            let cf_descriptors: Vec<ColumnFamilyDescriptor> = existing_cfs
+                .iter()
+                .map(|name| ColumnFamilyDescriptor::new(name, Options::default()))
+                .collect();
+            DB::open_cf_descriptors(&opts, &path_str, cf_descriptors)
+                .map_err(|e| format!("Failed to open RocksDB with column families: {}", e))?
         };
 
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(false);
 
-        // Initialize shard metadata
-        let mut shard_metadata = HashMap::new();
+        // Auto-register shard routings from existing column families
+        // Column families are named as "shard_{shard_id}"
+        for cf_name in existing_cfs {
+            if cf_name.starts_with("shard_") {
+                let shard_id = cf_name.strip_prefix("shard_").unwrap().to_string();
+                // Check if routing already exists (to avoid duplicates)
+                if routing_table.get_shard_routing(&shard_id).is_none() {
+                    // Try to infer slot range from shard_id (for now, use a default range)
+                    // In production, this should be loaded from metadata or pilot
+                    let slot_start = 0;
+                    let slot_end = TOTAL_SLOTS;
+                    routing_table
+                        .add_shard_routing(ShardRouting::new(shard_id, slot_start, slot_end));
+                }
+            }
+        }
 
         Ok(Self {
             db: Arc::new(db),
             path: path_str,
             write_opts,
-            shard_metadata: Arc::new(RwLock::new(shard_metadata)),
+            routing_table,
         })
     }
 
     /// Get shard count
     pub fn shard_count(&self) -> u32 {
-        self.shard_metadata.read().len() as u32
+        self.routing_table.list_shard_routings().len() as u32
     }
 
     /// Get database path
@@ -99,16 +120,9 @@ impl ShardedRocksDB {
 
     /// Calculate shard ID for a key
     pub fn shard_for_key(&self, key: &[u8]) -> Result<ShardId> {
-        let slot = RoutingTable::slot_for_key(key);
-
-        let metadata = self.shard_metadata.read();
-        for (shard_id, metadata) in metadata.iter() {
-            if metadata.contains_slot(slot) {
-                return Ok(shard_id.clone());
-            }
-        }
-
-        return Err(anyhow::anyhow!("Shard not found"));
+        self.routing_table
+            .find_shard_for_key(key)
+            .map_err(|e| anyhow::anyhow!("Shard not found: {}", e))
     }
 
     /// Get Column Family handle for shard
@@ -117,36 +131,12 @@ impl ShardedRocksDB {
         self.db.cf_handle(&cf_name)
     }
 
-    /// Get or create Column Family for shard
-    pub(crate) fn get_or_create_cf(&self, shard_id: &ShardId) -> Result<&ColumnFamily, String> {
-        let cf_name = shard_cf_name(shard_id);
-        if let Some(cf) = self.db.cf_handle(&cf_name) {
-            Ok(cf)
-        } else {
-            Err(format!("Column Family {} not found", cf_name))
-        }
-    }
-
-    // ==================== Shard Management ====================
-
-    /// Set apply index for shard
-    pub fn set_shard_apply_index(&self, shard_id: &ShardId, apply_index: u64) {
-        let mut metadata = self.shard_metadata.write();
-        if let Some(meta) = metadata.get_mut(shard_id) {
-            meta.apply_index = Some(apply_index);
-        }
-    }
-
-    /// Get apply index for shard (from cache, fallback to DB)
+    /// Get apply index for shard (from DB)
+    ///
+    /// Note: apply_index is no longer stored in ShardRouting cache.
+    /// This method reads directly from RocksDB.
     pub fn get_shard_apply_index(&self, shard_id: &ShardId) -> Option<u64> {
-        // Try cache first
-        let metadata = self.shard_metadata.read();
-        if let Some(index) = metadata.get(shard_id).and_then(|m| m.apply_index) {
-            return Some(index);
-        }
-        drop(metadata);
-
-        // Fallback to DB
+        // Read directly from DB
         self.get_apply_index_from_db(shard_id).ok().flatten()
     }
 
@@ -202,7 +192,9 @@ impl ShardedRocksDB {
 
     /// Atomically update apply_index in RocksDB (without data write)
     pub fn update_apply_index(&self, shard_id: &ShardId, apply_index: u64) -> Result<(), String> {
-        let cf = self.get_or_create_cf(shard_id)?;
+        let cf = self
+            .get_cf(shard_id)
+            .ok_or_else(|| format!("Column Family not found for shard {}", shard_id))?;
         let index_key = apply_index_key();
 
         // Check for duplicate commit
@@ -224,20 +216,40 @@ impl ShardedRocksDB {
             )
             .map_err(|e| format!("Failed to update apply_index: {}", e))?;
 
-        // Update in-memory cache
-        self.set_shard_apply_index(shard_id, apply_index);
         Ok(())
     }
 
+    /// Flush to disk
+    pub fn flush(&self) -> Result<(), String> {
+        self.db.flush().map_err(|e| format!("Flush error: {}", e))
+    }
     /// Get shard metadata
     pub fn get_shard_metadata(&self, shard_id: &ShardId) -> Option<ShardMetadata> {
-        let metadata = self.shard_metadata.read();
-        metadata.get(shard_id).cloned()
+        self.routing_table.get_shard_routing(shard_id)
     }
 
     /// Get all active shards
     pub fn get_active_shards(&self) -> Vec<ShardId> {
-        self.shard_metadata.read().keys().cloned().collect()
+        self.routing_table
+            .list_shard_routings()
+            .into_iter()
+            .map(|r| r.shard_id)
+            .collect()
+    }
+
+    /// Add or update shard routing
+    pub fn add_shard_routing(&self, routing: ShardRouting) {
+        self.routing_table.add_shard_routing(routing);
+    }
+
+    /// Remove shard routing
+    pub fn remove_shard_routing(&self, shard_id: &ShardId) {
+        self.routing_table.remove_shard_routing(shard_id);
+    }
+
+    /// Get reference to routing table
+    pub fn routing_table(&self) -> &Arc<RoutingTable> {
+        &self.routing_table
     }
 }
 
@@ -251,7 +263,7 @@ impl Clone for ShardedRocksDB {
                 opts.set_sync(false);
                 opts
             },
-            shard_metadata: Arc::clone(&self.shard_metadata),
+            routing_table: Arc::clone(&self.routing_table),
         }
     }
 }
@@ -265,7 +277,39 @@ mod tests {
 
     fn create_temp_db() -> ShardedRocksDB {
         let path = format!("/tmp/sharded_rocksdb_test_{}", rand::random::<u64>());
-        ShardedRocksDB::new(&path).unwrap()
+
+        // Create database with test Column Families
+        // Note: Column Family names use shard_cf_name format: "shard_{shard_id}"
+        let path_str = path.clone();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+
+        // Create test Column Families with correct naming
+        let test_cfs = vec![
+            ColumnFamilyDescriptor::new("shard_shard_0", Options::default()),
+            ColumnFamilyDescriptor::new("shard_shard_1", Options::default()),
+            ColumnFamilyDescriptor::new("shard_shard_2", Options::default()),
+        ];
+
+        let db = DB::open_cf_descriptors(&opts, &path_str, test_cfs)
+            .expect("Failed to create test database");
+
+        // Create ShardedRocksDB manually with the pre-created DB
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(false);
+
+        let routing_table = Arc::new(RoutingTable::new());
+        routing_table.add_shard_routing(ShardRouting::new("shard_0".to_string(), 0, 4096));
+        routing_table.add_shard_routing(ShardRouting::new("shard_1".to_string(), 4096, 8192));
+        routing_table.add_shard_routing(ShardRouting::new("shard_2".to_string(), 8192, 12288));
+
+        ShardedRocksDB {
+            db: Arc::new(db),
+            path: path_str,
+            write_opts,
+            routing_table,
+        }
     }
 
     fn cleanup_db(db: &ShardedRocksDB) {
@@ -330,34 +374,6 @@ mod tests {
         // Test HGETALL
         let all = db.hgetall(&"shard_1".into(), b"myhash");
         assert_eq!(all.len(), 3);
-
-        cleanup_db(&db);
-    }
-
-    #[test]
-    fn test_shard_snapshot() {
-        let db = create_temp_db();
-
-        // Add data to shard 2
-        db.set(&"shard_2".into(), b"key1", b"value1".to_vec())
-            .unwrap();
-        db.hset(
-            &"shard_2".into(),
-            b"hash1",
-            b"f1".as_ref(),
-            Bytes::from("v1"),
-        );
-
-        // Create snapshot
-        let snapshot = db.create_shard_snapshot(&"shard_2".into()).unwrap();
-
-        // Clear and restore
-        db.del(&"shard_2".into(), b"key1");
-        assert!(db.get(&"shard_2".into(), b"key1").is_none());
-
-        db.restore_shard_snapshot(&"shard_2".into(), &snapshot)
-            .unwrap();
-        assert_eq!(db.get(&"shard_2".into(), b"key1"), Some(b"value1".to_vec()));
 
         cleanup_db(&db);
     }

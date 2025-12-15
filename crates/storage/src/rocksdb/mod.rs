@@ -29,7 +29,6 @@
 mod hash;
 mod key_encoding;
 mod sharded_rocksdb;
-mod snapshot;
 mod string;
 
 pub use sharded_rocksdb::{ShardMetadata, ShardedRocksDB};

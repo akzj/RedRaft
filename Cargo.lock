@@ -1568,6 +1568,7 @@ dependencies = [
  "rand",
  "reqwest",
  "resp",
+ "rr-core",
  "serde",
  "serde_json",
  "serde_yaml",

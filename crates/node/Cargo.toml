@@ -20,6 +20,8 @@ raft = { path = "../raft" }
 resp = { path = "../resp" }
 # Redis store state machine
 storage = { path = "../storage" }
+# Core routing and shard management
+rr-core = { path = "../rr-core" }
 
 # Workspace dependencies
 tokio = { workspace = true }

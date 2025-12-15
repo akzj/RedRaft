@@ -46,8 +46,8 @@ impl ShardedRocksDB {
         apply_index: Option<u64>,
     ) -> Result<(), String> {
         let cf = self
-            .get_or_create_cf(shard_id)
-            .map_err(|e| format!("RocksDB SET (with index) error: {}", e))?;
+            .get_cf(shard_id)
+            .ok_or_else(|| format!("RocksDB SET (with index) error: Column Family not found for shard {}", shard_id))?;
         let db_key = string_key(key);
 
         // If apply_index is provided, check for duplicate commit
@@ -64,9 +64,6 @@ impl ShardedRocksDB {
             self.db
                 .write_opt(batch, &self.write_opts)
                 .map_err(|e| format!("RocksDB SET (with index) error: {}", e))?;
-
-            // Update in-memory cache
-            self.set_shard_apply_index(shard_id, new_index);
         } else {
             // Normal write without apply_index
             self.db
@@ -90,7 +87,8 @@ impl ShardedRocksDB {
         value: Vec<u8>,
         apply_index: Option<u64>,
     ) -> Result<bool, String> {
-        let cf = self.get_or_create_cf(shard_id)?;
+        let cf = self.get_cf(shard_id)
+            .ok_or_else(|| format!("Column Family not found for shard {}", shard_id))?;
         let db_key = string_key(key);
 
         if self.db.get_cf(cf, &db_key).ok().flatten().is_some() {
@@ -110,9 +108,6 @@ impl ShardedRocksDB {
             self.db
                 .write_opt(batch, &self.write_opts)
                 .map_err(|e| format!("RocksDB SETNX (with index) error: {}", e))?;
-
-            // Update in-memory cache
-            self.set_shard_apply_index(shard_id, new_index);
         } else {
             // Normal write without apply_index
             self.db
@@ -148,7 +143,6 @@ impl ShardedRocksDB {
 
                     if self.db.write_opt(batch, &self.write_opts).is_ok() {
                         // Update in-memory cache
-                        self.set_shard_apply_index(shard_id, new_index);
                         return true;
                     }
                 } else {
@@ -174,8 +168,8 @@ impl ShardedRocksDB {
         apply_index: Option<u64>,
     ) -> StoreResult<i64> {
         let cf = self
-            .get_or_create_cf(shard_id)
-            .map_err(|e| StoreError::Internal(e))?;
+            .get_cf(shard_id)
+            .ok_or_else(|| StoreError::Internal(format!("Column Family not found for shard {}", shard_id)))?;
         let db_key = string_key(key);
 
         let current = match self.db.get_cf(cf, &db_key) {
@@ -209,9 +203,6 @@ impl ShardedRocksDB {
             self.db
                 .write_opt(batch, &self.write_opts)
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
-
-            // Update in-memory cache
-            self.set_shard_apply_index(shard_id, new_index);
         } else {
             // Normal write without apply_index
             self.db
@@ -240,7 +231,7 @@ impl ShardedRocksDB {
         value: &[u8],
         apply_index: Option<u64>,
     ) -> usize {
-        if let Ok(cf) = self.get_or_create_cf(shard_id) {
+        if let Some(cf) = self.get_cf(shard_id) {
             let db_key = string_key(key);
             let new_value = match self.db.get_cf(cf, &db_key) {
                 Ok(Some(mut existing)) => {
@@ -266,8 +257,6 @@ impl ShardedRocksDB {
                 self.add_apply_index_to_batch(&mut batch, cf, new_index);
 
                 if self.db.write_opt(batch, &self.write_opts).is_ok() {
-                    // Update in-memory cache
-                    self.set_shard_apply_index(shard_id, new_index);
                     return len;
                 }
             } else {

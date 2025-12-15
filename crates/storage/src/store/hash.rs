@@ -7,10 +7,8 @@ use bytes::Bytes;
 impl HashStore for HybridStore {
     fn hget(&self, key: &[u8], field: &[u8]) -> StoreResult<Option<Bytes>> {
         let shard_id = self
-            .rocksdb
-            .shard_for_key(key)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        let shard = self.get_create_shard(key)?;
+            .shard_for_key(key)?;
+        let shard = self.get_shard(key)?;
         let shard_guard = shard.read();
         Ok(shard_guard
             .rocksdb()
@@ -20,10 +18,8 @@ impl HashStore for HybridStore {
 
     fn hset(&self, key: &[u8], field: &[u8], value: Bytes) -> StoreResult<bool> {
         let shard_id = self
-            .rocksdb
-            .shard_for_key(key)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        let shard = self.get_create_shard(key)?;
+            .shard_for_key(key)?;
+        let shard = self.get_shard(key)?;
         let shard_guard = shard.read();
         Ok(shard_guard
             .rocksdb()
@@ -32,10 +28,8 @@ impl HashStore for HybridStore {
 
     fn hmget(&self, key: &[u8], fields: &[&[u8]]) -> StoreResult<Vec<Option<Bytes>>> {
         let shard_id = self
-            .rocksdb
-            .shard_for_key(key)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        let shard = self.get_create_shard(key)?;
+            .shard_for_key(key)?;
+        let shard = self.get_shard(key)?;
         let shard_guard = shard.read();
         Ok(fields
             .iter()
@@ -50,10 +44,8 @@ impl HashStore for HybridStore {
 
     fn hmset(&self, key: &[u8], fvs: Vec<(&[u8], Bytes)>) -> StoreResult<()> {
         let shard_id = self
-            .rocksdb
-            .shard_for_key(key)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        let shard = self.get_create_shard(key)?;
+            .shard_for_key(key)?;
+        let shard = self.get_shard(key)?;
         let shard_guard = shard.read();
         shard_guard.rocksdb().hmset(&shard_id, key, fvs);
         Ok(())
@@ -61,10 +53,8 @@ impl HashStore for HybridStore {
 
     fn hgetall(&self, key: &[u8]) -> StoreResult<Vec<(Bytes, Bytes)>> {
         let shard_id = self
-            .rocksdb
-            .shard_for_key(key)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        let shard = self.get_create_shard(key)?;
+            .shard_for_key(key)?;
+        let shard = self.get_shard(key)?;
         let shard_guard = shard.read();
         let v = shard_guard.rocksdb().hgetall(&shard_id, key);
         Ok(v.into_iter()
@@ -74,10 +64,8 @@ impl HashStore for HybridStore {
 
     fn hkeys(&self, key: &[u8]) -> StoreResult<Vec<Bytes>> {
         let shard_id = self
-            .rocksdb
-            .shard_for_key(key)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        let shard = self.get_create_shard(key)?;
+            .shard_for_key(key)?;
+        let shard = self.get_shard(key)?;
         let shard_guard = shard.read();
         let v = shard_guard.rocksdb().hkeys(&shard_id, key);
         Ok(v.into_iter().map(Bytes::from).collect())
@@ -85,10 +73,8 @@ impl HashStore for HybridStore {
 
     fn hvals(&self, key: &[u8]) -> StoreResult<Vec<Bytes>> {
         let shard_id = self
-            .rocksdb
-            .shard_for_key(key)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        let shard = self.get_create_shard(key)?;
+            .shard_for_key(key)?;
+        let shard = self.get_shard(key)?;
         let shard_guard = shard.read();
         let v = shard_guard.rocksdb().hvals(&shard_id, key);
         Ok(v.into_iter().map(Bytes::from).collect())
@@ -96,10 +82,8 @@ impl HashStore for HybridStore {
 
     fn hsetnx(&self, key: &[u8], field: &[u8], value: Bytes) -> StoreResult<bool> {
         let shard_id = self
-            .rocksdb
-            .shard_for_key(key)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        let shard = self.get_create_shard(key)?;
+            .shard_for_key(key)?;
+        let shard = self.get_shard(key)?;
         let shard_guard = shard.read();
         if shard_guard.rocksdb().hget(&shard_id, key, field).is_some() {
             return Ok(false);
@@ -109,30 +93,24 @@ impl HashStore for HybridStore {
 
     fn hdel(&self, key: &[u8], fields: &[&[u8]]) -> StoreResult<usize> {
         let shard_id = self
-            .rocksdb
-            .shard_for_key(key)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        let shard = self.get_create_shard(key)?;
+            .shard_for_key(key)?;
+        let shard = self.get_shard(key)?;
         let shard_guard = shard.read();
         Ok(shard_guard.rocksdb().hdel(&shard_id, key, fields))
     }
 
     fn hlen(&self, key: &[u8]) -> StoreResult<usize> {
         let shard_id = self
-            .rocksdb
-            .shard_for_key(key)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        let shard = self.get_create_shard(key)?;
+            .shard_for_key(key)?;
+        let shard = self.get_shard(key)?;
         let shard_guard = shard.read();
         Ok(shard_guard.rocksdb().hlen(&shard_id, key))
     }
 
     fn hincrby(&self, key: &[u8], field: &[u8], delta: i64) -> StoreResult<i64> {
         let shard_id = self
-            .rocksdb
-            .shard_for_key(key)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        let shard = self.get_create_shard(key)?;
+            .shard_for_key(key)?;
+        let shard = self.get_shard(key)?;
         let shard_guard = shard.read();
         shard_guard.rocksdb().hincrby(&shard_id, key, field, delta)
     }

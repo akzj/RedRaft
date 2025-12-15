@@ -39,7 +39,7 @@ impl ShardedRocksDB {
         value: Bytes,
         apply_index: Option<u64>,
     ) -> bool {
-        if let Ok(cf) = self.get_or_create_cf(shard_id) {
+        if let Some(cf) = self.get_cf(shard_id) {
             let db_key = hash_field_key(key, &field);
             let is_new = self.db.get_cf(cf, &db_key).ok().flatten().is_none();
 
@@ -60,8 +60,6 @@ impl ShardedRocksDB {
                 }
 
                 if self.db.write_opt(batch, &self.write_opts).is_ok() {
-                    // Update in-memory cache
-                    self.set_shard_apply_index(shard_id, new_index);
                     return is_new;
                 }
             } else {
@@ -92,7 +90,7 @@ impl ShardedRocksDB {
         fvs: Vec<(&[u8], Bytes)>,
         apply_index: Option<u64>,
     ) {
-        if let Ok(cf) = self.get_or_create_cf(shard_id) {
+        if let Some(cf) = self.get_cf(shard_id) {
             // Check apply_index first (idempotent)
             let should_skip = if let Some(new_index) = apply_index {
                 self.should_skip_apply_index(shard_id, new_index)
@@ -124,10 +122,7 @@ impl ShardedRocksDB {
             }
 
             if self.db.write_opt(batch, &self.write_opts).is_ok() {
-                if let Some(new_index) = apply_index {
-                    // Update in-memory cache
-                    self.set_shard_apply_index(shard_id, new_index);
-                }
+                // Write successful
             }
         }
     }
@@ -145,7 +140,7 @@ impl ShardedRocksDB {
         fields: &[&[u8]],
         apply_index: Option<u64>,
     ) -> usize {
-        if let Ok(cf) = self.get_or_create_cf(shard_id) {
+        if let Some(cf) = self.get_cf(shard_id) {
             // Check apply_index first (idempotent)
             let should_skip = if let Some(new_index) = apply_index {
                 self.should_skip_apply_index(shard_id, new_index)
@@ -184,10 +179,6 @@ impl ShardedRocksDB {
                 self.add_hash_field_count_to_batch(&mut batch, cf, key, -(deleted as i64));
 
                 if self.db.write_opt(batch, &self.write_opts).is_ok() {
-                    if let Some(new_index) = apply_index {
-                        // Update in-memory cache
-                        self.set_shard_apply_index(shard_id, new_index);
-                    }
                     return deleted;
                 }
             }
@@ -298,8 +289,8 @@ impl ShardedRocksDB {
         apply_index: Option<u64>,
     ) -> StoreResult<i64> {
         let cf = self
-            .get_or_create_cf(shard_id)
-            .map_err(|e| StoreError::Internal(e))?;
+            .get_cf(shard_id)
+            .ok_or_else(|| StoreError::Internal(format!("Column Family not found for shard {}", shard_id)))?;
         let db_key = hash_field_key(key, field);
 
         let (current, is_new) = match self.db.get_cf(cf, &db_key) {
@@ -337,9 +328,6 @@ impl ShardedRocksDB {
             self.db
                 .write_opt(batch, &self.write_opts)
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
-
-            // Update in-memory cache
-            self.set_shard_apply_index(shard_id, new_index);
         } else {
             // Normal write without apply_index - use batch for atomicity
             let mut batch = WriteBatch::default();

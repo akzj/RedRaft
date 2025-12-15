@@ -9,10 +9,8 @@ impl KeyStore for HybridStore {
         let mut count = 0;
         for key in keys {
             let shard_id = self
-                .rocksdb
-                .shard_for_key(key)
-                .map_err(|e| StoreError::Internal(e.to_string()))?;
-            let shard = self.get_create_shard(key)?;
+                .shard_for_key(key)?;
+            let shard = self.get_shard(key)?;
             let mut shard_guard = shard.write();
 
             // Delete from RocksDB
@@ -34,10 +32,10 @@ impl KeyStore for HybridStore {
         Ok(keys
             .iter()
             .filter(|key| {
-                let Ok(shard_id) = self.rocksdb.shard_for_key(key) else {
+                let Ok(shard_id) = self.shard_for_key(key) else {
                     return false;
                 };
-                let Ok(shard) = self.get_create_shard(key) else {
+                let Ok(shard) = self.get_shard(key) else {
                     return false;
                 };
                 let shard_guard = shard.read();
@@ -54,10 +52,8 @@ impl KeyStore for HybridStore {
 
     fn key_type(&self, key: &[u8]) -> StoreResult<Option<&'static str>> {
         let shard_id = self
-            .rocksdb
-            .shard_for_key(key)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        let shard = self.get_create_shard(key)?;
+            .shard_for_key(key)?;
+        let shard = self.get_shard(key)?;
         let shard_guard = shard.read();
 
         // Check RocksDB first

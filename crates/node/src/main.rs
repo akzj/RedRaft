@@ -135,10 +135,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         raft::network::MultiRaftNetworkOptions::default().with_node_id(config.node.node_id.clone());
     let network = Arc::new(MultiRaftNetwork::new(network_options));
 
+    // Create routing table (managed by node, can be synced with pilot in the future)
+    let routing_table = Arc::new(rr_core::routing::RoutingTable::new());
+
     // Create Redis store
     let redis_store = Arc::new(HybridStore::new(
         storage::snapshot::SnapshotConfig::default(),
         config.storage.data_dir.clone(),
+        routing_table.clone(),
     )?);
 
     // Create RedRaft node (pass config for internal use)
@@ -148,6 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         network,
         redis_store,
         config.node.shard_count,
+        routing_table,
         config.clone(),
     ));
 

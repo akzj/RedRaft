@@ -19,6 +19,7 @@ use crate::router::ShardRouter;
 use crate::snapshot_transfer::SnapshotTransferManager;
 use crate::state_machine::KVStateMachine;
 use resp::{Command, CommandType, RespValue};
+use rr_core::routing::RoutingTable;
 use storage::{traits::KeyStore, ApplyResult as StoreApplyResult, RedisStore};
 
 /// Pending request tracker
@@ -90,6 +91,9 @@ pub struct RedRaftNode {
     network: Arc<dyn Network>,
     /// Shard Router
     router: Arc<ShardRouter>,
+    /// Routing table for shard and raft group management
+    /// Managed by node, can be synced with pilot in the future
+    routing_table: Arc<RoutingTable>,
     /// Raft group state machine mapping (shard_id -> state_machine)
     state_machines: Arc<Mutex<HashMap<String, Arc<KVStateMachine>>>>,
     /// Pending request tracker
@@ -109,6 +113,7 @@ impl RedRaftNode {
         network: Arc<dyn Network>,
         redis_store: Arc<storage::store::HybridStore>,
         shard_count: usize,
+        routing_table: Arc<RoutingTable>,
         config: Config,
     ) -> Self {
         Self {
@@ -118,6 +123,7 @@ impl RedRaftNode {
             network,
             redis_store,
             router: Arc::new(ShardRouter::new(shard_count)),
+            routing_table,
             state_machines: Arc::new(Mutex::new(HashMap::new())),
             pending_requests: PendingRequests::new(),
             pilot_client: Arc::new(RwLock::new(None)),
