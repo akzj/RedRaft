@@ -273,13 +273,11 @@ async fn stream_snapshot_chunks(
             match read_chunk_from_file(&snapshot_path, current_chunk_index, &chunk_metadata).await {
                 Ok(data) => data,
                 Err(e) => {
+                    let error_msg = format!("Failed to read chunk {}: {}", current_chunk_index, e);
                     let _ = tx
-                        .send(Err(Status::internal(format!(
-                            "Failed to read chunk {}: {}",
-                            current_chunk_index, e
-                        ))))
+                        .send(Err(Status::internal(error_msg.clone())))
                         .await;
-                    return Err(e);
+                    return Err(error_msg);
                 }
             };
 

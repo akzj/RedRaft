@@ -3,6 +3,7 @@
 //! Handles pull-based snapshot transfer where Follower actively pulls snapshot data
 //! from Leader after receiving InstallSnapshotRequest.
 
+use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -286,7 +287,7 @@ pub async fn read_chunk_from_file(
     snapshot_path: &std::path::Path,
     chunk_index: u32,
     chunk_metadata: &ChunkMetadata,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>> {
     let snapshot_path = snapshot_path.to_path_buf();
     let file_offset = chunk_metadata.file_offset;
     let compressed_size = chunk_metadata.compressed_size as usize;
@@ -295,48 +296,50 @@ pub async fn read_chunk_from_file(
 
     // Use spawn_blocking to run file I/O and CPU-intensive CRC32 calculation in blocking thread pool
     let (compressed_data, calculated_crc32) = tokio::task::spawn_blocking(move || {
+        use crc32fast::Hasher as Crc32Hasher;
         use std::fs::File;
         use std::io::{Read, Seek, SeekFrom};
-        use crc32fast::Hasher as Crc32Hasher;
 
         let mut file = File::open(&snapshot_path)
-            .map_err(|e| format!("Failed to open snapshot file: {}", e))?;
+            .with_context(|| format!("Failed to open snapshot file: {:?}", snapshot_path))?;
 
         // Seek to chunk start (skip header)
         // Header format: header_len (u32) + header_bytes
         file.seek(SeekFrom::Start(file_offset))
-            .map_err(|e| format!("Failed to seek to chunk offset: {}", e))?;
+            .with_context(|| format!("Failed to seek to chunk offset: {}", file_offset))?;
 
         // Read header length
         let mut header_len_bytes = [0u8; 4];
         file.read_exact(&mut header_len_bytes)
-            .map_err(|e| format!("Failed to read header length: {}", e))?;
+            .context("Failed to read header length")?;
         let header_len = u32::from_le_bytes(header_len_bytes) as usize;
 
         // Skip header (we already have metadata)
         file.seek(SeekFrom::Current(header_len as i64))
-            .map_err(|e| format!("Failed to skip header: {}", e))?;
+            .with_context(|| format!("Failed to skip header: {} bytes", header_len))?;
 
         // Read compressed data
         let mut compressed_data = vec![0u8; compressed_size];
         file.read_exact(&mut compressed_data)
-            .map_err(|e| format!("Failed to read compressed data: {}", e))?;
+            .with_context(|| format!("Failed to read compressed data: {} bytes", compressed_size))?;
 
         // Calculate CRC32 (CPU-intensive operation)
         let mut hasher = Crc32Hasher::new();
         hasher.update(&compressed_data);
         let calculated_crc32 = hasher.finalize();
 
-        Ok::<(Vec<u8>, u32), String>((compressed_data, calculated_crc32))
+        Ok::<(Vec<u8>, u32), anyhow::Error>((compressed_data, calculated_crc32))
     })
     .await
-    .map_err(|e| format!("Failed to join file read task: {}", e))??;
+    .context("Failed to join file read task")??;
 
     // Verify CRC32 outside spawn_blocking
     if calculated_crc32 != expected_crc32 {
-        return Err(format!(
+        return Err(anyhow::anyhow!(
             "CRC32 mismatch for chunk {}: expected {}, got {}",
-            chunk_index_for_error, expected_crc32, calculated_crc32
+            chunk_index_for_error,
+            expected_crc32,
+            calculated_crc32
         ));
     }
 

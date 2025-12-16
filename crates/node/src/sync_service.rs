@@ -945,6 +945,7 @@ async fn stream_snapshot_chunks_from_source(
             match read_chunk_from_file(&snapshot_path, current_chunk_index, &chunk_metadata).await {
                 Ok(data) => data,
                 Err(e) => {
+                    let error_msg = format!("Failed to read chunk {}: {}", current_chunk_index, e);
                     let _ = tx
                         .send(Ok(PullSyncDataResponse {
                             task_id: task_id.clone(),
@@ -956,13 +957,10 @@ async fn stream_snapshot_chunks_from_source(
                             is_last_chunk: true,
                             total_size: 0,
                             checksum: vec![],
-                            error_message: format!(
-                                "Failed to read chunk {}: {}",
-                                current_chunk_index, e
-                            ),
+                            error_message: error_msg.clone(),
                         }))
                         .await;
-                    return Err(e);
+                    return Err(error_msg);
                 }
             };
 
