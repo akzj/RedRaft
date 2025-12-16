@@ -222,6 +222,7 @@ impl Default for SyncTaskManager {
 }
 
 /// Sync Service implementation
+#[derive(Clone)]
 pub struct SyncServiceImpl {
     /// Node reference
     node: Arc<RRNode>,
@@ -250,11 +251,11 @@ impl SyncServiceImpl {
     /// Uses connection pool from RRNode to reuse existing connections.
     /// If connection doesn't exist, creates a new one and adds it to the pool.
     async fn get_or_create_sync_client(
-        node: &Arc<RRNode>,
+        &self,
         node_id: &str,
     ) -> Result<SyncServiceClient<tonic::transport::Channel>, String> {
         // Get or create gRPC channel from node's connection pool
-        let channel_arc = node.get_or_create_grpc_channel(node_id).await?;
+        let channel_arc = self.node.get_or_create_grpc_channel(node_id).await?;
 
         // Clone the channel (Channel implements Clone and is cheap)
         // Create SyncService client from the cloned channel
@@ -336,7 +337,7 @@ impl SyncService for SyncServiceImpl {
 
                 // Spawn background task to pull data from PUSH side (source node)
                 let task_manager_clone = self.task_manager.clone();
-                let node_clone = self.node.clone();
+                let sync_service_impl = self.clone();
                 let task_id_clone = task_id.clone();
                 let sync_type_clone = sync_type;
                 let start_index = req.start_index;
@@ -361,11 +362,9 @@ impl SyncService for SyncServiceImpl {
                     }
 
                     // 1. Get or create SyncService client from connection pool
-                    let mut sync_client = match Self::get_or_create_sync_client(
-                        &node_clone,
-                        &source_node_id,
-                    )
-                    .await
+                    let mut sync_client = match sync_service_impl
+                        .get_or_create_sync_client(&source_node_id)
+                        .await
                     {
                         Ok(client) => client,
                         Err(e) => {
