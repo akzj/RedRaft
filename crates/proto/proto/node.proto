@@ -2,4 +2,70 @@ syntax = "proto3";
 
 package node;
 
+// ============================================================================
+// Node Service
+// ============================================================================
+// Provides node-level operations and status queries
 
+/// Node service for querying node state and operations
+service NodeService {
+  /// Get Raft state information
+  /// Returns current Raft state including role, term, log indices, etc.
+  rpc GetRaftState(GetRaftStateRequest) returns (GetRaftStateResponse);
+}
+
+/// Get Raft state request
+message GetRaftStateRequest {
+  /// Raft group ID (shard ID in multi-raft context)
+  /// If empty, returns state for all groups (if supported)
+  string raft_group_id = 1;
+}
+
+/// Get Raft state response
+message GetRaftStateResponse {
+  /// Raft group ID
+  string raft_group_id = 1;
+  /// Node ID
+  string node_id = 2;
+  /// Current role
+  Role role = 3;
+  /// Current term
+  uint64 current_term = 4;
+  /// Leader ID (if known)
+  string leader_id = 5;
+  /// Voted for node ID (in current term)
+  string voted_for = 6;
+  /// Commit index
+  uint64 commit_index = 7;
+  /// Last applied index
+  uint64 last_applied = 8;
+  /// Last log index
+  uint64 last_log_index = 9;
+  /// Last log term
+  uint64 last_log_term = 10;
+  /// Last snapshot index
+  uint64 last_snapshot_index = 11;
+  /// Last snapshot term
+  uint64 last_snapshot_term = 12;
+  /// Leader-specific state (only valid when role is Leader)
+  LeaderState leader_state = 13;
+  /// Error message (if any)
+  string error_message = 14;
+}
+
+/// Leader-specific state
+message LeaderState {
+  /// Next index for each follower (node_id -> next_index)
+  map<string, uint64> next_index = 1;
+  /// Match index for each follower (node_id -> match_index)
+  map<string, uint64> match_index = 2;
+}
+
+/// Node role
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  FOLLOWER = 1;
+  CANDIDATE = 2;
+  LEADER = 3;
+  LEARNER = 4;
+}
