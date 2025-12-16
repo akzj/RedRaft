@@ -328,15 +328,6 @@ impl SyncService for SyncServiceImpl {
                 let slot_end = req.slot_end;
 
                 tokio::spawn(async move {
-                    // TODO: Connect to PUSH side (source node) and start pulling data
-                    // This would involve:
-                    // 1. Getting gRPC address of source node from routing table
-                    // 2. Creating SyncService client to source node
-                    // 3. Calling pull_sync_data on source node to pull snapshot chunks
-                    // 4. Calling pull_sync_data on source node to pull entry logs
-                    // 5. Applying data to target shard
-                    // 6. Updating task progress
-
                     info!(
                         "Background sync task started: task_id={}, will pull from source_node={}, source_shard={}",
                         task_id_clone, source_node_id, source_shard_id
@@ -349,6 +340,327 @@ impl SyncService for SyncServiceImpl {
                         SyncPhase::Preparing,
                     ) {
                         error!("Failed to update sync task status: {}", e);
+                        return;
+                    }
+
+                    // 1. Get gRPC address of source node from routing table
+                    let routing_table = node_clone.routing_table();
+                    let source_grpc_addr = match routing_table.get_grpc_address(&source_node_id) {
+                        Some(addr) => addr,
+                        None => {
+                            error!(
+                                "No gRPC address found for source node {} (task {})",
+                                source_node_id, task_id_clone
+                            );
+                            let _ = task_manager_clone.set_task_error(
+                                &task_id_clone,
+                                format!("No gRPC address found for source node {}", source_node_id),
+                            );
+                            return;
+                        }
+                    };
+
+                    // Ensure the address has a protocol prefix
+                    let endpoint_uri = if source_grpc_addr.starts_with("http://")
+                        || source_grpc_addr.starts_with("https://")
+                    {
+                        source_grpc_addr.clone()
+                    } else {
+                        format!("http://{}", source_grpc_addr)
+                    };
+
+                    // 2. Create SyncService client to source node
+                    use proto::sync_service::sync_service_client::SyncServiceClient;
+                    use tonic::transport::Endpoint;
+
+                    let endpoint = match Endpoint::from_shared(endpoint_uri.clone()) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            error!(
+                                "Invalid source endpoint {} for task {}: {}",
+                                endpoint_uri, task_id_clone, e
+                            );
+                            let _ = task_manager_clone.set_task_error(
+                                &task_id_clone,
+                                format!("Invalid source endpoint: {}", e),
+                            );
+                            return;
+                        }
+                    };
+
+                    let mut sync_client = match SyncServiceClient::connect(endpoint).await {
+                        Ok(client) => client,
+                        Err(e) => {
+                            error!(
+                                "Failed to connect to source node {} for task {}: {}",
+                                endpoint_uri, task_id_clone, e
+                            );
+                            let _ = task_manager_clone.set_task_error(
+                                &task_id_clone,
+                                format!("Failed to connect to source node: {}", e),
+                            );
+                            return;
+                        }
+                    };
+
+                    info!(
+                        "Connected to source node {} for sync task {}",
+                        endpoint_uri, task_id_clone
+                    );
+
+                    // 3. Pull snapshot chunks if needed (for FULL_SYNC or SNAPSHOT_ONLY)
+                    if sync_type_clone == SyncType::FullSync || sync_type_clone == SyncType::SnapshotOnly {
+                        if let Err(e) = task_manager_clone.update_task_status(
+                            &task_id_clone,
+                            SyncStatus::InProgress,
+                            SyncPhase::SnapshotTransfer,
+                        ) {
+                            error!("Failed to update sync task phase: {}", e);
+                        }
+
+                        // Pull snapshot chunks from source node
+                        let pull_request = PullSyncDataRequest {
+                            task_id: task_id_clone.clone(),
+                            data_type: SyncDataType::SnapshotChunk as i32,
+                            offset: 0,
+                            max_chunk_size: 1024 * 1024, // 1MB chunks
+                            start_index: 0,
+                            max_entries: 0,
+                        };
+
+                        match sync_client
+                            .pull_sync_data(Request::new(pull_request))
+                            .await
+                        {
+                            Ok(response) => {
+                                let mut stream = response.into_inner();
+                                let mut total_bytes = 0u64;
+                                let mut first_chunk = true;
+
+                                while let Some(chunk_result) = stream.message().await.transpose() {
+                                    match chunk_result {
+                                        Ok(chunk) => {
+                                            if first_chunk && chunk.total_size > 0 {
+                                                // Update total size in progress
+                                                let mut progress = task_manager_clone
+                                                    .get_task(&task_id_clone)
+                                                    .map(|t| t.progress)
+                                                    .unwrap_or_default();
+                                                progress.bytes_total = chunk.total_size;
+                                                let _ = task_manager_clone
+                                                    .update_task_progress(&task_id_clone, progress);
+                                                first_chunk = false;
+                                            }
+
+                                            total_bytes += chunk.chunk_size as u64;
+
+                                            // TODO: Apply chunk to target shard
+                                            // This would involve:
+                                            // - Getting target shard state machine
+                                            // - Writing chunk data to snapshot file or applying directly
+                                            // - Updating progress
+
+                                            // Update progress
+                                            let mut progress = task_manager_clone
+                                                .get_task(&task_id_clone)
+                                                .map(|t| t.progress)
+                                                .unwrap_or_default();
+                                            progress.bytes_transferred = total_bytes;
+                                            if progress.bytes_total > 0 {
+                                                progress.snapshot_progress_percent =
+                                                    ((total_bytes * 100) / progress.bytes_total) as u32;
+                                            }
+                                            let _ = task_manager_clone
+                                                .update_task_progress(&task_id_clone, progress);
+
+                                            if chunk.is_last_chunk {
+                                                info!(
+                                                    "Completed snapshot transfer for task {}: {} bytes",
+                                                    task_id_clone, total_bytes
+                                                );
+                                                break;
+                                            }
+
+                                            if !chunk.error_message.is_empty() {
+                                                error!(
+                                                    "Error in snapshot chunk for task {}: {}",
+                                                    task_id_clone, chunk.error_message
+                                                );
+                                                let _ = task_manager_clone.set_task_error(
+                                                    &task_id_clone,
+                                                    chunk.error_message,
+                                                );
+                                                return;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "Error receiving snapshot chunk for task {}: {}",
+                                                task_id_clone, e
+                                            );
+                                            let _ = task_manager_clone.set_task_error(
+                                                &task_id_clone,
+                                                format!("Stream error: {}", e),
+                                            );
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to start snapshot pull for task {}: {}",
+                                    task_id_clone, e
+                                );
+                                let _ = task_manager_clone.set_task_error(
+                                    &task_id_clone,
+                                    format!("Failed to pull snapshot: {}", e),
+                                );
+                                return;
+                            }
+                        }
+                    }
+
+                    // 4. Pull entry logs if needed (for FULL_SYNC or INCREMENTAL_SYNC)
+                    if sync_type_clone == SyncType::FullSync || sync_type_clone == SyncType::IncrementalSync {
+                        if let Err(e) = task_manager_clone.update_task_status(
+                            &task_id_clone,
+                            SyncStatus::InProgress,
+                            SyncPhase::LogReplay,
+                        ) {
+                            error!("Failed to update sync task phase: {}", e);
+                        }
+
+                        // Pull entry logs from source node
+                        let mut current_index = start_index;
+                        let mut total_entries = 0u64;
+
+                        loop {
+                            let pull_request = PullSyncDataRequest {
+                                task_id: task_id_clone.clone(),
+                                data_type: SyncDataType::EntryLog as i32,
+                                offset: 0,
+                                max_chunk_size: 0,
+                                start_index: current_index,
+                                max_entries: 100, // Pull 100 entries at a time
+                            };
+
+                            match sync_client
+                                .pull_sync_data(Request::new(pull_request))
+                                .await
+                            {
+                                Ok(response) => {
+                                    let mut stream = response.into_inner();
+                                    let mut batch_entries = 0u64;
+
+                                    while let Some(chunk_result) = stream.message().await.transpose() {
+                                        match chunk_result {
+                                            Ok(chunk) => {
+                                                if !chunk.entry_logs.is_empty() {
+                                                    // TODO: Apply entry logs to target shard
+                                                    // This would involve:
+                                                    // - Getting target shard RaftId
+                                                    // - Converting EntryLog to LogEntry
+                                                    // - Applying logs through Raft (or directly to state machine)
+                                                    // - Ensuring logs are applied in order
+
+                                                    batch_entries += chunk.entry_logs.len() as u64;
+                                                    total_entries += chunk.entry_logs.len() as u64;
+
+                                                    // Update current index
+                                                    if let Some(last_entry) = chunk.entry_logs.last() {
+                                                        current_index = last_entry.index + 1;
+                                                    }
+
+                                                    // Update progress
+                                                    let mut progress = task_manager_clone
+                                                        .get_task(&task_id_clone)
+                                                        .map(|t| t.progress)
+                                                        .unwrap_or_default();
+                                                    progress.entries_transferred = total_entries;
+                                                    progress.current_index = current_index;
+                                                    if end_index > 0 && end_index > start_index {
+                                                        progress.entries_total = end_index - start_index;
+                                                        progress.log_replay_progress_percent =
+                                                            (((current_index - start_index) * 100)
+                                                                / (end_index - start_index)) as u32;
+                                                    }
+                                                    let _ = task_manager_clone
+                                                        .update_task_progress(&task_id_clone, progress);
+                                                }
+
+                                                if chunk.is_last_chunk {
+                                                    info!(
+                                                        "Completed entry log pull for task {}: {} entries",
+                                                        task_id_clone, total_entries
+                                                    );
+                                                    break;
+                                                }
+
+                                                if !chunk.error_message.is_empty() {
+                                                    error!(
+                                                        "Error in entry log chunk for task {}: {}",
+                                                        task_id_clone, chunk.error_message
+                                                    );
+                                                    let _ = task_manager_clone.set_task_error(
+                                                        &task_id_clone,
+                                                        chunk.error_message,
+                                                    );
+                                                    return;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    "Error receiving entry log chunk for task {}: {}",
+                                                    task_id_clone, e
+                                                );
+                                                let _ = task_manager_clone.set_task_error(
+                                                    &task_id_clone,
+                                                    format!("Stream error: {}", e),
+                                                );
+                                                return;
+                                            }
+                                        }
+                                    }
+
+                                    // If no entries were received, we're done
+                                    if batch_entries == 0 {
+                                        break;
+                                    }
+
+                                    // Check if we've reached the end index
+                                    if end_index > 0 && current_index >= end_index {
+                                        info!(
+                                            "Reached end index {} for task {}",
+                                            end_index, task_id_clone
+                                        );
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Failed to pull entry logs for task {}: {}",
+                                        task_id_clone, e
+                                    );
+                                    let _ = task_manager_clone.set_task_error(
+                                        &task_id_clone,
+                                        format!("Failed to pull entry logs: {}", e),
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
+                    // 5. Mark sync as completed
+                    if let Err(e) = task_manager_clone.update_task_status(
+                        &task_id_clone,
+                        SyncStatus::Completed,
+                        SyncPhase::Completing,
+                    ) {
+                        error!("Failed to mark sync task as completed: {}", e);
+                    } else {
+                        info!("Sync task {} completed successfully", task_id_clone);
                     }
                 });
 

@@ -17,14 +17,14 @@ use raft::{
 use crate::config::Config;
 use crate::snapshot_transfer::SnapshotTransferManager;
 use crate::state_machine::KVStateMachine;
-use resp::{Command, CommandType, RespValue};
-use rr_core::routing::RoutingTable;
-use storage::{traits::KeyStore, ApplyResult as StoreApplyResult, RedisStore};
 use proto::node::{
     node_service_server::NodeService, GetRaftStateRequest, GetRaftStateResponse, Role as ProtoRole,
 };
-use tonic::{Request, Response, Status};
 use raft::event::Role as RaftRole;
+use resp::{Command, CommandType, RespValue};
+use rr_core::routing::RoutingTable;
+use storage::{traits::KeyStore, ApplyResult as StoreApplyResult, RedisStore};
+use tonic::{Request, Response, Status};
 
 /// Pending request tracker
 #[derive(Clone)]
@@ -146,6 +146,11 @@ impl RRNode {
     /// Get snapshot transfer manager
     pub fn snapshot_transfer_manager(&self) -> &Arc<SnapshotTransferManager> {
         &self.snapshot_transfer_manager
+    }
+
+    /// Get routing table
+    pub fn routing_table(&self) -> &Arc<RoutingTable> {
+        &self.routing_table
     }
 
     /// Get existing Raft group
