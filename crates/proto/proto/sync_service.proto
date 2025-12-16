@@ -1,0 +1,208 @@
+syntax = "proto3";
+
+package sync_service;
+
+// ============================================================================
+// Sync Service
+// ============================================================================
+// Used for data synchronization and migration between nodes/shard.
+// Supports pull-based data transfer with snapshot chunks and entry logs.
+
+/// Sync service for data synchronization and migration
+service SyncService {
+  /// Start sync task
+  /// Notify sync service to start a synchronization task
+  rpc StartSync(StartSyncRequest) returns (StartSyncResponse);
+
+  /// Pull sync data (server streaming)
+  /// Pull data chunks (snapshot chunks or entry logs) from source
+  rpc PullSyncData(PullSyncDataRequest) returns (stream PullSyncDataResponse);
+
+  /// Get sync status
+  /// Query the status of a synchronization task
+  rpc GetSyncStatus(GetSyncStatusRequest) returns (GetSyncStatusResponse);
+}
+
+/// Start sync request
+/// Notifies sync service to start a synchronization task
+message StartSyncRequest {
+  /// Sync task ID (unique identifier for this sync operation)
+  string task_id = 1;
+  /// Source shard ID (the shard to sync from)
+  string source_shard_id = 2;
+  /// Target shard ID (the shard to sync to)
+  string target_shard_id = 3;
+  /// Source node ID (the node to sync from)
+  string source_node_id = 4;
+  /// Target node ID (the node to sync to)
+  string target_node_id = 5;
+  /// Sync type
+  SyncType sync_type = 6;
+  /// Starting Raft index (for incremental sync)
+  uint64 start_index = 7;
+  /// Ending Raft index (for incremental sync, 0 means to end)
+  uint64 end_index = 8;
+  /// Slot range to sync (optional, for shard-specific sync)
+  uint32 slot_start = 9;
+  uint32 slot_end = 10;
+}
+
+/// Start sync response
+message StartSyncResponse {
+  /// Sync task ID
+  string task_id = 1;
+  /// Success flag
+  bool success = 2;
+  /// Error message (if failed)
+  string error_message = 3;
+}
+
+/// Pull sync data request
+/// Request to pull data chunks (snapshot or entry logs) from source
+message PullSyncDataRequest {
+  /// Sync task ID
+  string task_id = 1;
+  /// Data type to pull
+  SyncDataType data_type = 2;
+  /// Starting byte offset (for snapshot chunks, 0 for first request)
+  uint64 offset = 3;
+  /// Maximum chunk size in bytes (hint for source, typically 1MB)
+  uint32 max_chunk_size = 4;
+  /// Starting Raft index (for entry logs)
+  uint64 start_index = 5;
+  /// Maximum number of entries to pull (for entry logs)
+  uint32 max_entries = 6;
+}
+
+/// Pull sync data response
+/// Streamed data chunk (snapshot chunk or entry log batch)
+message PullSyncDataResponse {
+  /// Sync task ID
+  string task_id = 1;
+  /// Data type
+  SyncDataType data_type = 2;
+  /// Chunk data (for snapshot chunks)
+  bytes chunk_data = 3;
+  /// Entry logs (for entry log batch)
+  repeated EntryLog entry_logs = 4;
+  /// Starting byte offset of this chunk (for snapshot)
+  uint64 offset = 5;
+  /// Chunk size in bytes
+  uint32 chunk_size = 6;
+  /// Whether this is the last chunk
+  bool is_last_chunk = 7;
+  /// Total data size in bytes (only in first chunk for snapshot)
+  uint64 total_size = 8;
+  /// Chunk checksum (CRC32 or SHA256)
+  bytes checksum = 9;
+  /// Error message (if failed, stream will end)
+  string error_message = 10;
+}
+
+/// Entry log
+/// Represents a single Raft log entry
+message EntryLog {
+  /// Raft index
+  uint64 index = 1;
+  /// Raft term
+  uint64 term = 2;
+  /// Command data
+  bytes command = 3;
+  /// Command type
+  string command_type = 4;
+}
+
+/// Get sync status request
+message GetSyncStatusRequest {
+  /// Sync task ID
+  string task_id = 1;
+}
+
+/// Get sync status response
+message GetSyncStatusResponse {
+  /// Sync task ID
+  string task_id = 1;
+  /// Sync status
+  SyncStatus status = 2;
+  /// Sync phase
+  SyncPhase phase = 3;
+  /// Progress information
+  SyncProgress progress = 4;
+  /// Error message (if failed)
+  string error_message = 5;
+}
+
+/// Sync type
+enum SyncType {
+  SYNC_TYPE_UNSPECIFIED = 0;
+  /// Full sync: transfer all data (snapshot + all logs)
+  FULL_SYNC = 1;
+  /// Incremental sync: transfer only logs from start_index
+  INCREMENTAL_SYNC = 2;
+  /// Snapshot only: transfer only snapshot data
+  SNAPSHOT_ONLY = 3;
+}
+
+/// Sync data type
+enum SyncDataType {
+  SYNC_DATA_TYPE_UNSPECIFIED = 0;
+  /// Snapshot chunk data
+  SNAPSHOT_CHUNK = 1;
+  /// Entry log data
+  ENTRY_LOG = 2;
+}
+
+/// Sync status
+enum SyncStatus {
+  SYNC_STATUS_UNSPECIFIED = 0;
+  /// Sync task is preparing
+  SYNC_STATUS_PREPARING = 1;
+  /// Sync task is in progress
+  SYNC_STATUS_IN_PROGRESS = 2;
+  /// Sync task completed successfully
+  SYNC_STATUS_COMPLETED = 3;
+  /// Sync task failed
+  SYNC_STATUS_FAILED = 4;
+  /// Sync task was cancelled
+  SYNC_STATUS_CANCELLED = 5;
+  /// Sync task not found
+  SYNC_STATUS_NOT_FOUND = 6;
+}
+
+/// Sync phase
+enum SyncPhase {
+  SYNC_PHASE_UNSPECIFIED = 0;
+  /// Preparing phase: initializing sync task
+  SYNC_PHASE_PREPARING = 1;
+  /// Snapshot transfer phase: transferring snapshot data
+  SYNC_PHASE_SNAPSHOT_TRANSFER = 2;
+  /// Log replay phase: transferring and applying entry logs
+  SYNC_PHASE_LOG_REPLAY = 3;
+  /// Completing phase: finalizing sync
+  SYNC_PHASE_COMPLETING = 4;
+}
+
+/// Sync progress information
+message SyncProgress {
+  /// Current phase
+  SyncPhase current_phase = 1;
+  /// Snapshot transfer progress (0-100)
+  uint32 snapshot_progress_percent = 2;
+  /// Log replay progress (0-100)
+  uint32 log_replay_progress_percent = 3;
+  /// Total bytes transferred
+  uint64 bytes_transferred = 4;
+  /// Total bytes expected
+  uint64 bytes_total = 5;
+  /// Number of entry logs transferred
+  uint64 entries_transferred = 6;
+  /// Total number of entry logs
+  uint64 entries_total = 7;
+  /// Current Raft index being synced
+  uint64 current_index = 8;
+  /// Target Raft index to reach
+  uint64 target_index = 9;
+  /// Estimated time remaining (seconds)
+  uint64 estimated_seconds_remaining = 10;
+}
+

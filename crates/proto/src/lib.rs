@@ -18,6 +18,10 @@ pub mod split_service {
     tonic::include_proto!("split_service");
 }
 
+pub mod sync_service {
+    tonic::include_proto!("sync_service");
+}
+
 // Re-export commonly used types for convenience
 pub use node::*;
 
