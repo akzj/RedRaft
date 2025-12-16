@@ -261,8 +261,8 @@ impl SyncService for SyncServiceImpl {
         let task_id = req.task_id.clone();
 
         info!(
-            "StartSync request: task_id={}, source_shard={}, target_shard={}, sync_type={:?}",
-            task_id, req.source_shard_id, req.target_shard_id, req.sync_type
+            "StartSync request (PULL side): task_id={}, source_shard={}, target_shard={}, sync_type={:?}, source_node={}, target_node={}",
+            task_id, req.source_shard_id, req.target_shard_id, req.sync_type, req.source_node_id, req.target_node_id
         );
 
         // Validate request
@@ -276,14 +276,15 @@ impl SyncService for SyncServiceImpl {
             return Err(Status::invalid_argument("target_shard_id is required"));
         }
 
-        // Check if source shard exists
-        let source_shard_exists = self.node.get_raft_group(&req.source_shard_id).is_some();
+        // This is called on PULL side (target node)
+        // Check if target shard exists (we are the target)
+        let target_shard_exists = self.node.get_raft_group(&req.target_shard_id).is_some();
 
-        if !source_shard_exists {
+        if !target_shard_exists {
             return Ok(Response::new(StartSyncResponse {
                 task_id: task_id.clone(),
                 success: false,
-                error_message: format!("Source shard {} not found", req.source_shard_id),
+                error_message: format!("Target shard {} not found on this node", req.target_shard_id),
             }));
         }
 
@@ -295,13 +296,18 @@ impl SyncService for SyncServiceImpl {
             _ => SyncType::Unspecified,
         };
 
-        // Create sync task
+        // Create sync task on PULL side (target node)
+        let source_shard_id = req.source_shard_id.clone();
+        let target_shard_id = req.target_shard_id.clone();
+        let source_node_id = req.source_node_id.clone();
+        let target_node_id = req.target_node_id.clone();
+        
         match self.task_manager.create_task(
             task_id.clone(),
-            req.source_shard_id,
-            req.target_shard_id,
-            req.source_node_id,
-            req.target_node_id,
+            source_shard_id.clone(),
+            target_shard_id.clone(),
+            source_node_id.clone(),
+            target_node_id.clone(),
             sync_type,
             req.start_index,
             req.end_index,
@@ -309,12 +315,42 @@ impl SyncService for SyncServiceImpl {
             req.slot_end,
         ) {
             Ok(()) => {
-                info!("Created sync task: {}", task_id);
-                // TODO: Start actual sync operation in background
-                // This would involve:
-                // 1. Creating snapshot if needed (for FULL_SYNC or SNAPSHOT_ONLY)
-                // 2. Preparing entry log streaming (for FULL_SYNC or INCREMENTAL_SYNC)
-                // 3. Updating progress as data is transferred
+                info!("Created sync task on PULL side: {}", task_id);
+                
+                // Spawn background task to pull data from PUSH side (source node)
+                let task_manager_clone = self.task_manager.clone();
+                let node_clone = self.node.clone();
+                let task_id_clone = task_id.clone();
+                let sync_type_clone = sync_type;
+                let start_index = req.start_index;
+                let end_index = req.end_index;
+                let slot_start = req.slot_start;
+                let slot_end = req.slot_end;
+
+                tokio::spawn(async move {
+                    // TODO: Connect to PUSH side (source node) and start pulling data
+                    // This would involve:
+                    // 1. Getting gRPC address of source node from routing table
+                    // 2. Creating SyncService client to source node
+                    // 3. Calling pull_sync_data on source node to pull snapshot chunks
+                    // 4. Calling pull_sync_data on source node to pull entry logs
+                    // 5. Applying data to target shard
+                    // 6. Updating task progress
+
+                    info!(
+                        "Background sync task started: task_id={}, will pull from source_node={}, source_shard={}",
+                        task_id_clone, source_node_id, source_shard_id
+                    );
+
+                    // Update task status to IN_PROGRESS
+                    if let Err(e) = task_manager_clone.update_task_status(
+                        &task_id_clone,
+                        SyncStatus::InProgress,
+                        SyncPhase::Preparing,
+                    ) {
+                        error!("Failed to update sync task status: {}", e);
+                    }
+                });
 
                 Ok(Response::new(StartSyncResponse {
                     task_id,
@@ -349,23 +385,9 @@ impl SyncService for SyncServiceImpl {
             return Err(Status::invalid_argument("task_id is required"));
         }
 
-        // Get sync task
-        let task = self
-            .task_manager
-            .get_task(&task_id)
-            .ok_or_else(|| Status::not_found(format!("Sync task {} not found", task_id)))?;
-
-        // Check if task is in valid state
-        if task.status == SyncStatus::Failed as i32 {
-            return Err(Status::failed_precondition(format!(
-                "Sync task {} has failed: {}",
-                task_id, task.error_message
-            )));
-        }
-
-        if task.status == SyncStatus::Cancelled as i32 {
-            return Err(Status::cancelled(format!("Sync task {} was cancelled", task_id)));
-        }
+        // This is called on PUSH side (source node)
+        // PULL side (target node) requests data from us
+        // We don't need to have the task locally, as we are the data source
 
         // Create channel for streaming responses
         let (tx, rx) = tokio::sync::mpsc::channel(16);
@@ -379,18 +401,15 @@ impl SyncService for SyncServiceImpl {
             }
         };
 
-        // Spawn task to stream data
-        let task_manager_clone = self.task_manager.clone();
+        // Spawn task to stream data from PUSH side
         let snapshot_transfer_manager_clone = self.snapshot_transfer_manager.clone();
         let node_clone = self.node.clone();
-        let task_clone = task.clone();
         tokio::spawn(async move {
             let result = match data_type {
                 SyncDataType::SnapshotChunk => {
-                    stream_snapshot_chunks(
-                        task_manager_clone,
+                    stream_snapshot_chunks_from_source(
                         snapshot_transfer_manager_clone,
-                        task_clone,
+                        node_clone,
                         task_id.clone(),
                         req.offset,
                         req.max_chunk_size,
@@ -399,10 +418,8 @@ impl SyncService for SyncServiceImpl {
                     .await
                 }
                 SyncDataType::EntryLog => {
-                    stream_entry_logs(
-                        task_manager_clone,
+                    stream_entry_logs_from_source(
                         node_clone,
-                        task_clone,
                         task_id.clone(),
                         req.start_index,
                         req.max_entries,
@@ -435,6 +452,8 @@ impl SyncService for SyncServiceImpl {
             return Err(Status::invalid_argument("task_id is required"));
         }
 
+        // This is called on PULL side (target node) by PUSH side (source node)
+        // PUSH side periodically queries status to monitor sync progress
         match self.task_manager.get_task(&task_id) {
             Some(task) => {
                 // TODO: Update progress from actual sync operation state
@@ -442,6 +461,7 @@ impl SyncService for SyncServiceImpl {
                 // - Snapshot transfer progress
                 // - Entry log transfer progress
                 // - Current Raft indices
+                // - Bytes/entries transferred
 
                 Ok(Response::new(GetSyncStatusResponse {
                     task_id: task.task_id.clone(),
@@ -465,26 +485,26 @@ impl SyncService for SyncServiceImpl {
     }
 }
 
-/// Stream snapshot chunks for sync task
+/// Stream snapshot chunks from PUSH side (source node)
 #[allow(unused_variables)]
-async fn stream_snapshot_chunks(
-    task_manager: Arc<SyncTaskManager>,
+async fn stream_snapshot_chunks_from_source(
     snapshot_transfer_manager: Arc<SnapshotTransferManager>,
-    task: SyncTask,
+    node: Arc<RRNode>,
     task_id: String,
     offset: u64,
     max_chunk_size: u32,
     tx: tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
 ) -> Result<(), String> {
-    // TODO: Implement snapshot chunk streaming
+    // TODO: Implement snapshot chunk streaming from source
     // This would:
-    // 1. Create or get snapshot for the source shard
-    // 2. Read snapshot file in chunks
-    // 3. Send chunks via channel
-    // 4. Update task progress
+    // 1. Extract source shard ID from task_id or get from context
+    // 2. Create or get snapshot for the source shard
+    // 3. Read snapshot file in chunks
+    // 4. Send chunks via channel
+    // 5. Update progress (if we track it on PUSH side)
 
     warn!(
-        "Snapshot chunk streaming not yet implemented for sync task {}",
+        "Snapshot chunk streaming from source not yet implemented for sync task {}",
         task_id
     );
 
@@ -500,61 +520,40 @@ async fn stream_snapshot_chunks(
             is_last_chunk: true,
             total_size: 0,
             checksum: vec![],
-            error_message: "Snapshot chunk streaming not yet implemented".to_string(),
+            error_message: "Snapshot chunk streaming from source not yet implemented".to_string(),
         }))
         .await;
 
     Ok(())
 }
 
-/// Stream entry logs for sync task
+/// Stream entry logs from PUSH side (source node)
 #[allow(unused_variables)]
-async fn stream_entry_logs(
-    task_manager: Arc<SyncTaskManager>,
+async fn stream_entry_logs_from_source(
     node: Arc<RRNode>,
-    task: SyncTask,
     task_id: String,
     start_index: u64,
     max_entries: u32,
     tx: tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
 ) -> Result<(), String> {
-    // TODO: Implement entry log streaming
+    // TODO: Implement entry log streaming from source
     // This would:
-    // 1. Get RaftId for source shard
-    // 2. Read log entries from storage starting from start_index
-    // 3. Convert LogEntry to EntryLog proto messages
-    // 4. Send entry logs in batches via channel
-    // 5. Update task progress
+    // 1. Extract source shard ID from task_id or get from context
+    // 2. Get RaftId for source shard
+    // 3. Read log entries from storage starting from start_index
+    // 4. Convert LogEntry to EntryLog proto messages
+    // 5. Send entry logs in batches via channel
+    // 6. Update progress (if we track it on PUSH side)
 
     warn!(
-        "Entry log streaming not yet implemented for sync task {}",
+        "Entry log streaming from source not yet implemented for sync task {}",
         task_id
     );
 
-    // Get RaftId for source shard
-    let raft_id = match node.get_raft_group(&task.source_shard_id) {
-        Some(id) => id,
-        None => {
-            let _ = tx
-                .send(Ok(PullSyncDataResponse {
-                    task_id: task_id.clone(),
-                    data_type: SyncDataType::EntryLog as i32,
-                    chunk_data: vec![],
-                    entry_logs: vec![],
-                    offset: 0,
-                    chunk_size: 0,
-                    is_last_chunk: true,
-                    total_size: 0,
-                    checksum: vec![],
-                    error_message: format!("Source shard {} not found", task.source_shard_id),
-                }))
-                .await;
-            return Ok(());
-        }
-    };
-
     // TODO: Read log entries from storage
     // Example:
+    // let source_shard_id = extract_from_task_id(&task_id);
+    // let raft_id = node.get_raft_group(&source_shard_id)?;
     // let storage = node.storage(); // Need to expose storage
     // let entries = storage.get_log_entries(&raft_id, start_index, max_entries).await?;
     // Convert to EntryLog and send
@@ -571,7 +570,7 @@ async fn stream_entry_logs(
             is_last_chunk: true,
             total_size: 0,
             checksum: vec![],
-            error_message: "Entry log streaming not yet implemented".to_string(),
+            error_message: "Entry log streaming from source not yet implemented".to_string(),
         }))
         .await;
 
