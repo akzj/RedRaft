@@ -422,21 +422,22 @@ impl SplitServiceImpl {
             .get_raft_group(source_shard_id)
             .ok_or_else(|| format!("Source shard {} not found", source_shard_id))?;
 
-        // Get source state machine
-        let state_machines = node.state_machines.lock();
-        let source_state_machine = state_machines
-            .get(source_shard_id)
-            .ok_or_else(|| format!("Source state machine {} not found", source_shard_id))?;
+        // Get source state machine and store
+        let store = {
+            let state_machines = node.state_machines.lock();
+            let source_state_machine = state_machines
+                .get(source_shard_id)
+                .ok_or_else(|| format!("Source state machine {} not found", source_shard_id))?;
+            source_state_machine.store().clone()
+        };
 
         // Create snapshot with slot range filter
         // This uses the new key_range parameter we added
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
 
-        // Create snapshot in blocking context
-        let store = source_state_machine.store().clone();
+        // Create snapshot
         let shard_id_str = source_shard_id.to_string();
         let key_range = Some((slot_start, slot_end));
-        drop(state_machines); // Release lock before blocking operation
 
         use storage::SnapshotStore;
         store
