@@ -141,10 +141,10 @@ impl ShardedRocksDB {
     }
 
     /// Get apply_index from RocksDB (not from cache)
-    fn get_apply_index_from_db(&self, shard_id: &ShardId) -> Result<Option<u64>, String> {
+    fn get_apply_index_from_db(&self, shard_id: &ShardId) -> Result<Option<u64>> {
         let cf = self
             .get_cf(shard_id)
-            .ok_or_else(|| format!("Shard {} not found", shard_id))?;
+            .ok_or_else(|| anyhow::anyhow!("Shard {} not found", shard_id))?;
         let index_key = apply_index_key();
 
         match self.db.get_cf(cf, &index_key) {
@@ -160,7 +160,7 @@ impl ShardedRocksDB {
                 }
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(format!("Failed to read apply_index: {}", e)),
+            Err(e) => Err(anyhow::anyhow!("Failed to read apply_index: {}", e)),
         }
     }
 
@@ -169,7 +169,7 @@ impl ShardedRocksDB {
         &self,
         shard_id: &ShardId,
         new_index: u64,
-    ) -> Result<bool, String> {
+    ) -> Result<bool> {
         let current_index = self.get_apply_index_from_db(shard_id)?;
         if let Some(current) = current_index {
             if new_index <= current {
@@ -191,10 +191,10 @@ impl ShardedRocksDB {
     }
 
     /// Atomically update apply_index in RocksDB (without data write)
-    pub fn update_apply_index(&self, shard_id: &ShardId, apply_index: u64) -> Result<(), String> {
+    pub fn update_apply_index(&self, shard_id: &ShardId, apply_index: u64) -> Result<()> {
         let cf = self
             .get_cf(shard_id)
-            .ok_or_else(|| format!("Column Family not found for shard {}", shard_id))?;
+            .ok_or_else(|| anyhow::anyhow!("Column Family not found for shard {}", shard_id))?;
         let index_key = apply_index_key();
 
         // Check for duplicate commit
@@ -214,14 +214,16 @@ impl ShardedRocksDB {
                 apply_index.to_le_bytes().as_slice(),
                 &self.write_opts,
             )
-            .map_err(|e| format!("Failed to update apply_index: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to update apply_index: {}", e))?;
 
         Ok(())
     }
 
     /// Flush to disk
-    pub fn flush(&self) -> Result<(), String> {
-        self.db.flush().map_err(|e| format!("Flush error: {}", e))
+    pub fn flush(&self) -> Result<()> {
+        self.db
+            .flush()
+            .map_err(|e| anyhow::anyhow!("Flush error: {}", e))
     }
     /// Get shard metadata
     pub fn get_shard_metadata(&self, shard_id: &ShardId) -> Option<ShardMetadata> {

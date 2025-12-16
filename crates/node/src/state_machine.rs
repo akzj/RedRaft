@@ -265,7 +265,6 @@ impl KVStateMachine {
             Ok(())
         })
     }
-
 }
 
 #[async_trait]
@@ -376,7 +375,8 @@ impl StateMachine for KVStateMachine {
             );
 
             // Restore from snapshot entries in blocking context
-            let restore_result = crate::snapshot_restore::restore_snapshot_from_chunks(store, blocking_rx).await;
+            let restore_result =
+                crate::snapshot_restore::restore_snapshot_from_chunks(store, blocking_rx).await;
 
             // Wait for receive task
             let _ = receive_handle.await;
@@ -401,12 +401,13 @@ impl StateMachine for KVStateMachine {
         _config: ClusterConfig,
         _saver: Arc<dyn SnapshotStorage>,
     ) -> StorageResult<(u64, u64)> {
-        // Note: create_snapshot is now async and requires a channel
-        // This method is deprecated in favor of the new channel-based approach
-        // For now, return a placeholder - actual snapshot creation happens in load_snapshot
-        // TODO: Update this method to use the new channel-based approach or remove it
-        warn!("create_snapshot called but not implemented - use load_snapshot instead");
-        Ok((0, 0))
+        self.store.flush().await.map_err(|e| {
+            raft::StorageError::SnapshotCreationFailed(format!("Failed to flush store: {}", e))
+        })?;
+        Ok((
+            self.apply_index().load(std::sync::atomic::Ordering::SeqCst),
+            self.term().load(std::sync::atomic::Ordering::SeqCst),
+        ))
     }
 
     async fn client_response(

@@ -24,7 +24,7 @@ impl StringStore for HybridStore {
         shard_guard
             .rocksdb()
             .set(&shard_id, key, value.to_vec())
-            .map_err(|e| StoreError::Internal(e))
+            .map_err(|e| StoreError::Internal(e.to_string()))
     }
 
     fn setnx(&self, key: &[u8], value: Bytes) -> StoreResult<bool> {
@@ -38,7 +38,7 @@ impl StringStore for HybridStore {
         shard_guard
             .rocksdb()
             .set(&shard_id, key, value.to_vec())
-            .map_err(|e| StoreError::Internal(e))?;
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
         Ok(true)
     }
 
@@ -51,7 +51,7 @@ impl StringStore for HybridStore {
         shard_guard
             .rocksdb()
             .set(&shard_id, key, value.to_vec())
-            .map_err(|e| StoreError::Internal(e))
+            .map_err(|e| StoreError::Internal(e.to_string()))
     }
 
     fn incrby(&self, key: &[u8], delta: i64) -> StoreResult<i64> {

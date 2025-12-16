@@ -8,6 +8,7 @@
 
 use crate::shard::{slot_for_key, ShardId};
 use crate::snapshot::SnapshotConfig;
+use anyhow::Result;
 use resp::Command;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -129,12 +130,7 @@ impl WalWriter {
     }
 
     /// Write a WAL entry
-    pub fn write_entry(
-        &mut self,
-        apply_index: u64,
-        command: &Command,
-        key: &[u8],
-    ) -> Result<(), String> {
+    pub fn write_entry(&mut self, apply_index: u64, command: &Command, key: &[u8]) -> Result<()> {
         // Calculate shard_id from key using slot_for_key
         // For WAL, we use a simple hash-based shard calculation
         let slot = slot_for_key(key);
@@ -142,7 +138,7 @@ impl WalWriter {
 
         // Serialize command
         let command_bytes = bincode::serde::encode_to_vec(command, bincode::config::standard())
-            .map_err(|e| format!("Failed to serialize command: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to serialize command: {}", e))?;
 
         // Create entry
         let entry = WalEntry {
@@ -153,41 +149,46 @@ impl WalWriter {
 
         // Serialize entry
         let entry_bytes = bincode::serde::encode_to_vec(&entry, bincode::config::standard())
-            .map_err(|e| format!("Failed to serialize WAL entry: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to serialize WAL entry: {}", e))?;
 
         // Write entry size + entry data
         self.current_file
             .write_all(&(entry_bytes.len() as u32).to_le_bytes())
-            .map_err(|e| format!("Failed to write entry size: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to write entry size: {}", e))?;
         self.current_file
             .write_all(&entry_bytes)
-            .map_err(|e| format!("Failed to write entry data: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to write entry data: {}", e))?;
 
         self.current_file_size += 4 + entry_bytes.len() as u64;
 
         // Check if need to rotate
         if self.current_file_size >= self.config.wal_size_threshold {
-            self.rotate()?;
+            self.rotate()
+                .map_err(|e| anyhow::anyhow!("Failed to rotate WAL file: {}", e))?;
         }
 
         Ok(())
     }
 
     /// Rotate WAL file
-    fn rotate(&mut self) -> Result<(), String> {
+    fn rotate(&mut self) -> Result<()> {
         // Flush current file
         self.current_file
             .flush()
-            .map_err(|e| format!("Failed to flush WAL file: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to flush WAL file: {}", e))?;
 
         // Calculate checksum of current file
         let current_file_path = self.wal_dir.join(&self.current_file_name);
-        let checksum = self.calculate_file_checksum(&current_file_path)?;
+        let checksum = self
+            .calculate_file_checksum(&current_file_path)
+            .map_err(|e| anyhow::anyhow!("Failed to calculate file checksum: {}", e))?;
 
         // Update metadata for current file
         let file_metadata = WalFileMetadata {
             file_name: self.current_file_name.clone(),
-            shard_ranges: self.calculate_shard_ranges(&current_file_path)?,
+            shard_ranges: self
+                .calculate_shard_ranges(&current_file_path)
+                .map_err(|e| anyhow::anyhow!("Failed to calculate shard ranges: {}", e))?,
             file_size: self.current_file_size,
             checksum,
             created_at: std::time::SystemTime::now()
@@ -208,14 +209,15 @@ impl WalWriter {
                 .create(true)
                 .write(true)
                 .open(&new_file_path)
-                .map_err(|e| format!("Failed to create new WAL file: {}", e))?,
+                .map_err(|e| anyhow::anyhow!("Failed to create new WAL file: {}", e))?,
         );
 
         self.current_file_size = 0;
         self.metadata.current_file = self.current_file_name.clone();
 
         // Save metadata
-        self.save_metadata()?;
+        self.save_metadata()
+            .map_err(|e| anyhow::anyhow!("Failed to save metadata: {}", e))?;
 
         info!("Rotated WAL file to {}", self.current_file_name);
 
@@ -223,22 +225,18 @@ impl WalWriter {
     }
 
     /// Flush WAL to disk (called when Raft triggers snapshot)
-    pub fn flush(&mut self) -> Result<(), String> {
+    pub fn flush(&mut self) -> Result<()> {
         self.current_file
             .flush()
-            .map_err(|e| format!("Failed to flush WAL: {}", e))?;
-        Ok(())
+            .map_err(|e| anyhow::anyhow!("Failed to flush WAL: {}", e))
     }
 
     /// Calculate shard ranges for a WAL file
-    fn calculate_shard_ranges(
-        &self,
-        file_path: &Path,
-    ) -> Result<HashMap<ShardId, (u64, u64)>, String> {
+    fn calculate_shard_ranges(&self, file_path: &Path) -> Result<HashMap<ShardId, (u64, u64)>> {
         let mut ranges: HashMap<ShardId, (u64, u64)> = HashMap::new();
         let mut file = BufReader::new(
             File::open(file_path)
-                .map_err(|e| format!("Failed to open WAL file for reading: {}", e))?,
+                .map_err(|e| anyhow::anyhow!("Failed to open WAL file for reading: {}", e))?,
         );
 
         loop {
@@ -247,7 +245,7 @@ impl WalWriter {
             match file.read_exact(&mut size_bytes) {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(format!("Failed to read entry size: {}", e)),
+                Err(e) => return Err(anyhow::anyhow!("Failed to read entry size: {}", e)),
             }
 
             let entry_size = u32::from_le_bytes(size_bytes) as usize;
@@ -255,12 +253,12 @@ impl WalWriter {
             // Read entry data
             let mut entry_bytes = vec![0u8; entry_size];
             file.read_exact(&mut entry_bytes)
-                .map_err(|e| format!("Failed to read entry data: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to read entry data: {}", e))?;
 
             // Deserialize entry
             let entry: WalEntry =
                 bincode::serde::decode_from_slice(&entry_bytes, bincode::config::standard())
-                    .map_err(|e| format!("Failed to deserialize entry: {}", e))?
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize entry: {}", e))?
                     .0;
 
             // Update range for this shard
@@ -273,18 +271,18 @@ impl WalWriter {
     }
 
     /// Calculate file checksum (CRC32)
-    fn calculate_file_checksum(&self, file_path: &Path) -> Result<u32, String> {
+    fn calculate_file_checksum(&self, file_path: &Path) -> Result<u32> {
         use crc32fast::Hasher;
 
         let mut file = File::open(file_path)
-            .map_err(|e| format!("Failed to open file for checksum: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to open file for checksum: {}", e))?;
         let mut hasher = Hasher::new();
         let mut buffer = [0u8; 8192];
 
         loop {
             let bytes_read = file
                 .read(&mut buffer)
-                .map_err(|e| format!("Failed to read file for checksum: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to read file for checksum: {}", e))?;
             if bytes_read == 0 {
                 break;
             }
@@ -295,11 +293,11 @@ impl WalWriter {
     }
 
     /// Save metadata to file
-    pub fn save_metadata(&self) -> Result<(), String> {
+    pub fn save_metadata(&self) -> Result<()> {
         let content = serde_json::to_string_pretty(&self.metadata)
-            .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to serialize metadata: {}", e))?;
         std::fs::write(&self.metadata_path, content)
-            .map_err(|e| format!("Failed to write metadata: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to write metadata: {}", e))?;
         Ok(())
     }
 
@@ -322,7 +320,7 @@ impl WalWriter {
     ///
     /// # Returns
     /// Number of files deleted
-    pub fn cleanup_old_files(&mut self, min_apply_index: u64) -> Result<usize, String> {
+    pub fn cleanup_old_files(&mut self, min_apply_index: u64) -> Result<usize> {
         let mut deleted_count = 0;
         let mut files_to_keep = Vec::new();
 
@@ -343,7 +341,7 @@ impl WalWriter {
                 let file_path = self.wal_dir.join(&file_meta.file_name);
                 if file_path.exists() {
                     std::fs::remove_file(&file_path).map_err(|e| {
-                        format!("Failed to delete WAL file {}: {}", file_meta.file_name, e)
+                        anyhow::anyhow!("Failed to delete WAL file {}: {}", file_meta.file_name, e)
                     })?;
                     deleted_count += 1;
                     info!("Deleted old WAL file: {}", file_meta.file_name);
@@ -370,14 +368,14 @@ pub struct WalReader {
 }
 
 impl WalReader {
-    pub fn new(config: SnapshotConfig, wal_dir: PathBuf) -> Result<Self, String> {
+    pub fn new(config: SnapshotConfig, wal_dir: PathBuf) -> Result<Self> {
         let metadata_path = wal_dir.join("wal_metadata.json");
 
         let metadata = if metadata_path.exists() {
             let content = std::fs::read_to_string(&metadata_path)
-                .map_err(|e| format!("Failed to read WAL metadata: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to read WAL metadata: {}", e))?;
             serde_json::from_str(&content)
-                .map_err(|e| format!("Failed to parse WAL metadata: {}", e))?
+                .map_err(|e| anyhow::anyhow!("Failed to parse WAL metadata: {}", e))?
         } else {
             WalMetadata {
                 files: Vec::new(),
@@ -395,7 +393,7 @@ impl WalReader {
     /// Read WAL entries starting from a given apply_index
     ///
     /// Skips entries with apply_index <= last_applied_index
-    pub fn read_entries_from(&self, last_applied_index: u64) -> Result<Vec<WalEntry>, String> {
+    pub fn read_entries_from(&self, last_applied_index: u64) -> Result<Vec<WalEntry>> {
         let mut entries = Vec::new();
 
         // Read from all files in order
@@ -423,10 +421,10 @@ impl WalReader {
         &self,
         file_path: &Path,
         last_applied_index: u64,
-    ) -> Result<Vec<WalEntry>, String> {
+    ) -> Result<Vec<WalEntry>> {
         let mut entries = Vec::new();
         let mut file = BufReader::new(
-            File::open(file_path).map_err(|e| format!("Failed to open WAL file: {}", e))?,
+            File::open(file_path).map_err(|e| anyhow::anyhow!("Failed to open WAL file: {}", e))?,
         );
 
         loop {
@@ -435,7 +433,7 @@ impl WalReader {
             match file.read_exact(&mut size_bytes) {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(format!("Failed to read entry size: {}", e)),
+                Err(e) => return Err(anyhow::anyhow!("Failed to read entry size: {}", e)),
             }
 
             let entry_size = u32::from_le_bytes(size_bytes) as usize;
@@ -443,12 +441,12 @@ impl WalReader {
             // Read entry data
             let mut entry_bytes = vec![0u8; entry_size];
             file.read_exact(&mut entry_bytes)
-                .map_err(|e| format!("Failed to read entry data: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to read entry data: {}", e))?;
 
             // Deserialize entry
             let entry: WalEntry =
                 bincode::serde::decode_from_slice(&entry_bytes, bincode::config::standard())
-                    .map_err(|e| format!("Failed to deserialize entry: {}", e))?
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize entry: {}", e))?
                     .0;
 
             // Skip entries with apply_index <= last_applied_index

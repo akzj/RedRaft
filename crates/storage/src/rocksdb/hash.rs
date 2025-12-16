@@ -312,7 +312,7 @@ impl ShardedRocksDB {
         if let Some(new_index) = apply_index {
             if self
                 .should_skip_apply_index(shard_id, new_index)
-                .map_err(|e| StoreError::Internal(e))?
+                .map_err(|e| StoreError::Internal(e.to_string()))?
             {
                 return Ok(new_value); // Already applied, skip
             }

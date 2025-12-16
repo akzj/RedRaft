@@ -11,6 +11,7 @@ use crate::rocksdb::key_encoding::string_key;
 use crate::rocksdb::ShardedRocksDB;
 use crate::shard::ShardId;
 use crate::traits::{StoreError, StoreResult};
+use anyhow::Result;
 use rocksdb::WriteBatch;
 use tracing::error;
 
@@ -29,7 +30,7 @@ impl ShardedRocksDB {
     }
 
     /// SET: Set string value in specific shard
-    pub fn set(&self, shard_id: &ShardId, key: &[u8], value: Vec<u8>) -> Result<(), String> {
+    pub fn set(&self, shard_id: &ShardId, key: &[u8], value: Vec<u8>) -> Result<()> {
         self.set_with_index(shard_id, key, value, None)
     }
 
@@ -44,10 +45,10 @@ impl ShardedRocksDB {
         key: &[u8],
         value: Vec<u8>,
         apply_index: Option<u64>,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let cf = self
             .get_cf(shard_id)
-            .ok_or_else(|| format!("RocksDB SET (with index) error: Column Family not found for shard {}", shard_id))?;
+            .ok_or_else(|| anyhow::anyhow!("RocksDB SET (with index) error: Column Family not found for shard {}", shard_id))?;
         let db_key = string_key(key);
 
         // If apply_index is provided, check for duplicate commit
@@ -63,19 +64,19 @@ impl ShardedRocksDB {
 
             self.db
                 .write_opt(batch, &self.write_opts)
-                .map_err(|e| format!("RocksDB SET (with index) error: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("RocksDB SET (with index) error: {}", e))?;
         } else {
             // Normal write without apply_index
             self.db
                 .put_cf_opt(cf, &db_key, &value, &self.write_opts)
-                .map_err(|e| format!("RocksDB SET error: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("RocksDB SET error: {}", e))?;
         }
 
         Ok(())
     }
 
     /// SETNX: Set if not exists
-    pub fn setnx(&self, shard_id: &ShardId, key: &[u8], value: Vec<u8>) -> Result<bool, String> {
+    pub fn setnx(&self, shard_id: &ShardId, key: &[u8], value: Vec<u8>) -> Result<bool> {
         self.setnx_with_index(shard_id, key, value, None)
     }
 
@@ -86,9 +87,9 @@ impl ShardedRocksDB {
         key: &[u8],
         value: Vec<u8>,
         apply_index: Option<u64>,
-    ) -> Result<bool, String> {
+    ) -> Result<bool> {
         let cf = self.get_cf(shard_id)
-            .ok_or_else(|| format!("Column Family not found for shard {}", shard_id))?;
+            .ok_or_else(|| anyhow::anyhow!("Column Family not found for shard {}", shard_id))?;
         let db_key = string_key(key);
 
         if self.db.get_cf(cf, &db_key).ok().flatten().is_some() {
@@ -107,12 +108,12 @@ impl ShardedRocksDB {
 
             self.db
                 .write_opt(batch, &self.write_opts)
-                .map_err(|e| format!("RocksDB SETNX (with index) error: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("RocksDB SETNX (with index) error: {}", e))?;
         } else {
             // Normal write without apply_index
             self.db
                 .put_cf_opt(cf, &db_key, &value, &self.write_opts)
-                .map_err(|e| format!("RocksDB SETNX error: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("RocksDB SETNX error: {}", e))?;
         }
 
         Ok(true)
@@ -190,7 +191,7 @@ impl ShardedRocksDB {
         if let Some(new_index) = apply_index {
             if self
                 .should_skip_apply_index(shard_id, new_index)
-                .map_err(|e| StoreError::Internal(e))?
+                .map_err(|e| StoreError::Internal(e.to_string()))?
             {
                 return Ok(new_value); // Already applied, skip
             }

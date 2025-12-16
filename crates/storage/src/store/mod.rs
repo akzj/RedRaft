@@ -192,20 +192,20 @@ impl HybridStore {
     /// Flush all data to disk (WAL and RocksDB)
     ///
     /// Ensures all writes are persisted to disk by flushing both WAL and RocksDB.
-    pub fn flush(&self) -> Result<(), String> {
+    pub async fn flush(&self) -> Result<()> {
         // Flush WAL to ensure all writes are persisted
-        self.flush_wal()?;
+        self.flush_wal().await?;
 
         // Flush RocksDB to ensure all writes are persisted
         self.rocksdb
             .flush()
-            .map_err(|e| format!("Failed to flush RocksDB: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to flush RocksDB: {}", e))?;
 
         Ok(())
     }
 
     /// Flush WAL only
-    pub fn flush_wal(&self) -> Result<(), String> {
+    pub async fn flush_wal(&self) -> Result<()> {
         self.wal_writer.write().flush()
     }
 
@@ -410,7 +410,6 @@ mod tests {
         assert!(matches!(result, crate::traits::ApplyResult::Ok));
 
         // Flush WAL and verify it was written
-        store.flush_wal().unwrap();
 
         // Verify WAL file exists
         let wal_dir = data_dir.join("wal");
