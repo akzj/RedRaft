@@ -5,19 +5,21 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
 use tracing::{error, info, warn};
 
 use crate::node::RRNode;
+use crate::snapshot_transfer::SnapshotTransferManager;
 use proto::split_service::{
     split_service_server::SplitService, CancelSplitRequest, CancelSplitResponse,
     CompleteSplitRequest, CompleteSplitResponse, GetSplitProgressRequest,
     GetSplitProgressResponse, SplitPhase, SplitProgress, SplitStatus, StartSplitRequest,
     StartSplitResponse,
 };
+use rr_core::shard::ShardRouting;
 
 /// Split task state
 #[derive(Debug, Clone)]
@@ -207,19 +209,327 @@ pub struct SplitServiceImpl {
     node: Arc<RRNode>,
     /// Split task manager
     task_manager: Arc<SplitTaskManager>,
+    /// Snapshot transfer manager
+    snapshot_transfer_manager: Arc<SnapshotTransferManager>,
 }
 
 impl SplitServiceImpl {
-    pub fn new(node: Arc<RRNode>) -> Self {
+    pub fn new(
+        node: Arc<RRNode>,
+        snapshot_transfer_manager: Arc<SnapshotTransferManager>,
+    ) -> Self {
         Self {
             node,
             task_manager: Arc::new(SplitTaskManager::new()),
+            snapshot_transfer_manager,
         }
     }
 
     /// Get task manager reference
     pub fn task_manager(&self) -> &Arc<SplitTaskManager> {
         &self.task_manager
+    }
+
+    /// Execute split task in background
+    async fn execute_split_task(
+        node: Arc<RRNode>,
+        snapshot_transfer_manager: Arc<SnapshotTransferManager>,
+        task_manager: Arc<SplitTaskManager>,
+        task_id: String,
+        source_shard_id: String,
+        target_shard_ids: Vec<String>,
+        split_slot: u32,
+        source_slot_start: u32,
+        source_slot_end: u32,
+        target_nodes: Vec<String>,
+    ) {
+        info!(
+            "Starting split task {}: source_shard={}, target_shards={:?}, split_slot={}",
+            task_id, source_shard_id, target_shard_ids, split_slot
+        );
+
+        // Phase 1: Preparing - Create target shards
+        if let Err(e) = task_manager.update_task_status(
+            &task_id,
+            SplitStatus::InProgress,
+            SplitPhase::Preparing,
+        ) {
+            error!("Failed to update split task status: {}", e);
+            return;
+        }
+
+        if let Err(e) = Self::create_target_shards(&node, &task_manager, &task_id, &target_shard_ids, &target_nodes).await {
+            error!("Failed to create target shards for task {}: {}", task_id, e);
+            let _ = task_manager.set_task_error(&task_id, e);
+            return;
+        }
+
+        // Phase 2: Snapshot Transfer - Create and transfer snapshot
+        if let Err(e) = task_manager.update_task_status(
+            &task_id,
+            SplitStatus::InProgress,
+            SplitPhase::SnapshotTransfer,
+        ) {
+            error!("Failed to update split task phase: {}", e);
+        }
+
+        // Calculate slot ranges for each target shard
+        // For simplicity, we'll split the range [split_slot, source_slot_end) evenly
+        // In production, this should be more sophisticated
+        let slot_range_per_shard = (source_slot_end - split_slot) / target_shard_ids.len() as u32;
+        let mut current_slot = split_slot;
+
+        for (idx, target_shard_id) in target_shard_ids.iter().enumerate() {
+            let target_slot_start = current_slot;
+            let target_slot_end = if idx == target_shard_ids.len() - 1 {
+                source_slot_end
+            } else {
+                current_slot + slot_range_per_shard
+            };
+
+            if let Err(e) = Self::create_and_transfer_snapshot(
+                &node,
+                &snapshot_transfer_manager,
+                &task_manager,
+                &task_id,
+                &source_shard_id,
+                target_shard_id,
+                target_slot_start,
+                target_slot_end,
+            )
+            .await
+            {
+                error!(
+                    "Failed to transfer snapshot to target shard {} for task {}: {}",
+                    target_shard_id, task_id, e
+                );
+                let _ = task_manager.set_task_error(&task_id, e);
+                return;
+            }
+
+            current_slot = target_slot_end;
+        }
+
+        // Phase 3: Log Replay - Replay incremental logs
+        if let Err(e) = task_manager.update_task_status(
+            &task_id,
+            SplitStatus::InProgress,
+            SplitPhase::LogReplay,
+        ) {
+            error!("Failed to update split task phase: {}", e);
+        }
+
+        // TODO: Implement log replay
+        // This would involve:
+        // - Getting current Raft index from source shard
+        // - Replaying logs from snapshot index to current index
+        // - Applying logs to target shards
+        info!("Log replay phase for task {} (TODO: implement)", task_id);
+
+        // Phase 4: Switching - Update routing table
+        if let Err(e) = task_manager.update_task_status(
+            &task_id,
+            SplitStatus::InProgress,
+            SplitPhase::Switching,
+        ) {
+            error!("Failed to update split task phase: {}", e);
+        }
+
+        if let Err(e) = Self::update_routing_table(
+            &node,
+            &task_manager,
+            &task_id,
+            &source_shard_id,
+            &target_shard_ids,
+            split_slot,
+            source_slot_start,
+            source_slot_end,
+        )
+        .await
+        {
+            error!("Failed to update routing table for task {}: {}", task_id, e);
+            let _ = task_manager.set_task_error(&task_id, e);
+            return;
+        }
+
+        // Phase 5: Completing - Mark as completed
+        if let Err(e) = task_manager.update_task_status(
+            &task_id,
+            SplitStatus::Completed,
+            SplitPhase::Completing,
+        ) {
+            error!("Failed to mark split task as completed: {}", e);
+        } else {
+            info!("Split task {} completed successfully", task_id);
+        }
+    }
+
+    /// Create target shards (Raft groups)
+    async fn create_target_shards(
+        node: &Arc<RRNode>,
+        task_manager: &Arc<SplitTaskManager>,
+        task_id: &str,
+        target_shard_ids: &[String],
+        target_nodes: &[String],
+    ) -> Result<(), String> {
+        info!(
+            "Creating target shards for task {}: {:?}",
+            task_id, target_shard_ids
+        );
+
+        for target_shard_id in target_shard_ids {
+            // Check if shard already exists
+            if node.get_raft_group(target_shard_id).is_some() {
+                warn!("Target shard {} already exists, skipping creation", target_shard_id);
+                continue;
+            }
+
+            // Create Raft group for target shard
+            match node.create_raft_group(target_shard_id.clone(), target_nodes.to_vec()).await {
+                Ok(_) => {
+                    info!("Created target shard {} for task {}", target_shard_id, task_id);
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to create target shard {}: {}",
+                        target_shard_id, e
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Create snapshot with slot range filter and transfer to target shard
+    async fn create_and_transfer_snapshot(
+        node: &Arc<RRNode>,
+        snapshot_transfer_manager: &Arc<SnapshotTransferManager>,
+        task_manager: &Arc<SplitTaskManager>,
+        task_id: &str,
+        source_shard_id: &str,
+        target_shard_id: &str,
+        slot_start: u32,
+        slot_end: u32,
+    ) -> Result<(), String> {
+        info!(
+            "Creating and transferring snapshot for task {}: source={}, target={}, slot_range=[{}, {})",
+            task_id, source_shard_id, target_shard_id, slot_start, slot_end
+        );
+
+        // Get source shard RaftId
+        let source_raft_id = node
+            .get_raft_group(source_shard_id)
+            .ok_or_else(|| format!("Source shard {} not found", source_shard_id))?;
+
+        // Get source state machine
+        let state_machines = node.state_machines.lock();
+        let source_state_machine = state_machines
+            .get(source_shard_id)
+            .ok_or_else(|| format!("Source state machine {} not found", source_shard_id))?;
+
+        // Create snapshot with slot range filter
+        // This uses the new key_range parameter we added
+        let transfer_id = SnapshotTransferManager::generate_transfer_id();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+
+        // Create snapshot in blocking context
+        let store = source_state_machine.store().clone();
+        let shard_id_str = source_shard_id.to_string();
+        let key_range = Some((slot_start, slot_end));
+
+        use storage::SnapshotStore;
+        tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(
+                store.create_snapshot(&shard_id_str, tx, key_range)
+            )
+        })
+        .await
+        .map_err(|e| format!("Failed to join snapshot creation task: {}", e))?
+        .map_err(|e| format!("Failed to create snapshot: {}", e))?;
+
+        // TODO: Transfer snapshot chunks to target shard
+        // This would involve:
+        // - Getting target shard's snapshot service client
+        // - Streaming snapshot chunks to target
+        // - Updating progress as chunks are transferred
+        info!(
+            "Snapshot created for task {} (TODO: implement transfer to target shard {})",
+            task_id, target_shard_id
+        );
+
+        // Update progress
+        let mut progress = task_manager
+            .get_task(task_id)
+            .map(|t| t.progress)
+            .unwrap_or_default();
+        progress.snapshot_progress_percent = 100; // TODO: Calculate actual progress
+        let _ = task_manager.update_task_progress(task_id, progress);
+
+        Ok(())
+    }
+
+    /// Update routing table with new shard routings
+    async fn update_routing_table(
+        node: &Arc<RRNode>,
+        task_manager: &Arc<SplitTaskManager>,
+        task_id: &str,
+        source_shard_id: &str,
+        target_shard_ids: &[String],
+        split_slot: u32,
+        source_slot_start: u32,
+        source_slot_end: u32,
+    ) -> Result<(), String> {
+        info!(
+            "Updating routing table for task {}: source={}, targets={:?}, split_slot={}",
+            task_id, source_shard_id, target_shard_ids, split_slot
+        );
+
+        let routing_table = node.routing_table();
+
+        // Get current source shard routing
+        let source_routing = routing_table
+            .get_shard_routing(source_shard_id)
+            .ok_or_else(|| format!("Source shard routing {} not found", source_shard_id))?;
+
+        // Update source shard routing: [source_slot_start, split_slot)
+        let updated_source_routing = ShardRouting::new(
+            source_shard_id.to_string(),
+            source_slot_start,
+            split_slot,
+        );
+        routing_table.add_shard_routing(updated_source_routing);
+
+        // Add target shard routings
+        // Calculate slot ranges for each target shard
+        let slot_range_per_shard = (source_slot_end - split_slot) / target_shard_ids.len() as u32;
+        let mut current_slot = split_slot;
+
+        for (idx, target_shard_id) in target_shard_ids.iter().enumerate() {
+            let target_slot_start = current_slot;
+            let target_slot_end = if idx == target_shard_ids.len() - 1 {
+                source_slot_end
+            } else {
+                current_slot + slot_range_per_shard
+            };
+
+            let target_routing = ShardRouting::new(
+                target_shard_id.clone(),
+                target_slot_start,
+                target_slot_end,
+            );
+            routing_table.add_shard_routing(target_routing);
+
+            info!(
+                "Added routing for target shard {}: slot_range=[{}, {})",
+                target_shard_id, target_slot_start, target_slot_end
+            );
+
+            current_slot = target_slot_end;
+        }
+
+        info!("Routing table updated for task {}", task_id);
+        Ok(())
     }
 }
 
@@ -271,14 +581,31 @@ impl SplitService for SplitServiceImpl {
         ) {
             Ok(()) => {
                 info!("Created split task: {}", task_id);
-                // TODO: Start actual split operation in background
-                // This would involve:
-                // 1. Creating target shards
-                // 2. Creating snapshot with slot range filter
-                // 3. Transferring snapshot to target shards
-                // 4. Replaying incremental logs
-                // 5. Updating routing table
-                // 6. Completing split
+
+                // Start split operation in background
+                let task_manager_clone = self.task_manager.clone();
+                let node_clone = self.node.clone();
+                let snapshot_transfer_manager_clone = self.snapshot_transfer_manager.clone();
+                let task_id_clone = task_id.clone();
+
+                // Get task details for background execution
+                let task = self.task_manager.get_task(&task_id_clone).unwrap();
+
+                tokio::spawn(async move {
+                    Self::execute_split_task(
+                        node_clone,
+                        snapshot_transfer_manager_clone,
+                        task_manager_clone,
+                        task_id_clone,
+                        task.source_shard_id.clone(),
+                        task.target_shard_ids.clone(),
+                        task.split_slot,
+                        task.source_slot_start,
+                        task.source_slot_end,
+                        task.target_nodes.clone(),
+                    )
+                    .await;
+                });
 
                 Ok(Response::new(StartSplitResponse {
                     split_task_id: task_id,

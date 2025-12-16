@@ -97,7 +97,7 @@ pub struct RRNode {
     /// Managed by node, can be synced with pilot in the future
     routing_table: Arc<RoutingTable>,
     /// Raft group state machine mapping (shard_id -> state_machine)
-    state_machines: Arc<Mutex<HashMap<String, Arc<KVStateMachine>>>>,
+    pub state_machines: Arc<Mutex<HashMap<String, Arc<KVStateMachine>>>>,
     /// Raft state mapping (shard_id -> raft_state)
     raft_states: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<RaftState>>>>>,
     /// Pending request tracker

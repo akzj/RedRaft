@@ -125,7 +125,9 @@ impl KVStateMachine {
         from: &RaftId,
         _config: &Config,
     ) -> Result<
-        proto::snapshot_service::snapshot_service_client::SnapshotServiceClient<tonic::transport::Channel>,
+        proto::snapshot_service::snapshot_service_client::SnapshotServiceClient<
+            tonic::transport::Channel,
+        >,
         anyhow::Error,
     > {
         use proto::snapshot_service::snapshot_service_client::SnapshotServiceClient;
@@ -677,8 +679,11 @@ impl SnapshotStorage for KVStateMachine {
         // create_snapshot uses spawn_blocking internally and signals via oneshot when snapshot is ready
         // We block here to ensure snapshot object is created in synchronous context
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(self.store.create_snapshot(&shard_id_str, tx, None))
+            tokio::runtime::Handle::current().block_on(self.store.create_snapshot(
+                &shard_id_str,
+                tx,
+                None,
+            ))
         })
         .map_err(|e| {
             raft::StorageError::SnapshotCreationFailed(format!(
