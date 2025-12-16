@@ -42,7 +42,8 @@ impl SnapshotStore for HybridStore {
 
         // notify the main thread that the snapshot object is created
         // This allows load_snapshot to wait synchronously for snapshot object creation
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        // Use std::sync::mpsc instead of oneshot to allow cloning sender for panic handling
+        let (tx, rx) = std::sync::mpsc::channel();
 
         // Move key_range into closure
         let key_range = key_range;
@@ -268,7 +269,8 @@ impl SnapshotStore for HybridStore {
 
             // Always signal to unblock main thread, even on panic
             // This prevents main thread from blocking forever if thread panics
-            let _ = tx.send(());
+            // Use cloned sender that wasn't moved into the closure
+            let _ = tx_for_panic.send(());
         });
 
         // Wait for signal (blocking receive)
