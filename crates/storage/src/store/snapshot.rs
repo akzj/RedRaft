@@ -1,6 +1,5 @@
 //! Snapshot Store implementation for HybridStore
 
-use crate::rocksdb::key_encoding::key_prefix;
 use crate::store::HybridStore;
 use crate::traits::{SnapshotStore, SnapshotStoreEntry, StoreError};
 use anyhow::Result;
@@ -8,6 +7,12 @@ use async_trait::async_trait;
 use rr_core::routing::RoutingTable;
 use rr_core::shard::ShardId;
 use tracing::error;
+
+// Key prefix constants (matching rocksdb::key_encoding::key_prefix)
+// These are defined here to avoid accessing private module
+const KEY_PREFIX_APPLY_INDEX: u8 = b'@';
+const KEY_PREFIX_STRING: u8 = b's';
+const KEY_PREFIX_HASH: u8 = b'h';
 
 #[async_trait]
 impl SnapshotStore for HybridStore {
