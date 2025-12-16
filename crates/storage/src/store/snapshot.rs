@@ -1,5 +1,6 @@
 //! Snapshot Store implementation for HybridStore
 
+use crate::rocksdb::key_prefix;
 use crate::store::HybridStore;
 use crate::traits::{SnapshotStore, SnapshotStoreEntry, StoreError};
 use anyhow::Result;
@@ -7,12 +8,6 @@ use async_trait::async_trait;
 use rr_core::routing::RoutingTable;
 use rr_core::shard::ShardId;
 use tracing::error;
-
-// Key prefix constants (matching rocksdb::key_encoding::key_prefix)
-// These are defined here to avoid accessing private module
-const KEY_PREFIX_APPLY_INDEX: u8 = b'@';
-const KEY_PREFIX_STRING: u8 = b's';
-const KEY_PREFIX_HASH: u8 = b'h';
 
 #[async_trait]
 impl SnapshotStore for HybridStore {
@@ -118,13 +113,13 @@ impl SnapshotStore for HybridStore {
                     };
 
                     // Skip apply_index key (format: @:apply_index)
-                    if key.len() >= 2 && key[0] == KEY_PREFIX_APPLY_INDEX && key[1] == b':' {
+                    if key.len() >= 2 && key[0] == key_prefix::APPLY_INDEX && key[1] == b':' {
                         continue;
                     }
 
                     // Parse key to determine type
                     // String key format: s:{key}
-                    if key.len() >= 2 && key[0] == KEY_PREFIX_STRING && key[1] == b':' {
+                    if key.len() >= 2 && key[0] == key_prefix::STRING && key[1] == b':' {
                         let original_key = &key[2..];
                         // Filter by slot range if specified
                         if !key_in_range(original_key) {
@@ -134,7 +129,7 @@ impl SnapshotStore for HybridStore {
                             bytes::Bytes::copy_from_slice(original_key),
                             bytes::Bytes::copy_from_slice(&value),
                         ));
-                    } else if key.len() >= 2 && key[0] == KEY_PREFIX_HASH && key[1] == b':' {
+                    } else if key.len() >= 2 && key[0] == key_prefix::HASH && key[1] == b':' {
                         // Hash field: h:{key}:{field} -> value
                         // Find the second colon
                         let key_part = &key[2..];

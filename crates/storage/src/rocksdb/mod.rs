@@ -31,4 +31,5 @@ mod key_encoding;
 mod sharded_rocksdb;
 mod string;
 
+pub use key_encoding::key_prefix;
 pub use sharded_rocksdb::{ShardMetadata, ShardedRocksDB};
