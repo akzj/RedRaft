@@ -125,10 +125,10 @@ impl KVStateMachine {
         from: &RaftId,
         _config: &Config,
     ) -> Result<
-        proto::node::snapshot_service_client::SnapshotServiceClient<tonic::transport::Channel>,
+        proto::snapshot_service::snapshot_service_client::SnapshotServiceClient<tonic::transport::Channel>,
         anyhow::Error,
     > {
-        use proto::node::snapshot_service_client::SnapshotServiceClient;
+        use proto::snapshot_service::snapshot_service_client::SnapshotServiceClient;
         use tonic::transport::Endpoint;
 
         // Get shard_id from RaftId (shard_id == group_id in this system)
@@ -173,7 +173,7 @@ impl KVStateMachine {
 
     /// Pull snapshot chunks from gRPC stream asynchronously
     async fn pull_snapshot_chunks_async(
-        mut client: proto::node::snapshot_service_client::SnapshotServiceClient<
+        mut client: proto::snapshot_service::snapshot_service_client::SnapshotServiceClient<
             tonic::transport::Channel,
         >,
         metadata: &crate::snapshot_transfer::SnapshotMetadata,
@@ -183,7 +183,7 @@ impl KVStateMachine {
         config: &Config,
         blocking_tx: std::sync::mpsc::Sender<Result<(Vec<u8>, bool), String>>,
     ) -> tokio::task::JoinHandle<Result<(), String>> {
-        use proto::node::PullSnapshotDataRequest;
+        use proto::snapshot_service::PullSnapshotDataRequest;
         use tonic::Request;
 
         let metadata = metadata.clone();

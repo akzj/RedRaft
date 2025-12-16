@@ -13,7 +13,7 @@ use crate::snapshot_transfer::{
     read_chunk_from_file, wait_for_chunk, ChunkIndex, ChunkMetadata, SnapshotTransferManager,
     SnapshotTransferState,
 };
-use proto::node::{
+use proto::snapshot_service::{
     snapshot_service_server::SnapshotService, GetTransferProgressRequest,
     GetTransferProgressResponse, PullSnapshotDataRequest, PullSnapshotDataResponse,
 };

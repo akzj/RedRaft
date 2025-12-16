@@ -10,6 +10,10 @@ pub mod node {
     tonic::include_proto!("node");
 }
 
+pub mod snapshot_service {
+    tonic::include_proto!("snapshot_service");
+}
+
 // Re-export commonly used types for convenience
 pub use node::*;
 

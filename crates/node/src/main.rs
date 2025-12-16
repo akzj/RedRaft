@@ -174,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Create SnapshotService server
         let snapshot_service_server =
-            proto::node::snapshot_service_server::SnapshotServiceServer::new(snapshot_service);
+            proto::snapshot_service::snapshot_service_server::SnapshotServiceServer::new(snapshot_service);
 
         info!("Starting gRPC server on {}", grpc_addr);
         if let Err(e) = Server::builder()
