@@ -397,17 +397,40 @@ impl StateMachine for KVStateMachine {
 
     async fn create_snapshot(
         &self,
-        _from: &RaftId,
-        _config: ClusterConfig,
-        _saver: Arc<dyn SnapshotStorage>,
+        from: &RaftId,
+        config: ClusterConfig,
+        saver: Arc<dyn SnapshotStorage>,
     ) -> StorageResult<(u64, u64)> {
-        self.store.flush().map_err(|e| {
-            raft::StorageError::SnapshotCreationFailed(format!("Failed to flush store: {}", e))
-        })?;
-        Ok((
-            self.apply_index().load(std::sync::atomic::Ordering::SeqCst),
-            self.term().load(std::sync::atomic::Ordering::SeqCst),
-        ))
+        // Flush store in blocking thread pool to avoid blocking async runtime
+        let store = Arc::clone(&self.store);
+        tokio::task::spawn_blocking(move || store.flush())
+            .await
+            .map_err(|e| {
+                raft::StorageError::SnapshotCreationFailed(format!(
+                    "Failed to join flush task: {}",
+                    e
+                ))
+            })?
+            .map_err(|e| {
+                raft::StorageError::SnapshotCreationFailed(format!("Failed to flush store: {}", e))
+            })?;
+
+        let apply_index = self.apply_index().load(std::sync::atomic::Ordering::SeqCst);
+        let term = self.term().load(std::sync::atomic::Ordering::SeqCst);
+
+        saver
+            .save_snapshot(
+                from,
+                raft::Snapshot {
+                    config,
+                    index: apply_index,
+                    term: term,
+                    data: Vec::new(),
+                },
+            )
+            .await?;
+
+        Ok((apply_index, term))
     }
 
     async fn client_response(
