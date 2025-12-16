@@ -1,11 +1,11 @@
 //! Snapshot Store implementation for HybridStore
 
 use crate::store::HybridStore;
-use rr_core::shard::ShardId;
-use rr_core::routing::RoutingTable;
 use crate::traits::{SnapshotStore, SnapshotStoreEntry, StoreError};
 use anyhow::Result;
 use async_trait::async_trait;
+use rr_core::routing::RoutingTable;
+use rr_core::shard::ShardId;
 
 #[async_trait]
 impl SnapshotStore for HybridStore {
@@ -46,7 +46,7 @@ impl SnapshotStore for HybridStore {
         // Move key_range into closure
         let key_range = key_range;
 
-        let _ = tokio::task::spawn_blocking(move || {
+        let _handle = std::thread::spawn(move || {
             // Helper function to send error through channel
             let send_error = |err: StoreError| {
                 let _ = channel.blocking_send(SnapshotStoreEntry::Error(err));
@@ -236,8 +236,7 @@ impl SnapshotStore for HybridStore {
             let _ = channel.blocking_send(SnapshotStoreEntry::Completed);
 
             ()
-        })
-        .await;
+        });
 
         rx.blocking_recv()?;
 
@@ -274,4 +273,3 @@ impl SnapshotStore for HybridStore {
         0
     }
 }
-
