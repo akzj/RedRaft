@@ -214,72 +214,50 @@ async fn stream_snapshot_chunks(
 
     // Stream chunks starting from start_chunk_index
     let mut current_chunk_index = start_chunk_index;
-    let is_complete_local = is_complete;
+    let mut is_complete_local = is_complete;
 
     loop {
-        // Wait for chunk to be available (if still generating)
-        if !is_complete_local {
-            let wait_result = wait_for_chunk(
-                &chunk_index,
-                current_chunk_index,
-                Duration::from_millis(100), // Check every 100ms
-                Duration::from_secs(60),    // 60s timeout
-            )
-            .await;
-
-            if let Err(e) = wait_result {
-                let _ = tx
-                    .send(Err(Status::internal(format!(
-                        "Failed to wait for chunk {}: {}",
-                        current_chunk_index, e
-                    ))))
-                    .await;
-                return Err(e);
+        // Wait for chunk to be available and get its metadata
+        let chunk_metadata = match wait_for_chunk(
+            &chunk_index,
+            current_chunk_index,
+            Duration::from_millis(100), // Check every 100ms
+            Duration::from_secs(60),    // 60s timeout
+        )
+        .await
+        {
+            Ok(metadata) => {
+                // Update completion status
+                {
+                    let index = chunk_index.read();
+                    is_complete_local = index.is_complete;
+                }
+                metadata
             }
-        }
-
-        // Get chunk metadata
-        let chunk_metadata = {
-            let (meta, complete) = {
-                let index = chunk_index.read();
-                match index.get_chunk(current_chunk_index) {
-                    Some(meta) => (Some(meta.clone()), index.is_complete),
-                    None => (None, index.is_complete),
-                }
-            };
-
-            match meta {
-                Some(meta) => meta,
-                None => {
-                    // Check if generation is complete
-                    if complete {
-                        // All chunks sent
-                        break;
-                    } else {
-                        let _ = tx
-                            .send(Err(Status::internal(format!(
-                                "Chunk {} not found and generation not complete",
-                                current_chunk_index
-                            ))))
-                            .await;
-                        return Err(format!("Chunk {} not found", current_chunk_index));
-                    }
-                }
+            Err(e) => {
+                let error_msg = format!("Failed to wait for chunk {}: {}", current_chunk_index, e);
+                let _ = tx
+                    .send(Err(Status::internal(error_msg.clone())))
+                    .await;
+                return Err(error_msg);
             }
         };
 
         // Read chunk from file
-        let chunk_data =
-            match read_chunk_from_file(&snapshot_path, current_chunk_index, &chunk_metadata).await {
-                Ok(data) => data,
-                Err(e) => {
-                    let error_msg = format!("Failed to read chunk {}: {}", current_chunk_index, e);
-                    let _ = tx
-                        .send(Err(Status::internal(error_msg.clone())))
-                        .await;
-                    return Err(error_msg);
-                }
-            };
+        let chunk_data = match read_chunk_from_file(
+            &snapshot_path,
+            current_chunk_index,
+            &chunk_metadata,
+        )
+        .await
+        {
+            Ok(data) => data,
+            Err(e) => {
+                let error_msg = format!("Failed to read chunk {}: {}", current_chunk_index, e);
+                let _ = tx.send(Err(Status::internal(error_msg.clone()))).await;
+                return Err(error_msg);
+            }
+        };
 
         // Determine if this is the last chunk
         let is_last = chunk_metadata.is_last;

@@ -831,17 +831,25 @@ async fn stream_snapshot_chunks_from_source(
     let mut first_chunk = true;
 
     loop {
-        // Wait for chunk to be available (if still generating)
-        if !is_complete_local {
-            let wait_result = wait_for_chunk(
-                &chunk_index_arc,
-                current_chunk_index,
-                Duration::from_millis(100), // Check every 100ms
-                Duration::from_secs(60),    // 60s timeout per chunk
-            )
-            .await;
-
-            if let Err(e) = wait_result {
+        // Wait for chunk to be available and get its metadata
+        let chunk_metadata = match wait_for_chunk(
+            &chunk_index_arc,
+            current_chunk_index,
+            Duration::from_millis(100), // Check every 100ms
+            Duration::from_secs(60),    // 60s timeout per chunk
+        )
+        .await
+        {
+            Ok(metadata) => {
+                // Update completion status
+                {
+                    let index = chunk_index_arc.read();
+                    is_complete_local = index.is_complete;
+                }
+                metadata
+            }
+            Err(e) => {
+                let error_msg = format!("Failed to wait for chunk {}: {}", current_chunk_index, e);
                 let _ = tx
                     .send(Ok(PullSyncDataResponse {
                         task_id: task_id.clone(),
@@ -853,57 +861,10 @@ async fn stream_snapshot_chunks_from_source(
                         is_last_chunk: true,
                         total_size: 0,
                         checksum: vec![],
-                        error_message: format!(
-                            "Failed to wait for chunk {}: {}",
-                            current_chunk_index, e
-                        ),
+                        error_message: error_msg.clone(),
                     }))
                     .await;
-                return Err(e);
-            }
-        }
-
-        // Get chunk metadata
-        let chunk_metadata = {
-            let (meta, complete) = {
-                let index = chunk_index_arc.read();
-                match index.get_chunk(current_chunk_index) {
-                    Some(meta) => (Some(meta.clone()), index.is_complete),
-                    None => (None, index.is_complete),
-                }
-            };
-
-            is_complete_local = complete;
-
-            match meta {
-                Some(meta) => meta,
-                None => {
-                    // Check if generation is complete
-                    if complete {
-                        // All chunks sent
-                        info!("All chunks sent for task {}", task_id);
-                        break;
-                    } else {
-                        let _ = tx
-                            .send(Ok(PullSyncDataResponse {
-                                task_id: task_id.clone(),
-                                data_type: SyncDataType::SnapshotChunk as i32,
-                                chunk_data: vec![],
-                                entry_logs: vec![],
-                                offset: 0,
-                                chunk_size: 0,
-                                is_last_chunk: true,
-                                total_size: 0,
-                                checksum: vec![],
-                                error_message: format!(
-                                    "Chunk {} not found and generation not complete",
-                                    current_chunk_index
-                                ),
-                            }))
-                            .await;
-                        return Err(format!("Chunk {} not found", current_chunk_index));
-                    }
-                }
+                return Err(error_msg);
             }
         };
 

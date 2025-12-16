@@ -320,8 +320,9 @@ pub async fn read_chunk_from_file(
 
         // Read compressed data
         let mut compressed_data = vec![0u8; compressed_size];
-        file.read_exact(&mut compressed_data)
-            .with_context(|| format!("Failed to read compressed data: {} bytes", compressed_size))?;
+        file.read_exact(&mut compressed_data).with_context(|| {
+            format!("Failed to read compressed data: {} bytes", compressed_size)
+        })?;
 
         // Calculate CRC32 (CPU-intensive operation)
         let mut hasher = Crc32Hasher::new();
@@ -348,12 +349,13 @@ pub async fn read_chunk_from_file(
 }
 
 /// Wait for a chunk to be available (with timeout and error checking)
+/// Returns the ChunkMetadata when the chunk is available
 pub async fn wait_for_chunk(
     chunk_index: &Arc<RwLock<ChunkIndex>>,
     target_chunk_index: u32,
     check_interval: std::time::Duration,
     timeout: std::time::Duration,
-) -> Result<(), String> {
+) -> Result<ChunkMetadata> {
     use tokio::time::{sleep, Instant};
 
     let start = Instant::now();
@@ -365,27 +367,29 @@ pub async fn wait_for_chunk(
 
             // Check for errors
             if let Some(ref error) = index.error {
-                return Err(format!("Snapshot generation failed: {}", error));
+                return Err(anyhow::anyhow!("Snapshot generation failed: {}", error));
             }
 
             // Check if chunk exists
-            if index.get_chunk(target_chunk_index).is_some() {
-                return Ok(());
+            if let Some(chunk_metadata) = index.get_chunk(target_chunk_index) {
+                return Ok(chunk_metadata.clone());
             }
 
             // Check if generation is complete but chunk doesn't exist
             if index.is_complete {
-                return Err(format!(
+                return Err(anyhow::anyhow!(
                     "Chunk {} not found, but generation is complete (only {} chunks generated)",
-                    target_chunk_index, index.generated_chunks
+                    target_chunk_index,
+                    index.generated_chunks
                 ));
             }
 
             // Check timeout
             if start.elapsed() > timeout {
-                return Err(format!(
+                return Err(anyhow::anyhow!(
                     "Timeout waiting for chunk {} (waited {:?})",
-                    target_chunk_index, timeout
+                    target_chunk_index,
+                    timeout
                 ));
             }
         }
