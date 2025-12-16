@@ -99,9 +99,9 @@ impl SnapshotStore for HybridStore {
                     let (key, value) = match item {
                         Ok(kv) => kv,
                         Err(e) => {
-                            let err = StoreError::Internal(format!("RocksDB iteration error: {}", e));
-                            send_error(err.clone());
-                            return Ok::<(), StoreError>(());
+                        let err = StoreError::Internal(format!("RocksDB iteration error: {}", e));
+                        send_error(err.clone());
+                        return;
                         }
                     };
 
@@ -141,7 +141,7 @@ impl SnapshotStore for HybridStore {
                                 let err =
                                     StoreError::Internal(format!("Failed to send Hash entry: {}", e));
                                 send_error(err.clone());
-                                return Ok::<(), StoreError>(());
+                                return;
                             }
                         }
                     }
@@ -179,7 +179,7 @@ impl SnapshotStore for HybridStore {
                                         e
                                     ));
                                     send_error(err.clone());
-                                    return Ok::<(), StoreError>(());
+                                    return;
                                 }
                             }
                         }
@@ -195,7 +195,7 @@ impl SnapshotStore for HybridStore {
                                         e
                                     ));
                                     send_error(err.clone());
-                                    return Ok::<(), StoreError>(());
+                                    return;
                                 }
                             }
                         }
@@ -215,7 +215,7 @@ impl SnapshotStore for HybridStore {
                                         e
                                     ));
                                     send_error(err.clone());
-                                    return Ok::<(), StoreError>(());
+                                    return;
                                 }
                             }
                         }
@@ -228,7 +228,7 @@ impl SnapshotStore for HybridStore {
                                 let err =
                                     StoreError::Internal(format!("Failed to send Bitmap entry: {}", e));
                                 send_error(err.clone());
-                                return Ok::<(), StoreError>(());
+                                return;
                             }
                         }
                     }
@@ -237,8 +237,6 @@ impl SnapshotStore for HybridStore {
 
                 // Send completion signal
                 let _ = channel.blocking_send(SnapshotStoreEntry::Completed);
-
-                Ok::<(), StoreError>(())
             }));
 
             // Handle panic: send error and signal to unblock main thread
@@ -254,9 +252,6 @@ impl SnapshotStore for HybridStore {
                     StoreError::Internal(error_msg.clone())
                 ));
                 error!("Snapshot creation thread panicked: {}", error_msg);
-            } else if let Err(e) = result.unwrap() {
-                // Handle error from closure
-                let _ = channel.blocking_send(SnapshotStoreEntry::Error(e));
             }
 
             // Always signal to unblock main thread, even on panic
