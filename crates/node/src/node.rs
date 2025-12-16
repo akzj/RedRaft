@@ -105,6 +105,9 @@ pub struct RRNode {
 
     /// Snapshot transfer manager
     snapshot_transfer_manager: Arc<SnapshotTransferManager>,
+    /// gRPC client connection pool (node_id -> client)
+    /// Used to reuse connections across different services (SyncService, SplitService, etc.)
+    grpc_client_pool: Arc<parking_lot::RwLock<std::collections::HashMap<String, Arc<tonic::transport::Channel>>>>,
     /// Configuration
     config: Config,
 }
@@ -129,6 +132,7 @@ impl RRNode {
             raft_states: Arc::new(Mutex::new(HashMap::new())),
             pending_requests: PendingRequests::new(),
             snapshot_transfer_manager: Arc::new(SnapshotTransferManager::new()),
+            grpc_client_pool: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
             config,
         }
     }
@@ -154,10 +158,10 @@ impl RRNode {
     }
 
     /// Get gRPC endpoint URI for a node
-    /// 
+    ///
     /// Retrieves the gRPC address from routing table and ensures it has
     /// a protocol prefix (http:// or https://).
-    /// 
+    ///
     /// Returns the endpoint URI, or an error if the node is not found.
     pub fn get_node_grpc_endpoint(&self, node_id: &str) -> Result<String, String> {
         let grpc_addr = self
@@ -169,13 +173,62 @@ impl RRNode {
         // If it already has http:// or https://, use it as-is
         // Otherwise, assume http:// (for development/non-TLS environments)
         // Note: gRPC uses HTTP/2, so http:// is valid for non-TLS connections
-        let endpoint_uri = if grpc_addr.starts_with("http://") || grpc_addr.starts_with("https://") {
+        let endpoint_uri = if grpc_addr.starts_with("http://") || grpc_addr.starts_with("https://")
+        {
             grpc_addr
         } else {
             format!("http://{}", grpc_addr)
         };
 
         Ok(endpoint_uri)
+    }
+
+    /// Get or create gRPC channel for a node
+    ///
+    /// Uses connection pool to reuse existing connections.
+    /// If connection doesn't exist, creates a new one and adds it to the pool.
+    /// Returns the channel wrapped in Arc for sharing across services.
+    pub async fn get_or_create_grpc_channel(
+        &self,
+        node_id: &str,
+    ) -> Result<Arc<tonic::transport::Channel>, String> {
+        // Check if channel already exists in pool
+        {
+            let pool = self.grpc_client_pool.read();
+            if let Some(channel) = pool.get(node_id) {
+                return Ok(Arc::clone(channel));
+            }
+        }
+
+        // Channel doesn't exist, create new connection
+        let endpoint_uri = self.get_node_grpc_endpoint(node_id)
+            .map_err(|e| format!("Failed to get endpoint: {}", e))?;
+
+        use tonic::transport::Endpoint;
+        let endpoint = Endpoint::from_shared(endpoint_uri.clone())
+            .map_err(|e| format!("Invalid endpoint {}: {}", endpoint_uri, e))?;
+
+        let channel = endpoint.connect()
+            .await
+            .map_err(|e| format!("Failed to connect to node {}: {}", node_id, e))?;
+
+        let channel_arc = Arc::new(channel);
+
+        // Add to pool
+        {
+            let mut pool = self.grpc_client_pool.write();
+            // Double-check in case another thread created it while we were connecting
+            if let Some(existing) = pool.get(node_id) {
+                return Ok(Arc::clone(existing));
+            }
+            pool.insert(node_id.to_string(), Arc::clone(&channel_arc));
+        }
+
+        tracing::info!(
+            "Created new gRPC channel connection for node {}",
+            node_id
+        );
+        Ok(channel_arc)
     }
 
     /// Get existing Raft group

@@ -229,8 +229,6 @@ pub struct SyncServiceImpl {
     task_manager: Arc<SyncTaskManager>,
     /// Snapshot transfer manager (for snapshot chunk streaming)
     snapshot_transfer_manager: Arc<SnapshotTransferManager>,
-    /// gRPC client connection pool (node_id -> client)
-    client_pool: Arc<RwLock<HashMap<String, Arc<SyncServiceClient<tonic::transport::Channel>>>>>,
 }
 
 impl SyncServiceImpl {
@@ -239,7 +237,6 @@ impl SyncServiceImpl {
             node,
             task_manager: Arc::new(SyncTaskManager::new()),
             snapshot_transfer_manager,
-            client_pool: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -248,63 +245,20 @@ impl SyncServiceImpl {
         &self.task_manager
     }
 
-    /// Get or create SyncService client for a node (static helper for use in async closures)
-    ///
-    /// Uses connection pool to reuse existing connections.
-    /// If connection doesn't exist, creates a new one and adds it to the pool.
-    async fn get_or_create_sync_client_static(
-        node: &Arc<RRNode>,
-        client_pool: &Arc<RwLock<HashMap<String, Arc<SyncServiceClient<tonic::transport::Channel>>>>>,
-        node_id: &str,
-    ) -> Result<Arc<SyncServiceClient<tonic::transport::Channel>>, String> {
-        // Check if client already exists in pool
-        {
-            let pool = client_pool.read();
-            if let Some(client) = pool.get(node_id) {
-                return Ok(Arc::clone(client));
-            }
-        }
-
-        // Client doesn't exist, create new connection
-        let endpoint_uri = node.get_node_grpc_endpoint(node_id)
-            .map_err(|e| format!("Failed to get endpoint: {}", e))?;
-
-        use tonic::transport::Endpoint;
-        let endpoint = Endpoint::from_shared(endpoint_uri.clone())
-            .map_err(|e| format!("Invalid endpoint {}: {}", endpoint_uri, e))?;
-
-        let client = SyncServiceClient::connect(endpoint)
-            .await
-            .map_err(|e| format!("Failed to connect to node {}: {}", node_id, e))?;
-
-        let client_arc = Arc::new(client);
-
-        // Add to pool
-        {
-            let mut pool = client_pool.write();
-            // Double-check in case another thread created it while we were connecting
-            if let Some(existing) = pool.get(node_id) {
-                return Ok(Arc::clone(existing));
-            }
-            pool.insert(node_id.to_string(), Arc::clone(&client_arc));
-        }
-
-        info!(
-            "Created new SyncService client connection for node {}",
-            node_id
-        );
-        Ok(client_arc)
-    }
-
     /// Get or create SyncService client for a node
     ///
-    /// Uses connection pool to reuse existing connections.
+    /// Uses connection pool from RRNode to reuse existing connections.
     /// If connection doesn't exist, creates a new one and adds it to the pool.
-    pub async fn get_or_create_sync_client(
-        &self,
+    async fn get_or_create_sync_client(
+        node: &Arc<RRNode>,
         node_id: &str,
-    ) -> Result<Arc<SyncServiceClient<tonic::transport::Channel>>, String> {
-        Self::get_or_create_sync_client_static(&self.node, &self.client_pool, node_id).await
+    ) -> Result<SyncServiceClient<tonic::transport::Channel>, String> {
+        // Get or create gRPC channel from node's connection pool
+        let channel_arc = node.get_or_create_grpc_channel(node_id).await?;
+
+        // Clone the channel (Channel implements Clone and is cheap)
+        // Create SyncService client from the cloned channel
+        Ok(SyncServiceClient::new((*channel_arc).clone()))
     }
 }
 
@@ -383,7 +337,6 @@ impl SyncService for SyncServiceImpl {
                 // Spawn background task to pull data from PUSH side (source node)
                 let task_manager_clone = self.task_manager.clone();
                 let node_clone = self.node.clone();
-                let client_pool_clone = self.client_pool.clone();
                 let task_id_clone = task_id.clone();
                 let sync_type_clone = sync_type;
                 let start_index = req.start_index;
@@ -408,9 +361,8 @@ impl SyncService for SyncServiceImpl {
                     }
 
                     // 1. Get or create SyncService client from connection pool
-                    let sync_client = match Self::get_or_create_sync_client_static(
+                    let mut sync_client = match Self::get_or_create_sync_client(
                         &node_clone,
-                        &client_pool_clone,
                         &source_node_id,
                     )
                     .await
@@ -453,9 +405,7 @@ impl SyncService for SyncServiceImpl {
                             max_entries: 0,
                         };
 
-                        // Clone the client to get a mutable reference (tonic clients are Clone)
-                        let mut client = (*sync_client).clone();
-                        match client.pull_sync_data(Request::new(pull_request)).await {
+                        match sync_client.pull_sync_data(Request::new(pull_request)).await {
                             Ok(response) => {
                                 let mut stream = response.into_inner();
                                 let mut total_bytes = 0u64;
@@ -572,9 +522,7 @@ impl SyncService for SyncServiceImpl {
                                 max_entries: 100, // Pull 100 entries at a time
                             };
 
-                            // Clone the client to get a mutable reference (tonic clients are Clone)
-                        let mut client = (*sync_client).clone();
-                        match client.pull_sync_data(Request::new(pull_request)).await {
+                            match sync_client.pull_sync_data(Request::new(pull_request)).await {
                                 Ok(response) => {
                                     let mut stream = response.into_inner();
                                     let mut batch_entries = 0u64;
