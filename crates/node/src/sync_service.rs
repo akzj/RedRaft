@@ -806,8 +806,9 @@ async fn stream_snapshot_chunks_from_source(
 
     // Get transfer state (snapshot path and chunk index)
     // Note: task_id should match the transfer_id used when creating the snapshot
-    let (snapshot_path, chunk_index) = get_transfer_state_info(&snapshot_transfer_manager, &task_id)
-        .map_err(|e| format!("Failed to get transfer state for task {}: {}", task_id, e))?;
+    let (snapshot_path, chunk_index) =
+        get_transfer_state_info(&snapshot_transfer_manager, &task_id)
+            .map_err(|e| format!("Failed to get transfer state for task {}: {}", task_id, e))?;
 
     // Find the starting chunk based on offset
     // We need to wait for chunks to be generated if still generating
@@ -885,7 +886,10 @@ async fn stream_snapshot_chunks_from_source(
                         is_last_chunk: true,
                         total_size: 0,
                         checksum: vec![],
-                        error_message: format!("Failed to wait for chunk {}: {}", current_chunk_index, e),
+                        error_message: format!(
+                            "Failed to wait for chunk {}: {}",
+                            current_chunk_index, e
+                        ),
                     }))
                     .await;
                 return Err(e);
@@ -937,37 +941,36 @@ async fn stream_snapshot_chunks_from_source(
         };
 
         // Read chunk from file
-        let compressed_data = match read_chunk_from_file(&snapshot_path, current_chunk_index, &chunk_metadata) {
-            Ok(data) => data,
-            Err(e) => {
-                let _ = tx
-                    .send(Ok(PullSyncDataResponse {
-                        task_id: task_id.clone(),
-                        data_type: SyncDataType::SnapshotChunk as i32,
-                        chunk_data: vec![],
-                        entry_logs: vec![],
-                        offset: 0,
-                        chunk_size: 0,
-                        is_last_chunk: true,
-                        total_size: 0,
-                        checksum: vec![],
-                        error_message: format!("Failed to read chunk {}: {}", current_chunk_index, e),
-                    }))
-                    .await;
-                return Err(e);
-            }
-        };
-
-        // Calculate checksum (CRC32 of compressed data)
-        use crc32fast::Hasher as Crc32Hasher;
-        let mut hasher = Crc32Hasher::new();
-        hasher.update(&compressed_data);
-        let checksum = hasher.finalize().to_le_bytes().to_vec();
+        let compressed_data =
+            match read_chunk_from_file(&snapshot_path, current_chunk_index, &chunk_metadata) {
+                Ok(data) => data,
+                Err(e) => {
+                    let _ = tx
+                        .send(Ok(PullSyncDataResponse {
+                            task_id: task_id.clone(),
+                            data_type: SyncDataType::SnapshotChunk as i32,
+                            chunk_data: vec![],
+                            entry_logs: vec![],
+                            offset: 0,
+                            chunk_size: 0,
+                            is_last_chunk: true,
+                            total_size: 0,
+                            checksum: vec![],
+                            error_message: format!(
+                                "Failed to read chunk {}: {}",
+                                current_chunk_index, e
+                            ),
+                        }))
+                        .await;
+                    return Err(e);
+                }
+            };
 
         // Determine if this is the last chunk
         let is_last = chunk_metadata.is_last;
 
         // Create response
+        // Use checksum from chunk_metadata (already calculated when chunk was written)
         let response = PullSyncDataResponse {
             task_id: task_id.clone(),
             data_type: SyncDataType::SnapshotChunk as i32,
@@ -982,14 +985,17 @@ async fn stream_snapshot_chunks_from_source(
             } else {
                 0
             },
-            checksum,
+            checksum: chunk_metadata.crc32.to_le_bytes().to_vec(),
             error_message: String::new(),
         };
 
         // Send response
         if tx.send(Ok(response)).await.is_err() {
             // Receiver dropped, client disconnected
-            info!("Client disconnected during snapshot transfer for task {}", task_id);
+            info!(
+                "Client disconnected during snapshot transfer for task {}",
+                task_id
+            );
             return Ok(());
         }
 
