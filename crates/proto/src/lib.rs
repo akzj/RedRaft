@@ -14,6 +14,10 @@ pub mod snapshot_service {
     tonic::include_proto!("snapshot_service");
 }
 
+pub mod split_service {
+    tonic::include_proto!("split_service");
+}
+
 // Re-export commonly used types for convenience
 pub use node::*;
 
