@@ -1,5 +1,6 @@
 //! Snapshot Store implementation for HybridStore
 
+use crate::rocksdb::key_encoding::key_prefix;
 use crate::store::HybridStore;
 use crate::traits::{SnapshotStore, SnapshotStoreEntry, StoreError};
 use anyhow::Result;
@@ -49,13 +50,10 @@ impl SnapshotStore for HybridStore {
         let key_range = key_range;
 
         // Clone tx for use outside closure (for panic handling)
-        // Note: oneshot::Sender doesn't implement Clone, so we need to ensure
-        // tx.send() is called inside the closure in all cases, or use a different approach
-        // For now, we'll ensure tx.send() is always called inside the closure
+        let tx_for_panic = tx.clone();
         let _handle = std::thread::spawn(move || {
             // Use catch_unwind to handle panics gracefully and prevent main thread from blocking forever
             // Wrap everything in a closure that ensures tx.send() is always called
-            let mut tx_sent = false;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // Helper function to send error through channel
                 let send_error = |err: StoreError| {
@@ -275,7 +273,8 @@ impl SnapshotStore for HybridStore {
 
         // Wait for signal (blocking receive)
         // This will unblock when thread sends signal, even on panic
-        rx.recv().map_err(|e| anyhow::anyhow!("Failed to receive snapshot creation signal: {}", e))?;
+        rx.recv()
+            .map_err(|e| anyhow::anyhow!("Failed to receive snapshot creation signal: {}", e))?;
 
         Ok(())
     }
