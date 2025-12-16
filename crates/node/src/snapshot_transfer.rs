@@ -282,12 +282,11 @@ impl Default for SnapshotTransferManager {
 }
 
 /// Read a chunk from snapshot file by index
-pub fn read_chunk_from_file(
+pub async fn read_chunk_from_file(
     snapshot_path: &std::path::Path,
     chunk_index: u32,
     chunk_metadata: &ChunkMetadata,
 ) -> Result<Vec<u8>, String> {
-    use crc32fast::Hasher as Crc32Hasher;
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom};
 
@@ -314,16 +313,27 @@ pub fn read_chunk_from_file(
     file.read_exact(&mut compressed_data)
         .map_err(|e| format!("Failed to read compressed data: {}", e))?;
 
-    // Verify CRC32
-    let mut hasher = Crc32Hasher::new();
-    hasher.update(&compressed_data);
-    let calculated_crc32 = hasher.finalize();
-    if calculated_crc32 != chunk_metadata.crc32 {
-        return Err(format!(
-            "CRC32 mismatch for chunk {}: expected {}, got {}",
-            chunk_index, chunk_metadata.crc32, calculated_crc32
-        ));
-    }
+    // Verify CRC32 in blocking thread pool (CPU-intensive operation)
+    let compressed_data_clone = compressed_data.clone();
+    let expected_crc32 = chunk_metadata.crc32;
+    let chunk_index_for_error = chunk_index;
+
+    // Use spawn_blocking to run CPU-intensive CRC32 calculation in blocking thread pool
+    tokio::task::spawn_blocking(move || {
+        use crc32fast::Hasher as Crc32Hasher;
+        let mut hasher = Crc32Hasher::new();
+        hasher.update(&compressed_data_clone);
+        let calculated_crc32 = hasher.finalize();
+        if calculated_crc32 != expected_crc32 {
+            return Err(format!(
+                "CRC32 mismatch for chunk {}: expected {}, got {}",
+                chunk_index_for_error, expected_crc32, calculated_crc32
+            ));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Failed to join CRC32 calculation task: {}", e))??;
 
     // Return compressed data (no decompression needed, data is sent in compressed form)
     Ok(compressed_data)

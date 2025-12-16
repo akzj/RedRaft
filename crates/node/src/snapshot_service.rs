@@ -270,7 +270,7 @@ async fn stream_snapshot_chunks(
 
         // Read chunk from file
         let chunk_data =
-            match read_chunk_from_file(&snapshot_path, current_chunk_index, &chunk_metadata) {
+            match read_chunk_from_file(&snapshot_path, current_chunk_index, &chunk_metadata).await {
                 Ok(data) => data,
                 Err(e) => {
                     let _ = tx

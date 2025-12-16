@@ -942,7 +942,7 @@ async fn stream_snapshot_chunks_from_source(
 
         // Read chunk from file
         let compressed_data =
-            match read_chunk_from_file(&snapshot_path, current_chunk_index, &chunk_metadata) {
+            match read_chunk_from_file(&snapshot_path, current_chunk_index, &chunk_metadata).await {
                 Ok(data) => data,
                 Err(e) => {
                     let _ = tx
