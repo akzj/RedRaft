@@ -47,8 +47,14 @@ impl SnapshotStore for HybridStore {
         // Move key_range into closure
         let key_range = key_range;
 
+        // Clone tx for use outside closure (for panic handling)
+        // Note: oneshot::Sender doesn't implement Clone, so we need to ensure
+        // tx.send() is called inside the closure in all cases, or use a different approach
+        // For now, we'll ensure tx.send() is always called inside the closure
         let _handle = std::thread::spawn(move || {
             // Use catch_unwind to handle panics gracefully and prevent main thread from blocking forever
+            // Wrap everything in a closure that ensures tx.send() is always called
+            let mut tx_sent = false;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // Helper function to send error through channel
                 let send_error = |err: StoreError| {
@@ -63,7 +69,8 @@ impl SnapshotStore for HybridStore {
                 let cf_handler = match db.cf_handle(&cf_name) {
                     Some(handler) => handler,
                     None => {
-                        let err = StoreError::Internal(format!("Column Family {} not found", cf_name));
+                        let err =
+                            StoreError::Internal(format!("Column Family {} not found", cf_name));
                         send_error(err);
                         // Signal error to unblock waiting thread (must send before return)
                         let _ = tx.send(());
@@ -99,9 +106,10 @@ impl SnapshotStore for HybridStore {
                     let (key, value) = match item {
                         Ok(kv) => kv,
                         Err(e) => {
-                        let err = StoreError::Internal(format!("RocksDB iteration error: {}", e));
-                        send_error(err.clone());
-                        return;
+                            let err =
+                                StoreError::Internal(format!("RocksDB iteration error: {}", e));
+                            send_error(err.clone());
+                            return;
                         }
                     };
 
@@ -138,8 +146,10 @@ impl SnapshotStore for HybridStore {
                                 bytes::Bytes::copy_from_slice(field),
                                 bytes::Bytes::copy_from_slice(&value),
                             )) {
-                                let err =
-                                    StoreError::Internal(format!("Failed to send Hash entry: {}", e));
+                                let err = StoreError::Internal(format!(
+                                    "Failed to send Hash entry: {}",
+                                    e
+                                ));
                                 send_error(err.clone());
                                 return;
                             }
@@ -225,8 +235,10 @@ impl SnapshotStore for HybridStore {
                                 bytes::Bytes::copy_from_slice(key),
                                 bytes::Bytes::copy_from_slice(bitmap),
                             )) {
-                                let err =
-                                    StoreError::Internal(format!("Failed to send Bitmap entry: {}", e));
+                                let err = StoreError::Internal(format!(
+                                    "Failed to send Bitmap entry: {}",
+                                    e
+                                ));
                                 send_error(err.clone());
                                 return;
                             }
@@ -248,9 +260,9 @@ impl SnapshotStore for HybridStore {
                 } else {
                     "Thread panicked with unknown error".to_string()
                 };
-                let _ = channel.blocking_send(SnapshotStoreEntry::Error(
-                    StoreError::Internal(error_msg.clone())
-                ));
+                let _ = channel.blocking_send(SnapshotStoreEntry::Error(StoreError::Internal(
+                    error_msg.clone(),
+                )));
                 error!("Snapshot creation thread panicked: {}", error_msg);
             }
 
@@ -259,7 +271,9 @@ impl SnapshotStore for HybridStore {
             let _ = tx.send(());
         });
 
-        rx.blocking_recv()?;
+        // Wait for signal (blocking receive)
+        // This will unblock when thread sends signal, even on panic
+        rx.recv().map_err(|e| anyhow::anyhow!("Failed to receive snapshot creation signal: {}", e))?;
 
         Ok(())
     }
