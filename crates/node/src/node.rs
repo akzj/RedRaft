@@ -148,6 +148,11 @@ impl RRNode {
         &self.node_id
     }
 
+    /// Get configuration
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
     /// Get snapshot transfer manager
     pub fn snapshot_transfer_manager(&self) -> &Arc<SnapshotTransferManager> {
         &self.snapshot_transfer_manager

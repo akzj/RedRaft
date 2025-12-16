@@ -10,9 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 use crate::node::RRNode;
-use crate::snapshot_transfer::SnapshotTransferManager;
+use crate::snapshot_transfer::{self, SnapshotTransferManager};
 use proto::split_service::{
     split_service_server::SplitService, CancelSplitRequest, CancelSplitResponse,
     CompleteSplitRequest, CompleteSplitResponse, GetSplitProgressRequest,
@@ -431,11 +432,35 @@ impl SplitServiceImpl {
             source_state_machine.store().clone()
         };
 
-        // Create snapshot with slot range filter
-        // This uses the new key_range parameter we added
-        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        // Generate transfer_id for this snapshot transfer
+        let transfer_id = Uuid::new_v4().to_string();
+        info!(
+            "Creating snapshot file for split task {}: transfer_id={}, source={}, target={}, slot_range=[{}, {})",
+            task_id, transfer_id, source_shard_id, target_shard_id, slot_start, slot_end
+        );
 
-        // Create snapshot
+        // Get snapshot config from node (clone to avoid holding reference)
+        let snapshot_config = {
+            let config = node.config();
+            config.snapshot.clone()
+        };
+
+        // Create snapshot directory and file path
+        let snapshot_dir = snapshot_config.transfer_dir.join(&transfer_id);
+        std::fs::create_dir_all(&snapshot_dir).map_err(|e| {
+            format!("Failed to create snapshot directory for transfer {}: {}", transfer_id, e)
+        })?;
+        let snapshot_file = snapshot_dir.join("snapshot.dat");
+
+        // Create chunk index
+        let chunk_index = Arc::new(parking_lot::RwLock::new(
+            snapshot_transfer::ChunkIndex::new()
+        ));
+
+        // Create channel for receiving snapshot data
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+
+        // Create snapshot with slot range filter
         let shard_id_str = source_shard_id.to_string();
         let key_range = Some((slot_start, slot_end));
 
@@ -445,23 +470,78 @@ impl SplitServiceImpl {
             .await
             .map_err(|e| format!("Failed to create snapshot: {}", e))?;
 
-        // TODO: Transfer snapshot chunks to target shard
-        // This would involve:
-        // - Getting target shard's snapshot service client
-        // - Streaming snapshot chunks to target
-        // - Updating progress as chunks are transferred
-        info!(
-            "Snapshot created for task {} (TODO: implement transfer to target shard {})",
-            task_id, target_shard_id
+        // Register transfer as active
+        snapshot_transfer_manager.register_transfer(
+            transfer_id.clone(),
+            snapshot_transfer::SnapshotTransferState::new(
+                snapshot_file.clone(),
+                chunk_index.clone(),
+            ),
         );
 
-        // Update progress
-        let mut progress = task_manager
-            .get_task(task_id)
-            .map(|t| t.progress)
-            .unwrap_or_default();
-        progress.snapshot_progress_percent = 100; // TODO: Calculate actual progress
-        let _ = task_manager.update_task_progress(task_id, progress);
+        // Spawn background task to generate snapshot file from channel
+        let transfer_id_clone = transfer_id.clone();
+        let source_shard_id_clone = source_shard_id.to_string();
+        let task_id_clone = task_id.to_string();
+        let snapshot_transfer_manager_clone = snapshot_transfer_manager.clone();
+        let snapshot_config_clone = snapshot_config.clone();
+
+        tokio::spawn(async move {
+            // Generate snapshot file in background using channel
+            if let Err(e) = snapshot_transfer::generate_snapshot_file_async(
+                &source_shard_id_clone,
+                &transfer_id_clone,
+                &snapshot_transfer_manager_clone,
+                rx,
+                snapshot_config_clone,
+            )
+            .await
+            {
+                error!(
+                    "Failed to generate snapshot file for split task {} transfer {}: {}",
+                    task_id_clone, transfer_id_clone, e
+                );
+                snapshot_transfer_manager_clone.mark_transfer_failed(&transfer_id_clone, e);
+            } else {
+                info!(
+                    "Snapshot file generated successfully for split task {} transfer {}",
+                    task_id_clone, transfer_id_clone
+                );
+            }
+        });
+
+        // Wait for snapshot file generation to complete (with timeout)
+        use tokio::time::{sleep, Duration, Instant};
+        let start = Instant::now();
+        let timeout = Duration::from_secs(300); // 5 minutes timeout
+
+        loop {
+            let chunk_index_guard = chunk_index.read();
+            if chunk_index_guard.is_complete {
+                // Update progress
+                let mut progress = task_manager
+                    .get_task(task_id)
+                    .map(|t| t.progress)
+                    .unwrap_or_default();
+                progress.snapshot_progress_percent = 100;
+                progress.bytes_total = chunk_index_guard.total_uncompressed_size;
+                progress.bytes_transferred = chunk_index_guard.total_uncompressed_size;
+                let _ = task_manager.update_task_progress(task_id, progress);
+                info!(
+                    "Snapshot file generation completed for split task {} transfer {}: {} chunks, {} bytes",
+                    task_id, transfer_id, chunk_index_guard.generated_chunks, chunk_index_guard.total_uncompressed_size
+                );
+                break;
+            }
+            if let Some(ref error) = chunk_index_guard.error {
+                return Err(format!("Snapshot generation failed: {}", error));
+            }
+            if start.elapsed() > timeout {
+                return Err(format!("Timeout waiting for snapshot file generation ({}s)", timeout.as_secs()));
+            }
+            drop(chunk_index_guard);
+            sleep(Duration::from_millis(100)).await;
+        }
 
         Ok(())
     }

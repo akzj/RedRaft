@@ -392,7 +392,7 @@ pub async fn wait_for_chunk(
 }
 
 /// Get transfer state information (snapshot path and chunk index)
-fn get_transfer_state_info(
+pub fn get_transfer_state_info(
     transfer_manager: &SnapshotTransferManager,
     transfer_id: &str,
 ) -> Result<(std::path::PathBuf, Arc<RwLock<ChunkIndex>>), String> {

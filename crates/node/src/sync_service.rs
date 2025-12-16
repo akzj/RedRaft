@@ -787,43 +787,119 @@ impl SyncService for SyncServiceImpl {
 }
 
 /// Stream snapshot chunks from PUSH side (source node)
-#[allow(unused_variables)]
 async fn stream_snapshot_chunks_from_source(
     snapshot_transfer_manager: Arc<SnapshotTransferManager>,
-    node: Arc<RRNode>,
+    _node: Arc<RRNode>,
     task_id: String,
     offset: u64,
-    max_chunk_size: u32,
+    _max_chunk_size: u32,
     tx: tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
 ) -> Result<(), String> {
-    // TODO: Implement snapshot chunk streaming from source
-    // This would:
-    // 1. Extract source shard ID from task_id or get from context
-    // 2. Create or get snapshot for the source shard
-    // 3. Read snapshot file in chunks
-    // 4. Send chunks via channel
-    // 5. Update progress (if we track it on PUSH side)
+    use crate::snapshot_transfer::{get_transfer_state_info, read_chunk_from_file, wait_for_chunk};
+    use std::time::Duration;
 
-    warn!(
-        "Snapshot chunk streaming from source not yet implemented for sync task {}",
-        task_id
+    info!(
+        "Streaming snapshot chunks from source for task {} starting at offset {}",
+        task_id, offset
     );
 
-    // For now, send an error response
-    let _ = tx
-        .send(Ok(PullSyncDataResponse {
+    // Get transfer state (snapshot path and chunk index)
+    // Note: task_id should match the transfer_id used when creating the snapshot
+    let (snapshot_path, chunk_index) = get_transfer_state_info(&snapshot_transfer_manager, &task_id)
+        .map_err(|e| format!("Failed to get transfer state for task {}: {}", task_id, e))?;
+
+    // Wait for snapshot file generation to complete (if still in progress)
+    wait_for_chunk(
+        &chunk_index,
+        0, // Wait for first chunk to be available
+        Duration::from_millis(100),
+        Duration::from_secs(300), // 5 minutes timeout
+    )
+    .await
+    .map_err(|e| format!("Failed to wait for snapshot file: {}", e))?;
+
+    // Get chunk index to find which chunk to read based on offset
+    // Clone chunk metadata to avoid holding lock across await points
+    let (chunks_metadata, total_chunks) = {
+        let chunk_index_guard = chunk_index.read();
+        let chunks: Vec<_> = chunk_index_guard.chunks.iter().cloned().collect();
+        let total = chunk_index_guard.generated_chunks;
+        (chunks, total)
+    };
+
+    // Find the chunk that contains the requested offset
+    // We need to calculate which chunk index corresponds to the byte offset
+    let mut current_offset = 0u64;
+    let mut target_chunk_index = None;
+
+    for (idx, chunk_meta) in chunks_metadata.iter().enumerate() {
+        // Calculate chunk size including header
+        let header_size = 4 + bincode::serde::encode_to_vec(chunk_meta, bincode::config::standard())
+            .map_err(|e| format!("Failed to serialize chunk metadata: {}", e))?
+            .len();
+        let chunk_total_size = header_size as u64 + chunk_meta.compressed_size as u64;
+
+        if offset >= current_offset && offset < current_offset + chunk_total_size {
+            target_chunk_index = Some(idx as u32);
+            break;
+        }
+
+        current_offset += chunk_total_size;
+    }
+
+    let start_chunk_index = target_chunk_index
+        .ok_or_else(|| format!("Offset {} is beyond snapshot file size", offset))?;
+
+    for chunk_idx in start_chunk_index..total_chunks {
+        // Get chunk metadata from cloned vector
+        let chunk_metadata = chunks_metadata
+            .get(chunk_idx as usize)
+            .ok_or_else(|| format!("Chunk {} not found", chunk_idx))?
+            .clone();
+
+        // Read chunk from file
+        let compressed_data = read_chunk_from_file(&snapshot_path, chunk_idx, &chunk_metadata)
+            .map_err(|e| format!("Failed to read chunk {}: {}", chunk_idx, e))?;
+
+        // Calculate checksum (CRC32 of compressed data)
+        use crc32fast::Hasher as Crc32Hasher;
+        let mut hasher = Crc32Hasher::new();
+        hasher.update(&compressed_data);
+        let checksum = hasher.finalize().to_le_bytes().to_vec();
+
+        // Send chunk to client
+        let is_last = chunk_metadata.is_last;
+        let response = PullSyncDataResponse {
             task_id: task_id.clone(),
             data_type: SyncDataType::SnapshotChunk as i32,
-            chunk_data: vec![],
+            chunk_data: compressed_data,
             entry_logs: vec![],
-            offset: 0,
-            chunk_size: 0,
-            is_last_chunk: true,
-            total_size: 0,
-            checksum: vec![],
-            error_message: "Snapshot chunk streaming from source not yet implemented".to_string(),
-        }))
-        .await;
+            offset: chunk_metadata.file_offset,
+            chunk_size: chunk_metadata.compressed_size,
+            is_last_chunk: is_last,
+            total_size: if chunk_idx == start_chunk_index {
+                // Only send total size in first chunk
+                let index = chunk_index.read();
+                let total = index.total_uncompressed_size;
+                drop(index);
+                total
+            } else {
+                0
+            },
+            checksum,
+            error_message: String::new(),
+        };
+
+        if tx.send(Ok(response)).await.is_err() {
+            warn!("Failed to send chunk {} for task {}", chunk_idx, task_id);
+            break;
+        }
+
+        if is_last {
+            info!("Sent last chunk {} for task {}", chunk_idx, task_id);
+            break;
+        }
+    }
 
     Ok(())
 }
