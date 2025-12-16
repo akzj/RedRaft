@@ -107,7 +107,8 @@ pub struct RRNode {
     snapshot_transfer_manager: Arc<SnapshotTransferManager>,
     /// gRPC client connection pool (node_id -> client)
     /// Used to reuse connections across different services (SyncService, SplitService, etc.)
-    grpc_client_pool: Arc<parking_lot::RwLock<std::collections::HashMap<String, Arc<tonic::transport::Channel>>>>,
+    grpc_client_pool:
+        Arc<parking_lot::RwLock<std::collections::HashMap<String, Arc<tonic::transport::Channel>>>>,
     /// Configuration
     config: Config,
 }
@@ -201,14 +202,22 @@ impl RRNode {
         }
 
         // Channel doesn't exist, create new connection
-        let endpoint_uri = self.get_node_grpc_endpoint(node_id)
+        let endpoint_uri = self
+            .get_node_grpc_endpoint(node_id)
             .map_err(|e| format!("Failed to get endpoint: {}", e))?;
 
         use tonic::transport::Endpoint;
         let endpoint = Endpoint::from_shared(endpoint_uri.clone())
             .map_err(|e| format!("Invalid endpoint {}: {}", endpoint_uri, e))?;
 
-        let channel = endpoint.connect()
+        let channel = endpoint
+            .initial_connection_window_size(1024 * 1024)
+            .initial_stream_window_size(128 * 1024)
+            .http2_keep_alive_interval(std::time::Duration::from_secs(30)) // 每 30s 发 PING
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(10))
+            .keep_alive_while_idle(true) // 即使 idle 也发 keep-alive
+            .connect()
             .await
             .map_err(|e| format!("Failed to connect to node {}: {}", node_id, e))?;
 
@@ -224,10 +233,7 @@ impl RRNode {
             pool.insert(node_id.to_string(), Arc::clone(&channel_arc));
         }
 
-        tracing::info!(
-            "Created new gRPC channel connection for node {}",
-            node_id
-        );
+        tracing::info!("Created new gRPC channel connection for node {}", node_id);
         Ok(channel_arc)
     }
 
