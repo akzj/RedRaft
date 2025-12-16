@@ -439,7 +439,6 @@ impl SplitServiceImpl {
         drop(state_machines); // Release lock before blocking operation
 
         use storage::SnapshotStore;
-        drop(state_machines); // Release lock before async operation
         store
             .create_snapshot(&shard_id_str, tx, key_range)
             .await
