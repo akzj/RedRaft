@@ -193,7 +193,7 @@ impl KVStateMachine {
         let transfer_id = metadata.transfer_id.clone();
 
         tokio::spawn(async move {
-            let mut offset = 0u64;
+            let mut chunk_index = 0u32;
 
             loop {
                 // Request next chunk
@@ -202,7 +202,7 @@ impl KVStateMachine {
                     snapshot_index: index,
                     snapshot_term: term,
                     snapshot_request_id: request_id.into(),
-                    offset,
+                    chunk_index,
                     max_chunk_size: config.snapshot.chunk_size as u32,
                     transfer_id: transfer_id.clone(),
                 };
@@ -244,8 +244,8 @@ impl KVStateMachine {
                                 break;
                             }
 
-                            // Update offset for next request
-                            offset += response.chunk_size as u64;
+                            // Increment chunk index for next request
+                            chunk_index += 1;
                         }
                         Err(e) => {
                             error!("Error receiving chunk from stream: {}", e);

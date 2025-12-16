@@ -43,12 +43,12 @@ impl SnapshotService for SnapshotServiceImpl {
         let req = request.into_inner();
         let transfer_id = req.transfer_id.clone();
         let raft_group_id = req.raft_group_id.clone();
-        let offset = req.offset;
+        let chunk_index = req.chunk_index;
         let max_chunk_size = req.max_chunk_size;
 
         info!(
-            "PullSnapshotData request: transfer_id={}, raft_group_id={}, offset={}, max_chunk_size={}",
-            transfer_id, raft_group_id, offset, max_chunk_size
+            "PullSnapshotData request: transfer_id={}, raft_group_id={}, chunk_index={}, max_chunk_size={}",
+            transfer_id, raft_group_id, chunk_index, max_chunk_size
         );
 
         // Get transfer state
@@ -67,7 +67,7 @@ impl SnapshotService for SnapshotServiceImpl {
         }
 
         let snapshot_path = state.snapshot_path.clone();
-        let chunk_index = state.chunk_index.clone();
+        let chunk_index_arc = state.chunk_index.clone();
 
         // Create channel for streaming responses
         // Buffer size: 16 chunks (to balance memory usage and throughput)
@@ -82,9 +82,9 @@ impl SnapshotService for SnapshotServiceImpl {
             let result = stream_snapshot_chunks(
                 transfer_manager_clone,
                 snapshot_path_clone,
-                chunk_index,
+                chunk_index_arc,
                 transfer_id_clone.clone(),
-                offset,
+                chunk_index,
                 max_chunk_size,
                 tx,
             )
@@ -160,57 +160,24 @@ impl SnapshotService for SnapshotServiceImpl {
 async fn stream_snapshot_chunks(
     _transfer_manager: Arc<SnapshotTransferManager>,
     snapshot_path: std::path::PathBuf,
-    chunk_index: Arc<RwLock<ChunkIndex>>,
+    chunk_index_arc: Arc<RwLock<ChunkIndex>>,
     transfer_id: String,
-    start_offset: u64,
+    start_chunk_index: u32,
     _max_chunk_size: u32,
     tx: tokio::sync::mpsc::Sender<Result<PullSnapshotDataResponse, Status>>,
 ) -> Result<()> {
-    // Find the starting chunk based on offset
-    // We need to wait for chunks to be generated if still generating
-    let (start_chunk_index, total_size, is_complete) = {
-        let index_guard = chunk_index.read();
-        let mut start_chunk_idx = 0u32;
-
-        // Find which chunk contains the start_offset
-        // If chunks are not yet generated, we'll start from chunk 0
-        for (idx, chunk) in index_guard.chunks.iter().enumerate() {
-            // Calculate chunk end offset: file_offset + header_len (4) + header_size + compressed_size
-            let header_size =
-                match bincode::serde::encode_to_vec(chunk, bincode::config::standard()) {
-                    Ok(bytes) => bytes.len() as u64,
-                    Err(_) => {
-                        // If serialization fails, use a rough estimate
-                        // ChunkMetadata is small, typically < 100 bytes
-                        100
-                    }
-                };
-            let chunk_end_offset =
-                chunk.file_offset + 4 + header_size + chunk.compressed_size as u64;
-
-            if chunk.file_offset <= start_offset && start_offset < chunk_end_offset {
-                start_chunk_idx = idx as u32;
-                break;
-            }
-            if chunk.file_offset > start_offset {
-                // We've passed the start_offset, use previous chunk
-                if idx > 0 {
-                    start_chunk_idx = (idx - 1) as u32;
-                }
-                break;
-            }
-        }
-
+    // Get total size and completion status
+    let (total_size, is_complete) = {
+        let index_guard = chunk_index_arc.read();
         (
-            start_chunk_idx,
             index_guard.total_compressed_size,
             index_guard.is_complete,
         )
     };
 
     info!(
-        "Starting to stream chunks for transfer {} from chunk {} (offset {})",
-        transfer_id, start_chunk_index, start_offset
+        "Starting to stream chunks for transfer {} from chunk {}",
+        transfer_id, start_chunk_index
     );
 
     // Stream chunks starting from start_chunk_index
@@ -220,7 +187,7 @@ async fn stream_snapshot_chunks(
     loop {
         // Wait for chunk to be available and get its metadata
         let chunk_metadata = match wait_for_chunk(
-            &chunk_index,
+            &chunk_index_arc,
             current_chunk_index,
             Duration::from_millis(100), // Check every 100ms
             Duration::from_secs(60),    // 60s timeout
@@ -230,7 +197,7 @@ async fn stream_snapshot_chunks(
             Ok(metadata) => {
                 // Update completion status
                 {
-                    let index = chunk_index.read();
+                    let index = chunk_index_arc.read();
                     is_complete_local = index.is_complete;
                 }
                 metadata
