@@ -280,7 +280,7 @@ impl SyncServiceImpl {
         let pull_request = PullSyncDataRequest {
             task_id: task_id.to_string(),
             data_type: SyncDataType::SnapshotChunk as i32,
-            offset: 0,
+            chunk_index: 0, // Start from first chunk
             max_chunk_size: 1024 * 1024, // 1MB chunks
             start_index: 0,
             max_entries: 0,
@@ -379,7 +379,7 @@ impl SyncServiceImpl {
             let pull_request = PullSyncDataRequest {
                 task_id: task_id.to_string(),
                 data_type: SyncDataType::EntryLog as i32,
-                offset: 0,
+                chunk_index: 0, // Not used for entry logs
                 max_chunk_size: 0,
                 start_index: current_index,
                 max_entries: 100, // Pull 100 entries at a time
@@ -676,8 +676,8 @@ impl SyncService for SyncServiceImpl {
         let task_id = req.task_id.clone();
 
         info!(
-            "PullSyncData request: task_id={}, data_type={:?}, offset={}, start_index={}",
-            task_id, req.data_type, req.offset, req.start_index
+            "PullSyncData request: task_id={}, data_type={:?}, chunk_index={}, start_index={}",
+            task_id, req.data_type, req.chunk_index, req.start_index
         );
 
         if task_id.is_empty() {
@@ -710,7 +710,7 @@ impl SyncService for SyncServiceImpl {
                         snapshot_transfer_manager_clone,
                         node_clone,
                         task_id.clone(),
-                        req.offset,
+                        req.chunk_index,
                         req.max_chunk_size,
                         tx,
                     )
@@ -792,7 +792,7 @@ async fn stream_snapshot_chunks_from_source(
     snapshot_transfer_manager: Arc<SnapshotTransferManager>,
     _node: Arc<RRNode>,
     task_id: String,
-    offset: u64,
+    chunk_index: u32,
     _max_chunk_size: u32,
     tx: tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
 ) -> Result<(), String> {
@@ -800,66 +800,33 @@ async fn stream_snapshot_chunks_from_source(
     use std::time::Duration;
 
     info!(
-        "Streaming snapshot chunks from source for task {} starting at offset {}",
-        task_id, offset
+        "Streaming snapshot chunks from source for task {} starting at chunk {}",
+        task_id, chunk_index
     );
 
     // Get transfer state (snapshot path and chunk index)
     // Note: task_id should match the transfer_id used when creating the snapshot
-    let (snapshot_path, chunk_index) =
+    let (snapshot_path, chunk_index_arc) =
         get_transfer_state_info(&snapshot_transfer_manager, &task_id)
             .map_err(|e| format!("Failed to get transfer state for task {}: {}", task_id, e))?;
 
-    // Find the starting chunk based on offset
-    // We need to wait for chunks to be generated if still generating
-    let (start_chunk_index, total_size, is_complete) = {
-        let index_guard = chunk_index.read();
-        let mut start_chunk_idx = 0u32;
-
-        // Find which chunk contains the start_offset
-        // If chunks are not yet generated, we'll start from chunk 0
-        for (idx, chunk) in index_guard.chunks.iter().enumerate() {
-            // Calculate chunk end offset: file_offset + header_len (4) + header_size + compressed_size
-            let header_size =
-                match bincode::serde::encode_to_vec(chunk, bincode::config::standard()) {
-                    Ok(bytes) => bytes.len() as u64,
-                    Err(_) => {
-                        // If serialization fails, use a rough estimate
-                        // ChunkMetadata is small, typically < 100 bytes
-                        100
-                    }
-                };
-            let chunk_end_offset =
-                chunk.file_offset + 4 + header_size + chunk.compressed_size as u64;
-
-            if chunk.file_offset <= offset && offset < chunk_end_offset {
-                start_chunk_idx = idx as u32;
-                break;
-            }
-            if chunk.file_offset > offset {
-                // We've passed the start_offset, use previous chunk
-                if idx > 0 {
-                    start_chunk_idx = (idx - 1) as u32;
-                }
-                break;
-            }
-        }
-
+    // Get total size and completion status
+    let (total_size, is_complete) = {
+        let index_guard = chunk_index_arc.read();
         (
-            start_chunk_idx,
             index_guard.total_uncompressed_size,
             index_guard.is_complete,
         )
     };
 
     info!(
-        "Starting to stream chunks for task {} from chunk {} (offset {})",
-        task_id, start_chunk_index, offset
+        "Starting to stream chunks for task {} from chunk {}",
+        task_id, chunk_index
     );
 
-    // Stream chunks starting from start_chunk_index
+    // Stream chunks starting from chunk_index
     // Process chunks one by one as they become available (streaming mode)
-    let mut current_chunk_index = start_chunk_index;
+    let mut current_chunk_index = chunk_index;
     let mut is_complete_local = is_complete;
     let mut first_chunk = true;
 
@@ -867,7 +834,7 @@ async fn stream_snapshot_chunks_from_source(
         // Wait for chunk to be available (if still generating)
         if !is_complete_local {
             let wait_result = wait_for_chunk(
-                &chunk_index,
+                &chunk_index_arc,
                 current_chunk_index,
                 Duration::from_millis(100), // Check every 100ms
                 Duration::from_secs(60),    // 60s timeout per chunk
@@ -899,7 +866,7 @@ async fn stream_snapshot_chunks_from_source(
         // Get chunk metadata
         let chunk_metadata = {
             let (meta, complete) = {
-                let index = chunk_index.read();
+                let index = chunk_index_arc.read();
                 match index.get_chunk(current_chunk_index) {
                     Some(meta) => (Some(meta.clone()), index.is_complete),
                     None => (None, index.is_complete),

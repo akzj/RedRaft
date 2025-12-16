@@ -64,8 +64,8 @@ message PullSyncDataRequest {
   string task_id = 1;
   /// Data type to pull
   SyncDataType data_type = 2;
-  /// Starting byte offset (for snapshot chunks, 0 for first request)
-  uint64 offset = 3;
+  /// Starting chunk index (for snapshot chunks, 0 for first request)
+  uint32 chunk_index = 3;
   /// Maximum chunk size in bytes (hint for source, typically 1MB)
   uint32 max_chunk_size = 4;
   /// Starting Raft index (for entry logs)
