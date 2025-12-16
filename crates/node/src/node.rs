@@ -5,9 +5,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use tokio::sync::oneshot;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 use raft::{
     ClusterConfig, Event, Network, RaftCallbacks, RaftId, RaftState, RaftStateOptions, RequestId,
@@ -20,6 +20,11 @@ use crate::state_machine::KVStateMachine;
 use resp::{Command, CommandType, RespValue};
 use rr_core::routing::RoutingTable;
 use storage::{traits::KeyStore, ApplyResult as StoreApplyResult, RedisStore};
+use proto::node::{
+    node_service_server::NodeService, GetRaftStateRequest, GetRaftStateResponse, Role as ProtoRole,
+};
+use tonic::{Request, Response, Status};
+use raft::event::Role as RaftRole;
 
 /// Pending request tracker
 #[derive(Clone)]
@@ -77,7 +82,7 @@ impl Default for PendingRequests {
 }
 
 /// RedRaft node
-pub struct RedRaftNode {
+pub struct RRNode {
     /// Node ID
     node_id: String,
     /// Multi-Raft driver
@@ -93,6 +98,8 @@ pub struct RedRaftNode {
     routing_table: Arc<RoutingTable>,
     /// Raft group state machine mapping (shard_id -> state_machine)
     state_machines: Arc<Mutex<HashMap<String, Arc<KVStateMachine>>>>,
+    /// Raft state mapping (shard_id -> raft_state)
+    raft_states: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<RaftState>>>>>,
     /// Pending request tracker
     pending_requests: PendingRequests,
 
@@ -102,7 +109,7 @@ pub struct RedRaftNode {
     config: Config,
 }
 
-impl RedRaftNode {
+impl RRNode {
     pub fn new(
         node_id: String,
         storage: Arc<dyn Storage>,
@@ -119,6 +126,7 @@ impl RedRaftNode {
             redis_store,
             routing_table,
             state_machines: Arc::new(Mutex::new(HashMap::new())),
+            raft_states: Arc::new(Mutex::new(HashMap::new())),
             pending_requests: PendingRequests::new(),
             snapshot_transfer_manager: Arc::new(SnapshotTransferManager::new()),
             config,
@@ -246,6 +254,11 @@ impl RedRaftNode {
         let handle_event = Box::new(RaftGroupHandler {
             raft_state: raft_state_arc.clone(),
         });
+
+        // Store RaftState reference for NodeService
+        self.raft_states
+            .lock()
+            .insert(shard_id.clone(), raft_state_arc.clone());
 
         self.driver.add_raft_group(raft_id.clone(), handle_event);
 
@@ -478,5 +491,84 @@ fn apply_result_to_resp(result: StoreApplyResult) -> RespValue {
         StoreApplyResult::Error(e) => {
             RespValue::Error(bytes::Bytes::from(format!("ERR {}", e.to_string())))
         }
+    }
+}
+
+// ============================================================================
+// NodeService Implementation
+// ============================================================================
+
+/// Node Service implementation
+pub struct NodeServiceImpl {
+    /// Node reference
+    node: Arc<RRNode>,
+}
+
+impl NodeServiceImpl {
+    pub fn new(node: Arc<RRNode>) -> Self {
+        Self { node }
+    }
+}
+
+/// Convert Raft Role to Proto Role
+fn raft_role_to_proto(role: &RaftRole) -> ProtoRole {
+    match role {
+        RaftRole::Follower => ProtoRole::Follower,
+        RaftRole::Candidate => ProtoRole::Candidate,
+        RaftRole::Leader => ProtoRole::Leader,
+        RaftRole::Learner => ProtoRole::Learner,
+    }
+}
+
+#[tonic::async_trait]
+impl NodeService for NodeServiceImpl {
+    async fn get_raft_state(
+        &self,
+        request: Request<GetRaftStateRequest>,
+    ) -> Result<Response<GetRaftStateResponse>, Status> {
+        let req = request.into_inner();
+        let raft_group_id = req.raft_group_id;
+
+        // If raft_group_id is empty, return error (for now, we require a specific group)
+        if raft_group_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "raft_group_id is required".to_string(),
+            ));
+        }
+
+        // Get RaftState for the specified group
+        let raft_state_arc = {
+            let raft_states = self.node.raft_states.lock();
+            raft_states.get(&raft_group_id).cloned()
+        };
+
+        let raft_state_arc = match raft_state_arc {
+            Some(state) => state,
+            None => {
+                return Err(Status::not_found(format!(
+                    "Raft group {} not found",
+                    raft_group_id
+                )));
+            }
+        };
+
+        // Lock and read RaftState
+        let raft_state = raft_state_arc.lock().await;
+
+        // Build response
+        let response = GetRaftStateResponse {
+            raft_group_id: raft_group_id.clone(),
+            node_id: self.node.node_id.clone(),
+            role: raft_role_to_proto(&raft_state.role) as i32,
+            current_term: raft_state.current_term,
+            leader_id: raft_state
+                .leader_id
+                .as_ref()
+                .map(|id| id.node.clone())
+                .unwrap_or_default(),
+            last_applied: raft_state.last_applied,
+        };
+
+        Ok(Response::new(response))
     }
 }
