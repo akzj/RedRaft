@@ -47,195 +47,220 @@ impl SnapshotStore for HybridStore {
         let key_range = key_range;
 
         let _handle = std::thread::spawn(move || {
-            // Helper function to send error through channel
-            let send_error = |err: StoreError| {
-                let _ = channel.blocking_send(SnapshotStoreEntry::Error(err));
-            };
+            // Use catch_unwind to handle panics gracefully and prevent main thread from blocking forever
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Helper function to send error through channel
+                let send_error = |err: StoreError| {
+                    let _ = channel.blocking_send(SnapshotStoreEntry::Error(err));
+                };
 
-            // Create snapshot inside the closure (after db is moved)
-            // Note: db.snapshot() returns a snapshot directly, not a Result
-            let snapshot = db.snapshot();
+                // Create snapshot inside the closure (after db is moved)
+                // Note: db.snapshot() returns a snapshot directly, not a Result
+                let snapshot = db.snapshot();
 
-            // Get Column Family handle from db (CF handle is valid as long as db exists)
-            let cf_handler = match db.cf_handle(&cf_name) {
-                Some(handler) => handler,
-                None => {
-                    let err = StoreError::Internal(format!("Column Family {} not found", cf_name));
-                    send_error(err);
-                    // Signal error to unblock waiting thread (must send before return)
-                    let _ = tx.send(());
-                    return;
-                }
-            };
-
-            // Signal that snapshot object is created (RocksDB snapshot + Memory COW will be created next)
-            // This allows load_snapshot to wait synchronously for snapshot object creation
-            // Create Memory COW snapshot BEFORE signaling snapshot object is ready
-            // This ensures state consistency - snapshot object is fully created before signaling
-            let mut shard_guard = shard.write();
-            let memory_snapshot = shard_guard.memory_mut().store.make_snapshot();
-            drop(shard_guard); // Release write lock immediately
-
-            // Signal that snapshot object is fully created (RocksDB snapshot + Memory COW)
-            // This allows load_snapshot to wait synchronously for snapshot object creation
-            let _ = tx.send(());
-
-            // Helper function to check if key is in slot range
-            let key_in_range = |original_key: &[u8]| -> bool {
-                if let Some((slot_begin, slot_end)) = key_range {
-                    let slot = RoutingTable::slot_for_key(original_key);
-                    slot >= slot_begin && slot < slot_end
-                } else {
-                    true // No filtering if key_range is None
-                }
-            };
-
-            // Iterate RocksDB entries (String and Hash)
-            let iter = snapshot.iterator_cf(cf_handler, rocksdb::IteratorMode::Start);
-            for item in iter {
-                let (key, value) = match item {
-                    Ok(kv) => kv,
-                    Err(e) => {
-                        let err = StoreError::Internal(format!("RocksDB iteration error: {}", e));
-                        send_error(err.clone());
+                // Get Column Family handle from db (CF handle is valid as long as db exists)
+                let cf_handler = match db.cf_handle(&cf_name) {
+                    Some(handler) => handler,
+                    None => {
+                        let err = StoreError::Internal(format!("Column Family {} not found", cf_name));
+                        send_error(err);
+                        // Signal error to unblock waiting thread (must send before return)
+                        let _ = tx.send(());
                         return;
                     }
                 };
 
-                // Skip apply_index key
-                if key.starts_with(b"@:") {
-                    continue;
-                }
+                // Signal that snapshot object is created (RocksDB snapshot + Memory COW will be created next)
+                // This allows load_snapshot to wait synchronously for snapshot object creation
+                // Create Memory COW snapshot BEFORE signaling snapshot object is ready
+                // This ensures state consistency - snapshot object is fully created before signaling
+                let mut shard_guard = shard.write();
+                let memory_snapshot = shard_guard.memory_mut().store.make_snapshot();
+                drop(shard_guard); // Release write lock immediately
 
-                // Parse key to determine type
-                if key.starts_with(b"s:") {
-                    // String: s:{key} -> value
-                    let original_key = &key[2..];
-                    // Filter by slot range if specified
-                    if !key_in_range(original_key) {
+                // Signal that snapshot object is fully created (RocksDB snapshot + Memory COW)
+                // This allows load_snapshot to wait synchronously for snapshot object creation
+                let _ = tx.send(());
+
+                // Helper function to check if key is in slot range
+                let key_in_range = |original_key: &[u8]| -> bool {
+                    if let Some((slot_begin, slot_end)) = key_range {
+                        let slot = RoutingTable::slot_for_key(original_key);
+                        slot >= slot_begin && slot < slot_end
+                    } else {
+                        true // No filtering if key_range is None
+                    }
+                };
+
+                // Iterate RocksDB entries (String and Hash)
+                let iter = snapshot.iterator_cf(cf_handler, rocksdb::IteratorMode::Start);
+                for item in iter {
+                    let (key, value) = match item {
+                        Ok(kv) => kv,
+                        Err(e) => {
+                            let err = StoreError::Internal(format!("RocksDB iteration error: {}", e));
+                            send_error(err.clone());
+                            return Ok::<(), StoreError>(());
+                        }
+                    };
+
+                    // Skip apply_index key
+                    if key.starts_with(b"@:") {
                         continue;
                     }
-                    let _ = channel.send(SnapshotStoreEntry::String(
-                        bytes::Bytes::copy_from_slice(original_key),
-                        bytes::Bytes::copy_from_slice(&value),
-                    ));
-                } else if key.starts_with(b"h:") {
-                    // Hash field: h:{key}:{field} -> value
-                    // Find the second colon
-                    let key_part = &key[2..];
-                    if let Some(colon_pos) = key_part.iter().position(|&b| b == b':') {
-                        let hash_key = &key_part[..colon_pos];
+
+                    // Parse key to determine type
+                    if key.starts_with(b"s:") {
+                        // String: s:{key} -> value
+                        let original_key = &key[2..];
                         // Filter by slot range if specified
-                        if !key_in_range(hash_key) {
+                        if !key_in_range(original_key) {
                             continue;
                         }
-                        let field = &key_part[colon_pos + 1..];
-                        if let Err(e) = channel.blocking_send(SnapshotStoreEntry::Hash(
-                            bytes::Bytes::copy_from_slice(hash_key),
-                            bytes::Bytes::copy_from_slice(field),
+                        let _ = channel.send(SnapshotStoreEntry::String(
+                            bytes::Bytes::copy_from_slice(original_key),
                             bytes::Bytes::copy_from_slice(&value),
-                        )) {
-                            let err =
-                                StoreError::Internal(format!("Failed to send Hash entry: {}", e));
-                            send_error(err.clone());
-                            return;
+                        ));
+                    } else if key.starts_with(b"h:") {
+                        // Hash field: h:{key}:{field} -> value
+                        // Find the second colon
+                        let key_part = &key[2..];
+                        if let Some(colon_pos) = key_part.iter().position(|&b| b == b':') {
+                            let hash_key = &key_part[..colon_pos];
+                            // Filter by slot range if specified
+                            if !key_in_range(hash_key) {
+                                continue;
+                            }
+                            let field = &key_part[colon_pos + 1..];
+                            if let Err(e) = channel.blocking_send(SnapshotStoreEntry::Hash(
+                                bytes::Bytes::copy_from_slice(hash_key),
+                                bytes::Bytes::copy_from_slice(field),
+                                bytes::Bytes::copy_from_slice(&value),
+                            )) {
+                                let err =
+                                    StoreError::Internal(format!("Failed to send Hash entry: {}", e));
+                                send_error(err.clone());
+                                return Ok::<(), StoreError>(());
+                            }
+                        }
+                    }
+                    // Skip hash metadata (H:{key}) as we only need fields
+                }
+
+                // Helper function to check if key is in slot range (for memory store)
+                let key_in_range = |key: &[u8]| -> bool {
+                    if let Some((slot_begin, slot_end)) = key_range {
+                        let slot = RoutingTable::slot_for_key(key);
+                        slot >= slot_begin && slot < slot_end
+                    } else {
+                        true // No filtering if key_range is None
+                    }
+                };
+
+                // Iterate Memory store entries (List, Set, ZSet, Bitmap)
+                // Note: memory_snapshot was already created above before signaling
+                let memory_data = memory_snapshot.read();
+                for (key, data_cow) in memory_data.iter() {
+                    // Filter by slot range if specified
+                    if !key_in_range(key) {
+                        continue;
+                    }
+                    match data_cow {
+                        crate::memory::DataCow::List(list) => {
+                            // Send all list elements
+                            for element in list.iter() {
+                                if let Err(e) = channel.blocking_send(SnapshotStoreEntry::List(
+                                    bytes::Bytes::copy_from_slice(key),
+                                    element.clone(),
+                                )) {
+                                    let err = StoreError::Internal(format!(
+                                        "Failed to send List entry: {}",
+                                        e
+                                    ));
+                                    send_error(err.clone());
+                                    return Ok::<(), StoreError>(());
+                                }
+                            }
+                        }
+                        crate::memory::DataCow::Set(set) => {
+                            // Send all set members
+                            for member in set.members() {
+                                if let Err(e) = channel.blocking_send(SnapshotStoreEntry::Set(
+                                    bytes::Bytes::copy_from_slice(key),
+                                    member.clone(),
+                                )) {
+                                    let err = StoreError::Internal(format!(
+                                        "Failed to send Set entry: {}",
+                                        e
+                                    ));
+                                    send_error(err.clone());
+                                    return Ok::<(), StoreError>(());
+                                }
+                            }
+                        }
+                        crate::memory::DataCow::ZSet(zset) => {
+                            // Send all zset elements with scores
+                            // Use range_by_score to get all (member, score) pairs
+                            let members_with_scores =
+                                zset.range_by_score(f64::NEG_INFINITY, f64::INFINITY);
+                            for (member, score) in members_with_scores {
+                                if let Err(e) = channel.blocking_send(SnapshotStoreEntry::ZSet(
+                                    bytes::Bytes::copy_from_slice(key),
+                                    score,
+                                    member,
+                                )) {
+                                    let err = StoreError::Internal(format!(
+                                        "Failed to send ZSet entry: {}",
+                                        e
+                                    ));
+                                    send_error(err.clone());
+                                    return Ok::<(), StoreError>(());
+                                }
+                            }
+                        }
+                        crate::memory::DataCow::Bitmap(bitmap) => {
+                            // Send bitmap data (BitmapData is Vec<u8>)
+                            if let Err(e) = channel.blocking_send(SnapshotStoreEntry::Bitmap(
+                                bytes::Bytes::copy_from_slice(key),
+                                bytes::Bytes::copy_from_slice(bitmap),
+                            )) {
+                                let err =
+                                    StoreError::Internal(format!("Failed to send Bitmap entry: {}", e));
+                                send_error(err.clone());
+                                return Ok::<(), StoreError>(());
+                            }
                         }
                     }
                 }
-                // Skip hash metadata (H:{key}) as we only need fields
-            }
+                drop(memory_data);
 
-            // Helper function to check if key is in slot range (for memory store)
-            let key_in_range = |key: &[u8]| -> bool {
-                if let Some((slot_begin, slot_end)) = key_range {
-                    let slot = RoutingTable::slot_for_key(key);
-                    slot >= slot_begin && slot < slot_end
+                // Send completion signal
+                let _ = channel.blocking_send(SnapshotStoreEntry::Completed);
+
+                Ok::<(), StoreError>(())
+            }));
+
+            // Handle panic: send error and signal to unblock main thread
+            if let Err(panic_info) = result {
+                let error_msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                    format!("Thread panicked: {}", s)
+                } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    format!("Thread panicked: {}", s)
                 } else {
-                    true // No filtering if key_range is None
-                }
-            };
-
-            // Iterate Memory store entries (List, Set, ZSet, Bitmap)
-            // Note: memory_snapshot was already created above before signaling
-            let memory_data = memory_snapshot.read();
-            for (key, data_cow) in memory_data.iter() {
-                // Filter by slot range if specified
-                if !key_in_range(key) {
-                    continue;
-                }
-                match data_cow {
-                    crate::memory::DataCow::List(list) => {
-                        // Send all list elements
-                        for element in list.iter() {
-                            if let Err(e) = channel.blocking_send(SnapshotStoreEntry::List(
-                                bytes::Bytes::copy_from_slice(key),
-                                element.clone(),
-                            )) {
-                                let err = StoreError::Internal(format!(
-                                    "Failed to send List entry: {}",
-                                    e
-                                ));
-                                send_error(err.clone());
-                                return;
-                            }
-                        }
-                    }
-                    crate::memory::DataCow::Set(set) => {
-                        // Send all set members
-                        for member in set.members() {
-                            if let Err(e) = channel.blocking_send(SnapshotStoreEntry::Set(
-                                bytes::Bytes::copy_from_slice(key),
-                                member.clone(),
-                            )) {
-                                let err = StoreError::Internal(format!(
-                                    "Failed to send Set entry: {}",
-                                    e
-                                ));
-                                send_error(err.clone());
-                                return;
-                            }
-                        }
-                    }
-                    crate::memory::DataCow::ZSet(zset) => {
-                        // Send all zset elements with scores
-                        // Use range_by_score to get all (member, score) pairs
-                        let members_with_scores =
-                            zset.range_by_score(f64::NEG_INFINITY, f64::INFINITY);
-                        for (member, score) in members_with_scores {
-                            if let Err(e) = channel.blocking_send(SnapshotStoreEntry::ZSet(
-                                bytes::Bytes::copy_from_slice(key),
-                                score,
-                                member,
-                            )) {
-                                let err = StoreError::Internal(format!(
-                                    "Failed to send ZSet entry: {}",
-                                    e
-                                ));
-                                send_error(err.clone());
-                                return;
-                            }
-                        }
-                    }
-                    crate::memory::DataCow::Bitmap(bitmap) => {
-                        // Send bitmap data (BitmapData is Vec<u8>)
-                        if let Err(e) = channel.blocking_send(SnapshotStoreEntry::Bitmap(
-                            bytes::Bytes::copy_from_slice(key),
-                            bytes::Bytes::copy_from_slice(bitmap),
-                        )) {
-                            let err =
-                                StoreError::Internal(format!("Failed to send Bitmap entry: {}", e));
-                            send_error(err.clone());
-                            return;
-                        }
-                    }
-                }
+                    "Thread panicked with unknown error".to_string()
+                };
+                let _ = channel.blocking_send(SnapshotStoreEntry::Error(
+                    StoreError::Internal(error_msg.clone())
+                ));
+                error!("Snapshot creation thread panicked: {}", error_msg);
+            } else if let Err(e) = result.unwrap() {
+                // Handle error from closure
+                let _ = channel.blocking_send(SnapshotStoreEntry::Error(e));
             }
-            drop(memory_data);
 
-            // Send completion signal
-            let _ = channel.blocking_send(SnapshotStoreEntry::Completed);
-
-            ()
+            // Always signal to unblock main thread, even on panic
+            // This prevents main thread from blocking forever if thread panics
+            let _ = tx.send(());
         });
 
         rx.blocking_recv()?;
