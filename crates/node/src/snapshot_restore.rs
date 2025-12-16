@@ -8,8 +8,8 @@ use tracing::{error, info, warn};
 
 use storage::store::HybridStore;
 use storage::traits::{
-    ApplyResult as StoreApplyResult, HashStore, KeyStore, ListStore, SetStore, StringStore,
-    SnapshotStoreEntry,
+    ApplyResult as StoreApplyResult, HashStore, KeyStore, ListStore, SetStore, SnapshotStoreEntry,
+    StringStore,
 };
 
 /// Restore snapshot from compressed chunks in blocking context
@@ -169,7 +169,7 @@ pub fn handle_snapshot_restore_result(
     restore_result: Result<Result<u64, String>, tokio::task::JoinError>,
     apply_index: Arc<std::sync::atomic::AtomicU64>,
     term_atomic: Arc<std::sync::atomic::AtomicU64>,
-    apply_results: Arc<parking_lot::Mutex<std::collections::HashMap<u64, StoreApplyResult>>>,
+    apply_results: Arc<parking_lot::Mutex<std::collections::VecDeque<(u64, StoreApplyResult)>>>,
     from: raft::RaftId,
     index: u64,
     term: u64,
@@ -211,4 +211,3 @@ pub fn handle_snapshot_restore_result(
         }
     }
 }
-

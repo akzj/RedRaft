@@ -15,7 +15,6 @@ use raft::{
 };
 
 use crate::config::Config;
-use crate::router::ShardRouter;
 use crate::snapshot_transfer::SnapshotTransferManager;
 use crate::state_machine::KVStateMachine;
 use resp::{Command, CommandType, RespValue};
@@ -89,8 +88,6 @@ pub struct RedRaftNode {
     redis_store: Arc<storage::store::HybridStore>,
     /// Network layer
     network: Arc<dyn Network>,
-    /// Shard Router
-    router: Arc<ShardRouter>,
     /// Routing table for shard and raft group management
     /// Managed by node, can be synced with pilot in the future
     routing_table: Arc<RoutingTable>,
@@ -112,7 +109,6 @@ impl RedRaftNode {
         storage: Arc<dyn Storage>,
         network: Arc<dyn Network>,
         redis_store: Arc<storage::store::HybridStore>,
-        shard_count: usize,
         routing_table: Arc<RoutingTable>,
         config: Config,
     ) -> Self {
@@ -122,7 +118,6 @@ impl RedRaftNode {
             storage,
             network,
             redis_store,
-            router: Arc::new(ShardRouter::new(shard_count)),
             routing_table,
             state_machines: Arc::new(Mutex::new(HashMap::new())),
             pending_requests: PendingRequests::new(),
@@ -145,11 +140,6 @@ impl RedRaftNode {
     /// Get node ID
     pub fn node_id(&self) -> &str {
         &self.node_id
-    }
-
-    /// Get router reference
-    pub fn router(&self) -> Arc<ShardRouter> {
-        self.router.clone()
     }
 
     /// Get snapshot transfer manager
@@ -266,8 +256,8 @@ impl RedRaftNode {
 
         self.driver.add_raft_group(raft_id.clone(), handle_event);
 
-        // Update routing table
-        self.router.add_shard(shard_id, nodes);
+        // Update routing table (shard routing is managed by routing_table)
+        // Note: add_shard functionality will be redesigned
 
         info!("Created Raft group: {}", raft_id);
         Ok(raft_id)
@@ -404,15 +394,17 @@ impl RedRaftNode {
         let key_bytes = key.unwrap();
 
         // Determine shard for key-based commands
-        let shard_id = self.router.route_key(&key_bytes);
+        let shard_id = self
+            .routing_table
+            .find_shard_for_key(&key_bytes)
+            .map_err(|e| format!("CLUSTERDOWN {}", e))?;
 
         // Check split status - return redirect if MOVED needed
-        if let Some((_target_shard, target_addr)) =
-            self.router.should_move_for_split(&key_bytes, &shard_id)
-        {
-            let slot = crate::router::ShardRouter::slot_for_key(&key_bytes);
-            return Err(format!("MOVED {} {}", slot, target_addr));
-        }
+        // TODO: Split functionality will be redesigned
+        // if let Some((_target_shard, target_addr)) = ... {
+        //     let slot = RoutingTable::slot_for_key(&key_bytes);
+        //     return Err(format!("MOVED {} {}", slot, target_addr));
+        // }
 
         // Get Raft group (must exist, created by Pilot)
         let raft_id = self
@@ -440,21 +432,23 @@ impl RedRaftNode {
         };
 
         // Determine shard
-        let shard_id = self.router.route_key(key);
+        let shard_id = self
+            .routing_table
+            .find_shard_for_key(key)
+            .map_err(|e| format!("CLUSTERDOWN {}", e))?;
 
         // Check split status - return redirect if MOVED needed
-        if let Some((_target_shard, target_addr)) =
-            self.router.should_move_for_split(key, &shard_id)
-        {
-            let slot = crate::router::ShardRouter::slot_for_key(key);
-            // Return MOVED error, format: MOVED <slot> <target_addr>
-            return Err(format!("MOVED {} {}", slot, target_addr));
-        }
+        // TODO: Split functionality will be redesigned
+        // if let Some((_target_shard, target_addr)) = ... {
+        //     let slot = RoutingTable::slot_for_key(key);
+        //     return Err(format!("MOVED {} {}", slot, target_addr));
+        // }
 
         // Check if in buffering phase - return TRYAGAIN if so
-        if self.router.should_buffer_for_split(key, &shard_id) {
-            return Err("TRYAGAIN Split in progress, please retry".to_string());
-        }
+        // TODO: Split functionality will be redesigned
+        // if ... {
+        //     return Err("TRYAGAIN Split in progress, please retry".to_string());
+        // }
 
         // Get Raft group (must exist, created by Pilot)
         let raft_id = self
@@ -548,7 +542,6 @@ impl raft::multi_raft_driver::HandleEventTrait for RaftGroupHandler {
         state.handle_event(event).await;
     }
 }
-
 
 /// Convert StoreApplyResult to RespValue
 fn apply_result_to_resp(result: StoreApplyResult) -> RespValue {

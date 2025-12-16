@@ -35,8 +35,9 @@ pub struct KVStateMachine {
     term: Arc<std::sync::atomic::AtomicU64>,
     /// Pending request tracker
     pending_requests: Option<PendingRequests>,
-    /// Apply result cache (index -> result), used to return actual results in client_response
-    apply_results: Arc<parking_lot::Mutex<std::collections::HashMap<u64, StoreApplyResult>>>,
+    /// Apply result cache (queue of (index, result)), used to return actual results in client_response
+    /// Uses queue because index is monotonically increasing, allowing easy cleanup of expired entries
+    apply_results: Arc<parking_lot::Mutex<std::collections::VecDeque<(u64, StoreApplyResult)>>>,
     /// Raft storage backend
     storage: Arc<dyn Storage>,
     /// Network layer
@@ -67,7 +68,7 @@ impl KVStateMachine {
             apply_index: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             term: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_requests: None,
-            apply_results: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            apply_results: Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new())),
             storage,
             network,
             timers,
@@ -93,7 +94,7 @@ impl KVStateMachine {
             apply_index: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             term: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_requests: Some(pending_requests),
-            apply_results: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            apply_results: Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new())),
             storage,
             network,
             timers,
@@ -294,8 +295,8 @@ impl StateMachine for KVStateMachine {
         .await
         .map_err(|e| raft::ApplyError::Internal(format!("Failed to apply command: {}", e)))?;
 
-        // Cache result for use in client_response
-        self.apply_results.lock().insert(index, result);
+        // Cache result for use in client_response (push to queue since index is monotonically increasing)
+        self.apply_results.lock().push_back((index, result));
 
         // Update apply_index and term (this is the last applied index and term)
         self.apply_index
@@ -441,11 +442,31 @@ impl StateMachine for KVStateMachine {
         if let Some(ref pending) = self.pending_requests {
             let store_result = match result {
                 Ok(index) => {
-                    // Get apply result from cache
-                    self.apply_results
-                        .lock()
-                        .remove(&index)
-                        .unwrap_or(StoreApplyResult::Ok)
+                    let current_apply_index =
+                        self.apply_index.load(std::sync::atomic::Ordering::SeqCst);
+                    let mut cache = self.apply_results.lock();
+
+                    // Process queue: clean up expired entries and find matching entry in one pass
+                    // Since index is monotonically increasing, we can process from front
+                    let mut found_result = None;
+                    while let Some((cached_index, cached_result)) = cache.front().cloned() {
+                        if cached_index < current_apply_index {
+                            // Expired entry, remove it
+                            cache.pop_front();
+                        } else if cached_index == index {
+                            // Found matching entry, remove and return it
+                            found_result = Some(cached_result);
+                            cache.pop_front();
+                            break;
+                        } else {
+                            // cached_index >= current_apply_index && cached_index != index
+                            // Since queue is ordered and index is monotonically increasing,
+                            // if we haven't found the match yet, it doesn't exist
+                            break;
+                        }
+                    }
+
+                    found_result.unwrap_or(StoreApplyResult::Ok)
                 }
                 Err(e) => StoreApplyResult::Error(StoreError::Internal(format!("{:?}", e))),
             };
@@ -638,7 +659,7 @@ impl SnapshotStorage for KVStateMachine {
 
         // Create channel for receiving snapshot data
         // This channel will be used by create_snapshot to send snapshot entries
-        let (tx, rx) = tokio::sync::mpsc::channel(1024);
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
 
         // Synchronously create snapshot object in load_snapshot context
         // This ensures state consistency - snapshot object (RocksDB snapshot + Memory COW)

@@ -28,7 +28,7 @@ pub enum PilotError {
 }
 
 /// Routing table (fetched from Pilot)
-/// 
+///
 /// Note: Uses ShardId (business layer concept), not GroupId (Raft layer concept)
 /// When creating Raft groups, ShardId is passed as GroupId
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,12 +102,12 @@ impl RoutingTable {
     }
 
     /// Check if key is in split target range (should MOVED to new shard)
-    /// 
+    ///
     /// Returns (target_shard_id, target_leader_addr)
     pub fn should_move_key(&self, key: &[u8], shard_id: &str) -> Option<(&String, &String)> {
         let split_info = self.splitting_shards.get(shard_id)?;
         let slot = Self::slot_for_key(key);
-        
+
         // If slot >= split_slot, should move to target shard
         if slot >= split_info.split_slot {
             // Get target shard's leader address
@@ -272,13 +272,7 @@ impl PilotClient {
             self.config.pilot_addr, self.node_id
         );
 
-        let resp: ApiResponse<()> = self
-            .http_client
-            .post(&url)
-            .send()
-            .await?
-            .json()
-            .await?;
+        let resp: ApiResponse<()> = self.http_client.post(&url).send().await?.json().await?;
 
         if resp.success {
             debug!("Heartbeat sent to pilot");
@@ -290,15 +284,18 @@ impl PilotClient {
     }
 
     /// Fetch routing table
-    /// 
+    ///
     /// # Arguments
     /// - `current_version`: Current routing table version number (optional)
     ///   If provided and matches server version, register watch and wait for updates
-    /// 
+    ///
     /// # Returns
     /// - `Ok(RoutingTable)`: Latest routing table
     /// - `Err(PilotError)`: Fetch failed
-    pub async fn fetch_routing_table(&self, current_version: Option<u64>) -> Result<RoutingTable, PilotError> {
+    pub async fn fetch_routing_table(
+        &self,
+        current_version: Option<u64>,
+    ) -> Result<RoutingTable, PilotError> {
         #[derive(Deserialize)]
         struct ApiResponse<T> {
             success: bool,
@@ -307,19 +304,14 @@ impl PilotClient {
         }
 
         let mut url = format!("{}/api/v1/routing", self.config.pilot_addr);
-        
+
         // If version provided, add to query parameters
         if let Some(version) = current_version {
             url = format!("{}?version={}", url, version);
         }
 
-        let resp: ApiResponse<RoutingTable> = self
-            .http_client
-            .get(&url)
-            .send()
-            .await?
-            .json()
-            .await?;
+        let resp: ApiResponse<RoutingTable> =
+            self.http_client.get(&url).send().await?.json().await?;
 
         if resp.success {
             let table = resp.data.ok_or_else(|| PilotError::Api("No data".into()))?;
@@ -334,11 +326,11 @@ impl PilotClient {
     pub async fn refresh_routing(&self) -> Result<bool, PilotError> {
         // Get current version number
         let current_version = self.routing_table.read().version;
-        
+
         // Fetch latest routing table (if version matches, will wait for updates)
         let new_table = self.fetch_routing_table(Some(current_version)).await?;
         let mut current = self.routing_table.write();
-        
+
         if new_table.version > current.version {
             info!(
                 "Routing table updated: version {} -> {}",
@@ -352,7 +344,7 @@ impl PilotClient {
     }
 
     /// Report Raft group status to Pilot
-    /// 
+    ///
     /// # Arguments
     /// - `shard_id`: Shard ID (business layer ShardId)
     /// - `status`: Raft group status
@@ -417,13 +409,11 @@ impl PilotClient {
         // Heartbeat task
         let client = self.clone();
         let heartbeat_handle = tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(
-                client.config.heartbeat_interval_secs,
-            ));
-            
+            let mut interval = interval(Duration::from_secs(client.config.heartbeat_interval_secs));
+
             loop {
                 interval.tick().await;
-                
+
                 if let Err(e) = client.heartbeat().await {
                     warn!("Heartbeat failed: {}, attempting to re-register", e);
                     // Try to re-register
@@ -441,10 +431,10 @@ impl PilotClient {
             let mut interval = interval(Duration::from_secs(
                 client.config.routing_refresh_interval_secs,
             ));
-            
+
             loop {
                 interval.tick().await;
-                
+
                 if let Err(e) = client.refresh_routing().await {
                     warn!("Routing refresh failed: {}", e);
                 }
@@ -459,16 +449,16 @@ impl PilotClient {
     pub async fn connect(&self) -> Result<(), PilotError> {
         // Register node
         self.register().await?;
-        
+
         // Fetch initial routing table
         self.refresh_routing().await?;
-        
+
         info!(
             "Connected to pilot at {}, routing version {}",
             self.config.pilot_addr,
             self.routing_table.read().version
         );
-        
+
         Ok(())
     }
 }

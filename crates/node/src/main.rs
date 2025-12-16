@@ -154,7 +154,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         storage,
         network,
         redis_store,
-        config.node.shard_count,
         routing_table,
         config.clone(),
     ));
@@ -189,7 +188,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     let routing = client.routing_table();
                     let table = routing.read();
-                    node.router().update_from_pilot(&table);
+                    // TODO: Router update functionality will be redesigned
+                    // node.router().update_from_pilot(&table);
                     // Create Raft groups this node is responsible for based on routing table
                     let created = node.sync_raft_groups_from_routing(&table).await;
                     if created > 0 {
@@ -213,7 +213,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     loop {
                         interval.tick().await;
                         let table = routing_table.read().clone();
-                        node_clone.router().update_from_pilot(&table);
+                        // TODO: Router update functionality will be redesigned
+                        // node_clone.router().update_from_pilot(&table);
                         // Sync Raft groups
                         node_clone.sync_raft_groups_from_routing(&table).await;
                     }
@@ -236,16 +237,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print routing information
     {
-        let router = node.router();
-        if router.is_pilot_routing() {
-            info!(
-                "Using pilot routing: version {}, {} shards",
-                router.routing_version(),
-                router.shard_count()
-            );
-        } else {
-            info!("Using local routing: {} shards", router.shard_count());
-        }
+        // TODO: Router information display will be redesigned
+        // let router = node.router();
+        // if router.is_pilot_routing() {
+        //     info!(
+        //         "Using pilot routing: version {}, {} shards",
+        //         router.routing_version(),
+        //         router.shard_count()
+        //     );
+        // } else {
+        //     info!("Using local routing: {} shards", router.shard_count());
+        // }
+        info!("Using routing table for shard management");
     }
 
     // Start gRPC server for snapshot transfer service
