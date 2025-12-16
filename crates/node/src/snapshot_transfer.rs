@@ -287,53 +287,58 @@ pub async fn read_chunk_from_file(
     chunk_index: u32,
     chunk_metadata: &ChunkMetadata,
 ) -> Result<Vec<u8>, String> {
-    use std::fs::File;
-    use std::io::{Read, Seek, SeekFrom};
-
-    let mut file =
-        File::open(snapshot_path).map_err(|e| format!("Failed to open snapshot file: {}", e))?;
-
-    // Seek to chunk start (skip header)
-    // Header format: header_len (u32) + header_bytes
-    file.seek(SeekFrom::Start(chunk_metadata.file_offset))
-        .map_err(|e| format!("Failed to seek to chunk offset: {}", e))?;
-
-    // Read header length
-    let mut header_len_bytes = [0u8; 4];
-    file.read_exact(&mut header_len_bytes)
-        .map_err(|e| format!("Failed to read header length: {}", e))?;
-    let header_len = u32::from_le_bytes(header_len_bytes) as usize;
-
-    // Skip header (we already have metadata)
-    file.seek(SeekFrom::Current(header_len as i64))
-        .map_err(|e| format!("Failed to skip header: {}", e))?;
-
-    // Read compressed data
-    let mut compressed_data = vec![0u8; chunk_metadata.compressed_size as usize];
-    file.read_exact(&mut compressed_data)
-        .map_err(|e| format!("Failed to read compressed data: {}", e))?;
-
-    // Verify CRC32 in blocking thread pool (CPU-intensive operation)
-    let compressed_data_clone = compressed_data.clone();
+    let snapshot_path = snapshot_path.to_path_buf();
+    let file_offset = chunk_metadata.file_offset;
+    let compressed_size = chunk_metadata.compressed_size as usize;
     let expected_crc32 = chunk_metadata.crc32;
     let chunk_index_for_error = chunk_index;
 
-    // Use spawn_blocking to run CPU-intensive CRC32 calculation in blocking thread pool
-    tokio::task::spawn_blocking(move || {
+    // Use spawn_blocking to run file I/O and CPU-intensive CRC32 calculation in blocking thread pool
+    let (compressed_data, calculated_crc32) = tokio::task::spawn_blocking(move || {
+        use std::fs::File;
+        use std::io::{Read, Seek, SeekFrom};
         use crc32fast::Hasher as Crc32Hasher;
+
+        let mut file = File::open(&snapshot_path)
+            .map_err(|e| format!("Failed to open snapshot file: {}", e))?;
+
+        // Seek to chunk start (skip header)
+        // Header format: header_len (u32) + header_bytes
+        file.seek(SeekFrom::Start(file_offset))
+            .map_err(|e| format!("Failed to seek to chunk offset: {}", e))?;
+
+        // Read header length
+        let mut header_len_bytes = [0u8; 4];
+        file.read_exact(&mut header_len_bytes)
+            .map_err(|e| format!("Failed to read header length: {}", e))?;
+        let header_len = u32::from_le_bytes(header_len_bytes) as usize;
+
+        // Skip header (we already have metadata)
+        file.seek(SeekFrom::Current(header_len as i64))
+            .map_err(|e| format!("Failed to skip header: {}", e))?;
+
+        // Read compressed data
+        let mut compressed_data = vec![0u8; compressed_size];
+        file.read_exact(&mut compressed_data)
+            .map_err(|e| format!("Failed to read compressed data: {}", e))?;
+
+        // Calculate CRC32 (CPU-intensive operation)
         let mut hasher = Crc32Hasher::new();
-        hasher.update(&compressed_data_clone);
+        hasher.update(&compressed_data);
         let calculated_crc32 = hasher.finalize();
-        if calculated_crc32 != expected_crc32 {
-            return Err(format!(
-                "CRC32 mismatch for chunk {}: expected {}, got {}",
-                chunk_index_for_error, expected_crc32, calculated_crc32
-            ));
-        }
-        Ok(())
+
+        Ok::<(Vec<u8>, u32), String>((compressed_data, calculated_crc32))
     })
     .await
-    .map_err(|e| format!("Failed to join CRC32 calculation task: {}", e))??;
+    .map_err(|e| format!("Failed to join file read task: {}", e))??;
+
+    // Verify CRC32 outside spawn_blocking
+    if calculated_crc32 != expected_crc32 {
+        return Err(format!(
+            "CRC32 mismatch for chunk {}: expected {}, got {}",
+            chunk_index_for_error, expected_crc32, calculated_crc32
+        ));
+    }
 
     // Return compressed data (no decompression needed, data is sent in compressed form)
     Ok(compressed_data)
