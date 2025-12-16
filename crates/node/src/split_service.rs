@@ -516,30 +516,39 @@ impl SplitServiceImpl {
         let timeout = Duration::from_secs(300); // 5 minutes timeout
 
         loop {
-            let chunk_index_guard = chunk_index.read();
-            if chunk_index_guard.is_complete {
+            // Check status without holding lock across await
+            let (is_complete, error_msg, generated_chunks, total_uncompressed_size) = {
+                let chunk_index_guard = chunk_index.read();
+                (
+                    chunk_index_guard.is_complete,
+                    chunk_index_guard.error.clone(),
+                    chunk_index_guard.generated_chunks,
+                    chunk_index_guard.total_uncompressed_size,
+                )
+            };
+
+            if is_complete {
                 // Update progress
                 let mut progress = task_manager
                     .get_task(task_id)
                     .map(|t| t.progress)
                     .unwrap_or_default();
                 progress.snapshot_progress_percent = 100;
-                progress.bytes_total = chunk_index_guard.total_uncompressed_size;
-                progress.bytes_transferred = chunk_index_guard.total_uncompressed_size;
+                progress.bytes_total = total_uncompressed_size;
+                progress.bytes_transferred = total_uncompressed_size;
                 let _ = task_manager.update_task_progress(task_id, progress);
                 info!(
                     "Snapshot file generation completed for split task {} transfer {}: {} chunks, {} bytes",
-                    task_id, transfer_id, chunk_index_guard.generated_chunks, chunk_index_guard.total_uncompressed_size
+                    task_id, transfer_id, generated_chunks, total_uncompressed_size
                 );
                 break;
             }
-            if let Some(ref error) = chunk_index_guard.error {
+            if let Some(ref error) = error_msg {
                 return Err(format!("Snapshot generation failed: {}", error));
             }
             if start.elapsed() > timeout {
                 return Err(format!("Timeout waiting for snapshot file generation ({}s)", timeout.as_secs()));
             }
-            drop(chunk_index_guard);
             sleep(Duration::from_millis(100)).await;
         }
 

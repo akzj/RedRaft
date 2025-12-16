@@ -13,9 +13,9 @@ use crate::rocksdb::key_encoding::{
 };
 use crate::rocksdb::ShardedRocksDB;
 use crate::traits::{StoreError, StoreResult};
-use rr_core::shard::ShardId;
 use bytes::Bytes;
 use rocksdb::{ColumnFamily, WriteBatch};
+use rr_core::shard::ShardId;
 
 impl ShardedRocksDB {
     /// HGET
@@ -288,9 +288,9 @@ impl ShardedRocksDB {
         delta: i64,
         apply_index: Option<u64>,
     ) -> StoreResult<i64> {
-        let cf = self
-            .get_cf(shard_id)
-            .ok_or_else(|| StoreError::Internal(format!("Column Family not found for shard {}", shard_id)))?;
+        let cf = self.get_cf(shard_id).ok_or_else(|| {
+            StoreError::Internal(format!("Column Family not found for shard {}", shard_id))
+        })?;
         let db_key = hash_field_key(key, field);
 
         let (current, is_new) = match self.db.get_cf(cf, &db_key) {
