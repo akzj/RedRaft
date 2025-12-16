@@ -117,14 +117,14 @@ impl SnapshotStore for HybridStore {
                         }
                     };
 
-                    // Skip apply_index key
-                    if key.starts_with(b"@:") {
+                    // Skip apply_index key (format: @:apply_index)
+                    if key.len() >= 2 && key[0] == KEY_PREFIX_APPLY_INDEX && key[1] == b':' {
                         continue;
                     }
 
                     // Parse key to determine type
-                    if key.starts_with(b"s:") {
-                        // String: s:{key} -> value
+                    // String key format: s:{key}
+                    if key.len() >= 2 && key[0] == KEY_PREFIX_STRING && key[1] == b':' {
                         let original_key = &key[2..];
                         // Filter by slot range if specified
                         if !key_in_range(original_key) {
@@ -134,7 +134,7 @@ impl SnapshotStore for HybridStore {
                             bytes::Bytes::copy_from_slice(original_key),
                             bytes::Bytes::copy_from_slice(&value),
                         ));
-                    } else if key.starts_with(b"h:") {
+                    } else if key.len() >= 2 && key[0] == KEY_PREFIX_HASH && key[1] == b':' {
                         // Hash field: h:{key}:{field} -> value
                         // Find the second colon
                         let key_part = &key[2..];
