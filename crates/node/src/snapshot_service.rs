@@ -3,6 +3,7 @@
 //! Implements the gRPC service for pulling snapshot data from Leader to Follower.
 //! Supports streaming snapshot chunks while generation is in progress.
 
+use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
@@ -164,7 +165,7 @@ async fn stream_snapshot_chunks(
     start_offset: u64,
     _max_chunk_size: u32,
     tx: tokio::sync::mpsc::Sender<Result<PullSnapshotDataResponse, Status>>,
-) -> Result<(), String> {
+) -> Result<()> {
     // Find the starting chunk based on offset
     // We need to wait for chunks to be generated if still generating
     let (start_chunk_index, total_size, is_complete) = {
@@ -236,10 +237,8 @@ async fn stream_snapshot_chunks(
             }
             Err(e) => {
                 let error_msg = format!("Failed to wait for chunk {}: {}", current_chunk_index, e);
-                let _ = tx
-                    .send(Err(Status::internal(error_msg.clone())))
-                    .await;
-                return Err(error_msg);
+                let _ = tx.send(Err(Status::internal(error_msg.clone()))).await;
+                return Err(e).context(format!("Failed to wait for chunk {}", current_chunk_index));
             }
         };
 
@@ -255,7 +254,7 @@ async fn stream_snapshot_chunks(
             Err(e) => {
                 let error_msg = format!("Failed to read chunk {}: {}", current_chunk_index, e);
                 let _ = tx.send(Err(Status::internal(error_msg.clone()))).await;
-                return Err(error_msg);
+                return Err(e).context(format!("Failed to read chunk {}", current_chunk_index));
             }
         };
 
