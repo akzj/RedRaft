@@ -246,6 +246,33 @@ impl SyncServiceImpl {
     pub fn task_manager(&self) -> &Arc<SyncTaskManager> {
         &self.task_manager
     }
+
+    /// Get gRPC endpoint URI for a node
+    /// 
+    /// Retrieves the gRPC address from routing table and ensures it has
+    /// a protocol prefix (http:// or https://).
+    /// 
+    /// Returns the endpoint URI, or an error if the node is not found.
+    fn get_node_grpc_endpoint(
+        routing_table: &rr_core::routing::RoutingTable,
+        node_id: &str,
+    ) -> Result<String, String> {
+        let grpc_addr = routing_table
+            .get_grpc_address(&node_id.to_string())
+            .ok_or_else(|| format!("No gRPC address found for node {}", node_id))?;
+
+        // Ensure the address has a protocol prefix
+        // If it already has http:// or https://, use it as-is
+        // Otherwise, assume http:// (for development/non-TLS environments)
+        // Note: gRPC uses HTTP/2, so http:// is valid for non-TLS connections
+        let endpoint_uri = if grpc_addr.starts_with("http://") || grpc_addr.starts_with("https://") {
+            grpc_addr
+        } else {
+            format!("http://{}", grpc_addr)
+        };
+
+        Ok(endpoint_uri)
+    }
 }
 
 #[tonic::async_trait]
@@ -345,28 +372,16 @@ impl SyncService for SyncServiceImpl {
 
                     // 1. Get gRPC address of source node from routing table
                     let routing_table = node_clone.routing_table();
-                    let source_grpc_addr = match routing_table.get_grpc_address(&source_node_id) {
-                        Some(addr) => addr,
-                        None => {
+                    let endpoint_uri = match Self::get_node_grpc_endpoint(routing_table, &source_node_id) {
+                        Ok(uri) => uri,
+                        Err(e) => {
                             error!(
-                                "No gRPC address found for source node {} (task {})",
-                                source_node_id, task_id_clone
+                                "Failed to get gRPC endpoint for source node {} (task {}): {}",
+                                source_node_id, task_id_clone, e
                             );
-                            let _ = task_manager_clone.set_task_error(
-                                &task_id_clone,
-                                format!("No gRPC address found for source node {}", source_node_id),
-                            );
+                            let _ = task_manager_clone.set_task_error(&task_id_clone, e);
                             return;
                         }
-                    };
-
-                    // Ensure the address has a protocol prefix
-                    let endpoint_uri = if source_grpc_addr.starts_with("http://")
-                        || source_grpc_addr.starts_with("https://")
-                    {
-                        source_grpc_addr.clone()
-                    } else {
-                        format!("http://{}", source_grpc_addr)
                     };
 
                     // 2. Create SyncService client to source node
