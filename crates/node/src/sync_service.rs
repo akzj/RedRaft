@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::Result;
 use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
 use tracing::{error, info, warn};
@@ -14,9 +15,9 @@ use tracing::{error, info, warn};
 use crate::node::RRNode;
 use crate::snapshot_transfer::SnapshotTransferManager;
 use proto::sync_service::{
-    sync_service_server::SyncService, GetSyncStatusRequest, GetSyncStatusResponse,
-    PullSyncDataRequest, PullSyncDataResponse, SyncDataType, SyncPhase, SyncProgress,
-    SyncStatus, SyncType, StartSyncRequest, StartSyncResponse,
+    sync_service_client::SyncServiceClient, sync_service_server::SyncService, GetSyncStatusRequest,
+    GetSyncStatusResponse, PullSyncDataRequest, PullSyncDataResponse, StartSyncRequest,
+    StartSyncResponse, SyncDataType, SyncPhase, SyncProgress, SyncStatus, SyncType,
 };
 
 /// Sync task state
@@ -228,23 +229,82 @@ pub struct SyncServiceImpl {
     task_manager: Arc<SyncTaskManager>,
     /// Snapshot transfer manager (for snapshot chunk streaming)
     snapshot_transfer_manager: Arc<SnapshotTransferManager>,
+    /// gRPC client connection pool (node_id -> client)
+    client_pool: Arc<RwLock<HashMap<String, Arc<SyncServiceClient<tonic::transport::Channel>>>>>,
 }
 
 impl SyncServiceImpl {
-    pub fn new(
-        node: Arc<RRNode>,
-        snapshot_transfer_manager: Arc<SnapshotTransferManager>,
-    ) -> Self {
+    pub fn new(node: Arc<RRNode>, snapshot_transfer_manager: Arc<SnapshotTransferManager>) -> Self {
         Self {
             node,
             task_manager: Arc::new(SyncTaskManager::new()),
             snapshot_transfer_manager,
+            client_pool: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     /// Get task manager reference
     pub fn task_manager(&self) -> &Arc<SyncTaskManager> {
         &self.task_manager
+    }
+
+    /// Get or create SyncService client for a node (static helper for use in async closures)
+    ///
+    /// Uses connection pool to reuse existing connections.
+    /// If connection doesn't exist, creates a new one and adds it to the pool.
+    async fn get_or_create_sync_client_static(
+        node: &Arc<RRNode>,
+        client_pool: &Arc<RwLock<HashMap<String, Arc<SyncServiceClient<tonic::transport::Channel>>>>>,
+        node_id: &str,
+    ) -> Result<Arc<SyncServiceClient<tonic::transport::Channel>>, String> {
+        // Check if client already exists in pool
+        {
+            let pool = client_pool.read();
+            if let Some(client) = pool.get(node_id) {
+                return Ok(Arc::clone(client));
+            }
+        }
+
+        // Client doesn't exist, create new connection
+        let endpoint_uri = node.get_node_grpc_endpoint(node_id)
+            .map_err(|e| format!("Failed to get endpoint: {}", e))?;
+
+        use tonic::transport::Endpoint;
+        let endpoint = Endpoint::from_shared(endpoint_uri.clone())
+            .map_err(|e| format!("Invalid endpoint {}: {}", endpoint_uri, e))?;
+
+        let client = SyncServiceClient::connect(endpoint)
+            .await
+            .map_err(|e| format!("Failed to connect to node {}: {}", node_id, e))?;
+
+        let client_arc = Arc::new(client);
+
+        // Add to pool
+        {
+            let mut pool = client_pool.write();
+            // Double-check in case another thread created it while we were connecting
+            if let Some(existing) = pool.get(node_id) {
+                return Ok(Arc::clone(existing));
+            }
+            pool.insert(node_id.to_string(), Arc::clone(&client_arc));
+        }
+
+        info!(
+            "Created new SyncService client connection for node {}",
+            node_id
+        );
+        Ok(client_arc)
+    }
+
+    /// Get or create SyncService client for a node
+    ///
+    /// Uses connection pool to reuse existing connections.
+    /// If connection doesn't exist, creates a new one and adds it to the pool.
+    pub async fn get_or_create_sync_client(
+        &self,
+        node_id: &str,
+    ) -> Result<Arc<SyncServiceClient<tonic::transport::Channel>>, String> {
+        Self::get_or_create_sync_client_static(&self.node, &self.client_pool, node_id).await
     }
 }
 
@@ -284,7 +344,10 @@ impl SyncService for SyncServiceImpl {
             return Ok(Response::new(StartSyncResponse {
                 task_id: task_id.clone(),
                 success: false,
-                error_message: format!("Target shard {} not found on this node", req.target_shard_id),
+                error_message: format!(
+                    "Target shard {} not found on this node",
+                    req.target_shard_id
+                ),
             }));
         }
 
@@ -301,7 +364,7 @@ impl SyncService for SyncServiceImpl {
         let target_shard_id = req.target_shard_id.clone();
         let source_node_id = req.source_node_id.clone();
         let target_node_id = req.target_node_id.clone();
-        
+
         match self.task_manager.create_task(
             task_id.clone(),
             source_shard_id.clone(),
@@ -316,10 +379,11 @@ impl SyncService for SyncServiceImpl {
         ) {
             Ok(()) => {
                 info!("Created sync task on PULL side: {}", task_id);
-                
+
                 // Spawn background task to pull data from PUSH side (source node)
                 let task_manager_clone = self.task_manager.clone();
                 let node_clone = self.node.clone();
+                let client_pool_clone = self.client_pool.clone();
                 let task_id_clone = task_id.clone();
                 let sync_type_clone = sync_type;
                 let start_index = req.start_index;
@@ -343,12 +407,18 @@ impl SyncService for SyncServiceImpl {
                         return;
                     }
 
-                    // 1. Get gRPC address of source node from routing table
-                    let endpoint_uri = match node_clone.get_node_grpc_endpoint(&source_node_id) {
-                        Ok(uri) => uri,
+                    // 1. Get or create SyncService client from connection pool
+                    let sync_client = match Self::get_or_create_sync_client_static(
+                        &node_clone,
+                        &client_pool_clone,
+                        &source_node_id,
+                    )
+                    .await
+                    {
+                        Ok(client) => client,
                         Err(e) => {
                             error!(
-                                "Failed to get gRPC endpoint for source node {} (task {}): {}",
+                                "Failed to get SyncService client for source node {} (task {}): {}",
                                 source_node_id, task_id_clone, e
                             );
                             let _ = task_manager_clone.set_task_error(&task_id_clone, e);
@@ -356,47 +426,15 @@ impl SyncService for SyncServiceImpl {
                         }
                     };
 
-                    // 2. Create SyncService client to source node
-                    use proto::sync_service::sync_service_client::SyncServiceClient;
-                    use tonic::transport::Endpoint;
-
-                    let endpoint = match Endpoint::from_shared(endpoint_uri.clone()) {
-                        Ok(e) => e,
-                        Err(e) => {
-                            error!(
-                                "Invalid source endpoint {} for task {}: {}",
-                                endpoint_uri, task_id_clone, e
-                            );
-                            let _ = task_manager_clone.set_task_error(
-                                &task_id_clone,
-                                format!("Invalid source endpoint: {}", e),
-                            );
-                            return;
-                        }
-                    };
-
-                    let mut sync_client = match SyncServiceClient::connect(endpoint).await {
-                        Ok(client) => client,
-                        Err(e) => {
-                            error!(
-                                "Failed to connect to source node {} for task {}: {}",
-                                endpoint_uri, task_id_clone, e
-                            );
-                            let _ = task_manager_clone.set_task_error(
-                                &task_id_clone,
-                                format!("Failed to connect to source node: {}", e),
-                            );
-                            return;
-                        }
-                    };
-
                     info!(
-                        "Connected to source node {} for sync task {}",
-                        endpoint_uri, task_id_clone
+                        "Using SyncService client for source node {} (task {})",
+                        source_node_id, task_id_clone
                     );
 
                     // 3. Pull snapshot chunks if needed (for FULL_SYNC or SNAPSHOT_ONLY)
-                    if sync_type_clone == SyncType::FullSync || sync_type_clone == SyncType::SnapshotOnly {
+                    if sync_type_clone == SyncType::FullSync
+                        || sync_type_clone == SyncType::SnapshotOnly
+                    {
                         if let Err(e) = task_manager_clone.update_task_status(
                             &task_id_clone,
                             SyncStatus::InProgress,
@@ -415,10 +453,9 @@ impl SyncService for SyncServiceImpl {
                             max_entries: 0,
                         };
 
-                        match sync_client
-                            .pull_sync_data(Request::new(pull_request))
-                            .await
-                        {
+                        // Clone the client to get a mutable reference (tonic clients are Clone)
+                        let mut client = (*sync_client).clone();
+                        match client.pull_sync_data(Request::new(pull_request)).await {
                             Ok(response) => {
                                 let mut stream = response.into_inner();
                                 let mut total_bytes = 0u64;
@@ -455,7 +492,8 @@ impl SyncService for SyncServiceImpl {
                                             progress.bytes_transferred = total_bytes;
                                             if progress.bytes_total > 0 {
                                                 progress.snapshot_progress_percent =
-                                                    ((total_bytes * 100) / progress.bytes_total) as u32;
+                                                    ((total_bytes * 100) / progress.bytes_total)
+                                                        as u32;
                                             }
                                             let _ = task_manager_clone
                                                 .update_task_progress(&task_id_clone, progress);
@@ -509,7 +547,9 @@ impl SyncService for SyncServiceImpl {
                     }
 
                     // 4. Pull entry logs if needed (for FULL_SYNC or INCREMENTAL_SYNC)
-                    if sync_type_clone == SyncType::FullSync || sync_type_clone == SyncType::IncrementalSync {
+                    if sync_type_clone == SyncType::FullSync
+                        || sync_type_clone == SyncType::IncrementalSync
+                    {
                         if let Err(e) = task_manager_clone.update_task_status(
                             &task_id_clone,
                             SyncStatus::InProgress,
@@ -532,15 +572,16 @@ impl SyncService for SyncServiceImpl {
                                 max_entries: 100, // Pull 100 entries at a time
                             };
 
-                            match sync_client
-                                .pull_sync_data(Request::new(pull_request))
-                                .await
-                            {
+                            // Clone the client to get a mutable reference (tonic clients are Clone)
+                        let mut client = (*sync_client).clone();
+                        match client.pull_sync_data(Request::new(pull_request)).await {
                                 Ok(response) => {
                                     let mut stream = response.into_inner();
                                     let mut batch_entries = 0u64;
 
-                                    while let Some(chunk_result) = stream.message().await.transpose() {
+                                    while let Some(chunk_result) =
+                                        stream.message().await.transpose()
+                                    {
                                         match chunk_result {
                                             Ok(chunk) => {
                                                 if !chunk.entry_logs.is_empty() {
@@ -555,7 +596,9 @@ impl SyncService for SyncServiceImpl {
                                                     total_entries += chunk.entry_logs.len() as u64;
 
                                                     // Update current index
-                                                    if let Some(last_entry) = chunk.entry_logs.last() {
+                                                    if let Some(last_entry) =
+                                                        chunk.entry_logs.last()
+                                                    {
                                                         current_index = last_entry.index + 1;
                                                     }
 
@@ -567,13 +610,18 @@ impl SyncService for SyncServiceImpl {
                                                     progress.entries_transferred = total_entries;
                                                     progress.current_index = current_index;
                                                     if end_index > 0 && end_index > start_index {
-                                                        progress.entries_total = end_index - start_index;
+                                                        progress.entries_total =
+                                                            end_index - start_index;
                                                         progress.log_replay_progress_percent =
                                                             (((current_index - start_index) * 100)
-                                                                / (end_index - start_index)) as u32;
+                                                                / (end_index - start_index))
+                                                                as u32;
                                                     }
                                                     let _ = task_manager_clone
-                                                        .update_task_progress(&task_id_clone, progress);
+                                                        .update_task_progress(
+                                                            &task_id_clone,
+                                                            progress,
+                                                        );
                                                 }
 
                                                 if chunk.is_last_chunk {
@@ -737,7 +785,9 @@ impl SyncService for SyncServiceImpl {
             }
         });
 
-        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
     }
 
     async fn get_sync_status(
@@ -875,4 +925,3 @@ async fn stream_entry_logs_from_source(
 
     Ok(())
 }
-
