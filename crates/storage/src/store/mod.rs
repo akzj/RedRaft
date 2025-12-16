@@ -192,9 +192,9 @@ impl HybridStore {
     /// Flush all data to disk (WAL and RocksDB)
     ///
     /// Ensures all writes are persisted to disk by flushing both WAL and RocksDB.
-    pub async fn flush(&self) -> Result<()> {
+    pub fn flush(&self) -> Result<()> {
         // Flush WAL to ensure all writes are persisted
-        self.flush_wal().await?;
+        self.flush_wal()?;
 
         // Flush RocksDB to ensure all writes are persisted
         self.rocksdb
@@ -205,7 +205,7 @@ impl HybridStore {
     }
 
     /// Flush WAL only
-    pub async fn flush_wal(&self) -> Result<()> {
+    pub fn flush_wal(&self) -> Result<()> {
         self.wal_writer.write().flush()
     }
 

@@ -26,6 +26,7 @@ crc = { workspace = true }
 serde_json = { workspace = true }
 zstd = "0.13.3"
 async-trait.workspace = true
+crossbeam-channel = "0.5"
 
 [dev-dependencies]
 rand = { workspace = true }

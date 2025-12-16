@@ -401,7 +401,7 @@ impl StateMachine for KVStateMachine {
         _config: ClusterConfig,
         _saver: Arc<dyn SnapshotStorage>,
     ) -> StorageResult<(u64, u64)> {
-        self.store.flush().await.map_err(|e| {
+        self.store.flush().map_err(|e| {
             raft::StorageError::SnapshotCreationFailed(format!("Failed to flush store: {}", e))
         })?;
         Ok((
