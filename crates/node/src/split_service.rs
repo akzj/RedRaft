@@ -417,8 +417,8 @@ impl SplitServiceImpl {
             task_id, source_shard_id, target_shard_id, slot_start, slot_end
         );
 
-        // Get source shard RaftId
-        let source_raft_id = node
+        // Get source shard RaftId (for validation)
+        let _source_raft_id = node
             .get_raft_group(source_shard_id)
             .ok_or_else(|| format!("Source shard {} not found", source_shard_id))?;
 
@@ -430,23 +430,20 @@ impl SplitServiceImpl {
 
         // Create snapshot with slot range filter
         // This uses the new key_range parameter we added
-        let transfer_id = SnapshotTransferManager::generate_transfer_id();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
 
         // Create snapshot in blocking context
         let store = source_state_machine.store().clone();
         let shard_id_str = source_shard_id.to_string();
         let key_range = Some((slot_start, slot_end));
+        drop(state_machines); // Release lock before blocking operation
 
         use storage::SnapshotStore;
-        tokio::task::spawn_blocking(move || {
-            tokio::runtime::Handle::current().block_on(
-                store.create_snapshot(&shard_id_str, tx, key_range)
-            )
-        })
-        .await
-        .map_err(|e| format!("Failed to join snapshot creation task: {}", e))?
-        .map_err(|e| format!("Failed to create snapshot: {}", e))?;
+        drop(state_machines); // Release lock before async operation
+        store
+            .create_snapshot(&shard_id_str, tx, key_range)
+            .await
+            .map_err(|e| format!("Failed to create snapshot: {}", e))?;
 
         // TODO: Transfer snapshot chunks to target shard
         // This would involve:
@@ -487,9 +484,10 @@ impl SplitServiceImpl {
 
         let routing_table = node.routing_table();
 
-        // Get current source shard routing
-        let source_routing = routing_table
-            .get_shard_routing(source_shard_id)
+        // Get current source shard routing (for validation)
+        let source_shard_id_string = source_shard_id.to_string();
+        let _source_routing = routing_table
+            .get_shard_routing(&source_shard_id_string)
             .ok_or_else(|| format!("Source shard routing {} not found", source_shard_id))?;
 
         // Update source shard routing: [source_slot_start, split_slot)
