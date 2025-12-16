@@ -6,6 +6,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rr_core::routing::RoutingTable;
 use rr_core::shard::ShardId;
+use tracing::error;
 
 #[async_trait]
 impl SnapshotStore for HybridStore {
