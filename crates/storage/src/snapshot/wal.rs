@@ -6,8 +6,9 @@
 //! - Metadata: shard_id -> [apply_index_begin, apply_index_end)
 //! - Timed rotation + metadata file
 
-use crate::shard::{slot_for_key, ShardId};
 use crate::snapshot::SnapshotConfig;
+use rr_core::routing::RoutingTable;
+use rr_core::shard::ShardId;
 use anyhow::Result;
 use crossbeam_channel;
 use resp::Command;
@@ -215,7 +216,7 @@ impl WalWriter {
         key: &[u8],
     ) -> Result<()> {
         // Calculate shard_id from key using slot_for_key
-        let slot = slot_for_key(key);
+        let slot = RoutingTable::slot_for_key(key);
         let shard_id = format!("shard_{}", slot % inner.config.shard_count);
 
         // Serialize command

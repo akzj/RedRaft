@@ -6,8 +6,8 @@
 //! - Metadata: metadata.json with shard_index, chunks[], checksum[]
 
 use crate::memory::{DataCow, MemStoreCow};
-use crate::shard::ShardId;
 use crate::snapshot::{chunk::ChunkWriter, SnapshotConfig};
+use rr_core::shard::ShardId;
 use crc32fast::Hasher as Crc32Hasher;
 use serde::{Deserialize, Serialize};
 use std::fs::File;

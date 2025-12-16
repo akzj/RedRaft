@@ -12,8 +12,8 @@ use crate::rocksdb::key_encoding::{
     extract_hash_field, hash_field_key, hash_field_prefix, hash_meta_key,
 };
 use crate::rocksdb::ShardedRocksDB;
-use crate::shard::ShardId;
 use crate::traits::{StoreError, StoreResult};
+use rr_core::shard::ShardId;
 use bytes::Bytes;
 use rocksdb::{ColumnFamily, WriteBatch};
 

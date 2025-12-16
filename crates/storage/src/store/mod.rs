@@ -20,8 +20,8 @@ mod string;
 
 use crate::memory;
 use crate::rocksdb::ShardedRocksDB;
-use crate::shard::ShardId;
 use crate::snapshot::{SegmentGenerator, SnapshotConfig, WalWriter};
+use rr_core::shard::ShardId;
 use crate::traits::StoreError;
 use anyhow::Result;
 use parking_lot::RwLock;

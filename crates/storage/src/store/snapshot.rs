@@ -1,7 +1,7 @@
 //! Snapshot Store implementation for HybridStore
 
-use crate::shard::ShardId;
 use crate::store::HybridStore;
+use rr_core::shard::ShardId;
 use crate::traits::{SnapshotStore, SnapshotStoreEntry, StoreError};
 use anyhow::Result;
 use async_trait::async_trait;

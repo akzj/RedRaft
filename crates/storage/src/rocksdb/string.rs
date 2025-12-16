@@ -9,8 +9,8 @@
 
 use crate::rocksdb::key_encoding::string_key;
 use crate::rocksdb::ShardedRocksDB;
-use crate::shard::ShardId;
 use crate::traits::{StoreError, StoreResult};
+use rr_core::shard::ShardId;
 use anyhow::Result;
 use rocksdb::WriteBatch;
 use tracing::error;

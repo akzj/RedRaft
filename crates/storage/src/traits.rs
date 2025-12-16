@@ -17,7 +17,7 @@ use resp::Command;
 
 use bytes::Bytes;
 
-use crate::shard::ShardId;
+use rr_core::shard::ShardId;
 
 // ============================================================================
 // Error Types
