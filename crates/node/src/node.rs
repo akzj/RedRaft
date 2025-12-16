@@ -95,8 +95,7 @@ pub struct RedRaftNode {
     state_machines: Arc<Mutex<HashMap<String, Arc<KVStateMachine>>>>,
     /// Pending request tracker
     pending_requests: PendingRequests,
-    /// Optional Pilot client for status reporting
-    pilot_client: Arc<RwLock<Option<Arc<crate::pilot_client::PilotClient>>>>,
+
     /// Snapshot transfer manager
     snapshot_transfer_manager: Arc<SnapshotTransferManager>,
     /// Configuration
@@ -121,15 +120,9 @@ impl RedRaftNode {
             routing_table,
             state_machines: Arc::new(Mutex::new(HashMap::new())),
             pending_requests: PendingRequests::new(),
-            pilot_client: Arc::new(RwLock::new(None)),
             snapshot_transfer_manager: Arc::new(SnapshotTransferManager::new()),
             config,
         }
-    }
-
-    /// Set Pilot client for status reporting
-    pub fn set_pilot_client(&self, client: Arc<crate::pilot_client::PilotClient>) {
-        *self.pilot_client.write() = Some(client);
     }
 
     /// Get pending request tracker
@@ -261,101 +254,6 @@ impl RedRaftNode {
 
         info!("Created Raft group: {}", raft_id);
         Ok(raft_id)
-    }
-
-    /// Sync Raft groups from routing table
-    ///
-    /// Check shards this node is responsible for in routing table, automatically create missing Raft groups.
-    /// This method should be called after routing table updates.
-    ///
-    /// # Returns
-    /// Returns the number of newly created Raft groups
-    pub async fn sync_raft_groups_from_routing(
-        &self,
-        routing_table: &crate::pilot_client::RoutingTable,
-    ) -> usize {
-        let mut created_count = 0;
-
-        for (shard_id, nodes) in &routing_table.shard_nodes {
-            // Check if this node is a replica for this shard
-            if !nodes.contains(&self.node_id) {
-                continue;
-            }
-
-            // Check if Raft group already exists
-            if self.get_raft_group(shard_id).is_some() {
-                continue;
-            }
-
-            // Create Raft group
-            info!(
-                "Creating Raft group for shard {} (nodes: {:?})",
-                shard_id, nodes
-            );
-
-            match self
-                .create_raft_group(shard_id.clone(), nodes.clone())
-                .await
-            {
-                Ok(raft_id) => {
-                    info!("Successfully created Raft group: {}", raft_id);
-                    created_count += 1;
-
-                    // Report success to Pilot
-                    if let Some(client) = self.pilot_client.read().as_ref() {
-                        let client = client.clone();
-                        let shard_id_clone = shard_id.clone();
-                        tokio::spawn(async move {
-                            use pilot::RaftGroupStatus;
-                            if let Err(e) = client
-                                .report_shard_status(&shard_id_clone, RaftGroupStatus::Ready, None)
-                                .await
-                            {
-                                warn!(
-                                    "Failed to report shard {} ready status to pilot: {}",
-                                    shard_id_clone, e
-                                );
-                            }
-                        });
-                    }
-                }
-                Err(e) => {
-                    let error_msg = e.clone();
-                    info!("Failed to create Raft group for shard {}: {}", shard_id, e);
-
-                    // Report failure to Pilot
-                    if let Some(client) = self.pilot_client.read().as_ref() {
-                        let client = client.clone();
-                        let shard_id_clone = shard_id.clone();
-                        tokio::spawn(async move {
-                            use pilot::RaftGroupStatus;
-                            if let Err(report_err) = client
-                                .report_shard_status(
-                                    &shard_id_clone,
-                                    RaftGroupStatus::Failed,
-                                    Some(&error_msg),
-                                )
-                                .await
-                            {
-                                warn!(
-                                    "Failed to report shard {} failure status to pilot: {}",
-                                    shard_id_clone, report_err
-                                );
-                            }
-                        });
-                    }
-                }
-            }
-        }
-
-        if created_count > 0 {
-            info!(
-                "Synced {} Raft groups from routing table (version {})",
-                created_count, routing_table.version
-            );
-        }
-
-        created_count
     }
 
     /// Handle client command

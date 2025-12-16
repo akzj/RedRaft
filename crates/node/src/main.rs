@@ -17,7 +17,6 @@ use tonic::transport::Server;
 
 use redraft::config::Config;
 use redraft::node::RedRaftNode;
-use redraft::pilot_client::{PilotClient, PilotClientConfig};
 use redraft::server::RedisServer;
 use redraft::snapshot_service::SnapshotServiceImpl;
 
@@ -161,96 +160,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start node
     node.start().await?;
 
-    // If Pilot address specified, connect to Pilot
-    let _pilot_client = if let Some(pilot_config) = &config.pilot {
-        info!("Connecting to pilot at {}", pilot_config.pilot_addr);
-
-        let pilot_client_config = PilotClientConfig {
-            pilot_addr: pilot_config.pilot_addr.clone(),
-            heartbeat_interval_secs: pilot_config.heartbeat_interval_secs,
-            routing_refresh_interval_secs: pilot_config.routing_refresh_interval_secs,
-            request_timeout_secs: pilot_config.request_timeout_secs,
-        };
-
-        let client = Arc::new(PilotClient::new(
-            pilot_client_config,
-            config.node.node_id.clone(),
-            config.network.grpc_addr.clone(),
-            config.network.redis_addr.clone(),
-        ));
-
-        // Connect and initialize
-        match client.connect().await {
-            Ok(()) => {
-                info!("Connected to pilot successfully");
-
-                // Update node routing table and sync Raft groups
-                {
-                    let routing = client.routing_table();
-                    let table = routing.read();
-                    // TODO: Router update functionality will be redesigned
-                    // node.router().update_from_pilot(&table);
-                    // Create Raft groups this node is responsible for based on routing table
-                    let created = node.sync_raft_groups_from_routing(&table).await;
-                    if created > 0 {
-                        info!("Initial sync: created {} Raft groups", created);
-                    }
-                }
-
-                // Set Pilot client for status reporting
-                node.set_pilot_client(client.clone());
-
-                // Start background tasks
-                let _handles = client.clone().start_background_tasks();
-
-                // Start routing table sync task
-                let node_clone = node.clone();
-                let routing_table = client.routing_table();
-                let sync_interval = config.server.routing_sync_interval();
-                tokio::spawn(async move {
-                    use tokio::time::interval;
-                    let mut interval = interval(sync_interval);
-                    loop {
-                        interval.tick().await;
-                        let table = routing_table.read().clone();
-                        // TODO: Router update functionality will be redesigned
-                        // node_clone.router().update_from_pilot(&table);
-                        // Sync Raft groups
-                        node_clone.sync_raft_groups_from_routing(&table).await;
-                    }
-                });
-
-                Some(client)
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to connect to pilot: {}, running in standalone mode",
-                    e
-                );
-                None
-            }
-        }
-    } else {
-        info!("No pilot address specified, running in standalone mode");
-        None
-    };
-
-    // Print routing information
-    {
-        // TODO: Router information display will be redesigned
-        // let router = node.router();
-        // if router.is_pilot_routing() {
-        //     info!(
-        //         "Using pilot routing: version {}, {} shards",
-        //         router.routing_version(),
-        //         router.shard_count()
-        //     );
-        // } else {
-        //     info!("Using local routing: {} shards", router.shard_count());
-        // }
-        info!("Using routing table for shard management");
-    }
-
     // Start gRPC server for snapshot transfer service
     // Note: The network layer needs to have a dispatcher set up before calling get_raft_service
     // This is typically done in the node.start() method or when creating Raft groups
@@ -265,9 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Create SnapshotService server
         let snapshot_service_server =
-            proto::node::snapshot_service_server::SnapshotServiceServer::new(
-                snapshot_service,
-            );
+            proto::node::snapshot_service_server::SnapshotServiceServer::new(snapshot_service);
 
         info!("Starting gRPC server on {}", grpc_addr);
         if let Err(e) = Server::builder()
