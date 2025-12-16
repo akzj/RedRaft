@@ -16,7 +16,7 @@ use raft::storage::FileStorage;
 use tonic::transport::Server;
 
 use redraft::config::Config;
-use redraft::node::RedRaftNode;
+use redraft::node::{NodeServiceImpl, RRNode};
 use redraft::server::RedisServer;
 use redraft::snapshot_service::SnapshotServiceImpl;
 
@@ -148,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?);
 
     // Create RedRaft node (pass config for internal use)
-    let node = Arc::new(RedRaftNode::new(
+    let node = Arc::new(RRNode::new(
         config.node.node_id.clone(),
         storage,
         network,
@@ -166,20 +166,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_addr: SocketAddr = config.network.grpc_addr.parse()?;
     let snapshot_transfer_manager = node.snapshot_transfer_manager().clone();
 
+    // Clone node for NodeService
+    let node_for_node_service = node.clone();
+
     tokio::spawn(async move {
         let snapshot_service = SnapshotServiceImpl::new(snapshot_transfer_manager);
+        let node_service = NodeServiceImpl::new(node_for_node_service);
 
         // Get Raft service from network (dispatcher should be set by node.start())
         let raft_service = network_for_grpc.get_raft_service();
 
-        // Create SnapshotService server
+        // Create service servers
         let snapshot_service_server =
-            proto::snapshot_service::snapshot_service_server::SnapshotServiceServer::new(snapshot_service);
+            proto::snapshot_service::snapshot_service_server::SnapshotServiceServer::new(
+                snapshot_service,
+            );
+        let node_service_server =
+            proto::node::node_service_server::NodeServiceServer::new(node_service);
 
         info!("Starting gRPC server on {}", grpc_addr);
         if let Err(e) = Server::builder()
             .add_service(raft_service)
             .add_service(snapshot_service_server)
+            .add_service(node_service_server)
             .serve(grpc_addr)
             .await
         {

@@ -11,6 +11,6 @@ pub mod snapshot_transfer;
 pub mod state_machine;
 
 pub use config::{Config, ConfigError};
-pub use node::RedRaftNode;
+pub use node::{NodeServiceImpl, RRNode};
 pub use server::RedisServer;
 pub use state_machine::KVStateMachine;
