@@ -149,6 +149,9 @@ pub enum ApplyError {
 
     #[error("State machine error: {0}")]
     Internal(String),
+
+    #[error("Command deserialization failed: {0}")]
+    DeserializationFailed(anyhow::Error),
 }
 
 /// Snapshot related error

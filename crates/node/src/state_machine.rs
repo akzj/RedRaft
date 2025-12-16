@@ -118,12 +118,6 @@ impl KVStateMachine {
         &self.term
     }
 
-    /// Update apply_index (called after applying a command)
-    fn update_apply_index(&self, index: u64) {
-        self.apply_index
-            .store(index, std::sync::atomic::Ordering::SeqCst);
-    }
-
     /// Create gRPC client to snapshot service
     async fn create_snapshot_client(
         routing_table: &RoutingTable,
@@ -276,32 +270,36 @@ impl StateMachine for KVStateMachine {
         term: u64,
         cmd: raft::Command,
     ) -> ApplyResult<()> {
-        // Deserialize to Command
-        let command: Command =
-            match bincode::serde::decode_from_slice(&cmd, bincode::config::standard()) {
+        let store = Arc::clone(&self.store);
+
+        // Execute command with apply_index (for WAL logging) in blocking thread pool
+        // to avoid blocking async runtime since storage operations are synchronous
+        let result = tokio::task::spawn_blocking(move || {
+            // Deserialize to Command
+            let command: Command = match bincode::serde::decode_from_slice(
+                cmd.as_slice(),
+                bincode::config::standard(),
+            ) {
                 Ok((cmd, _)) => cmd,
                 Err(e) => {
                     warn!("Failed to deserialize command at index {}: {}", index, e);
-                    return Err(raft::ApplyError::Internal(format!(
-                        "Invalid command: {}",
-                        e
+                    return StoreApplyResult::Error(StoreError::Internal(format!(
+                        "Failed to deserialize command at index {}: {}",
+                        index, e
                     )));
                 }
             };
-
-        debug!(
-            "Applying command at index {}, term {}: {:?}",
-            index, term, command
-        );
-
-        // Execute command with apply_index (for WAL logging) and save result
-        let result = self.store.apply_with_index(index, &command);
+            store.apply_with_index(index, &command)
+        })
+        .await
+        .map_err(|e| raft::ApplyError::Internal(format!("Failed to apply command: {}", e)))?;
 
         // Cache result for use in client_response
         self.apply_results.lock().insert(index, result);
 
         // Update apply_index and term (this is the last applied index and term)
-        self.update_apply_index(index);
+        self.apply_index
+            .store(index, std::sync::atomic::Ordering::SeqCst);
         self.term.store(term, std::sync::atomic::Ordering::SeqCst);
 
         Ok(())
