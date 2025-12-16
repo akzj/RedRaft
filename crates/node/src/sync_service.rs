@@ -280,7 +280,7 @@ impl SyncServiceImpl {
         let pull_request = PullSyncDataRequest {
             task_id: task_id.to_string(),
             data_type: SyncDataType::SnapshotChunk as i32,
-            chunk_index: 0, // Start from first chunk
+            chunk_index: 0,              // Start from first chunk
             max_chunk_size: 1024 * 1024, // 1MB chunks
             start_index: 0,
             max_entries: 0,
@@ -795,7 +795,7 @@ async fn stream_snapshot_chunks_from_source(
     chunk_index: u32,
     _max_chunk_size: u32,
     tx: tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
-) -> Result<(), String> {
+) -> Result<()> {
     use crate::snapshot_transfer::{get_transfer_state_info, read_chunk_from_file, wait_for_chunk};
     use std::time::Duration;
 
@@ -807,16 +807,14 @@ async fn stream_snapshot_chunks_from_source(
     // Get transfer state (snapshot path and chunk index)
     // Note: task_id should match the transfer_id used when creating the snapshot
     let (snapshot_path, chunk_index_arc) =
-        get_transfer_state_info(&snapshot_transfer_manager, &task_id)
-            .map_err(|e| format!("Failed to get transfer state for task {}: {}", task_id, e))?;
+        get_transfer_state_info(&snapshot_transfer_manager, &task_id).map_err(|e| {
+            anyhow::anyhow!("Failed to get transfer state for task {}: {}", task_id, e)
+        })?;
 
     // Get total size and completion status
-    let (total_size, is_complete) = {
+    let total_size = {
         let index_guard = chunk_index_arc.read();
-        (
-            index_guard.total_uncompressed_size,
-            index_guard.is_complete,
-        )
+        index_guard.total_uncompressed_size
     };
 
     info!(
@@ -827,8 +825,26 @@ async fn stream_snapshot_chunks_from_source(
     // Stream chunks starting from chunk_index
     // Process chunks one by one as they become available (streaming mode)
     let mut current_chunk_index = chunk_index;
-    let mut is_complete_local = is_complete;
     let mut first_chunk = true;
+
+    // Helper function to send error response and return error
+    async fn send_error_and_return(
+        tx: &tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
+        task_id: &str,
+        error_msg: String,
+        error: anyhow::Error,
+    ) -> Result<()> {
+        let _ = tx
+            .send(Ok(PullSyncDataResponse {
+                task_id: task_id.to_string(),
+                error_message: error_msg.clone(),
+                data_type: SyncDataType::SnapshotChunk as i32,
+                ..Default::default()
+            }))
+            .await;
+        error!("{}: {:?}", error_msg, error);
+        Err(error)
+    }
 
     loop {
         // Wait for chunk to be available and get its metadata
@@ -840,57 +856,27 @@ async fn stream_snapshot_chunks_from_source(
         )
         .await
         {
-            Ok(metadata) => {
-                // Update completion status
-                {
-                    let index = chunk_index_arc.read();
-                    is_complete_local = index.is_complete;
-                }
-                metadata
-            }
+            Ok(metadata) => metadata,
             Err(e) => {
-                let error_msg = format!("Failed to wait for chunk {}: {}", current_chunk_index, e);
-                let _ = tx
-                    .send(Ok(PullSyncDataResponse {
-                        task_id: task_id.clone(),
-                        data_type: SyncDataType::SnapshotChunk as i32,
-                        chunk_data: vec![],
-                        entry_logs: vec![],
-                        offset: 0,
-                        chunk_size: 0,
-                        is_last_chunk: true,
-                        total_size: 0,
-                        checksum: vec![],
-                        error_message: error_msg.clone(),
-                    }))
-                    .await;
-                return Err(error_msg);
+                let error_msg = format!("Failed to wait for chunk {}", current_chunk_index);
+                return send_error_and_return(&tx, &task_id, error_msg.clone(), e).await;
             }
         };
 
         // Read chunk from file
-        let compressed_data =
-            match read_chunk_from_file(&snapshot_path, current_chunk_index, &chunk_metadata).await {
-                Ok(data) => data,
-                Err(e) => {
-                    let error_msg = format!("Failed to read chunk {}: {}", current_chunk_index, e);
-                    let _ = tx
-                        .send(Ok(PullSyncDataResponse {
-                            task_id: task_id.clone(),
-                            data_type: SyncDataType::SnapshotChunk as i32,
-                            chunk_data: vec![],
-                            entry_logs: vec![],
-                            offset: 0,
-                            chunk_size: 0,
-                            is_last_chunk: true,
-                            total_size: 0,
-                            checksum: vec![],
-                            error_message: error_msg.clone(),
-                        }))
-                        .await;
-                    return Err(error_msg);
-                }
-            };
+        let compressed_data = match read_chunk_from_file(
+            &snapshot_path,
+            current_chunk_index,
+            &chunk_metadata,
+        )
+        .await
+        {
+            Ok(data) => data,
+            Err(e) => {
+                let error_msg = format!("Failed to read chunk {}", current_chunk_index);
+                return send_error_and_return(&tx, &task_id, error_msg.clone(), e).await;
+            }
+        };
 
         // Determine if this is the last chunk
         let is_last = chunk_metadata.is_last;
@@ -946,7 +932,7 @@ async fn stream_entry_logs_from_source(
     start_index: u64,
     max_entries: u32,
     tx: tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
-) -> Result<(), String> {
+) -> Result<()> {
     // TODO: Implement entry log streaming from source
     // This would:
     // 1. Extract source shard ID from task_id or get from context

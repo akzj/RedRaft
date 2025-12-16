@@ -221,16 +221,6 @@ impl SnapshotTransferManager {
             .map(|state| state.chunk_index.clone())
     }
 
-    /// Get mutable reference to transfer state for updating progress
-    pub fn get_transfer_state_mut(
-        &self,
-        transfer_id: &str,
-    ) -> Option<parking_lot::RwLockWriteGuard<'_, HashMap<String, SnapshotTransferState>>> {
-        // Note: This returns a write guard, caller should drop it quickly
-        // For better API, we can add specific update methods
-        Some(self.transfers.write())
-    }
-
     /// Update total size for a transfer (called when generation completes)
     pub fn update_total_size(&self, transfer_id: &str, total_size: u64) {
         let mut transfers = self.transfers.write();
@@ -357,15 +347,11 @@ pub async fn wait_for_chunk(
     timeout: std::time::Duration,
 ) -> Result<ChunkMetadata> {
     use tokio::time::{sleep, Instant};
-
     let start = Instant::now();
-
     loop {
         // Check if chunk is available
         {
             let index = chunk_index.read();
-
-            // Check for errors
             if let Some(ref error) = index.error {
                 return Err(anyhow::anyhow!("Snapshot generation failed: {}", error));
             }
@@ -402,7 +388,6 @@ pub async fn wait_for_chunk(
 
         tokio::select! {
             _ = notify.notified() => {
-                // New chunk available, check again
                 continue;
             }
             _ = sleep(check_interval) => {
