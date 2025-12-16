@@ -538,6 +538,7 @@ pub trait SnapshotStore: Send + Sync {
         &self,
         shard_id: &ShardId,
         channel: tokio::sync::mpsc::Sender<SnapshotStoreEntry>,
+        key_range: Option<(u32, u32)>,
     ) -> Result<()>;
 
     /// Restore from snapshot data

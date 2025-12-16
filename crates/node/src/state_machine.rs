@@ -678,7 +678,7 @@ impl SnapshotStorage for KVStateMachine {
         // We block here to ensure snapshot object is created in synchronous context
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
-                .block_on(self.store.create_snapshot(&shard_id_str, tx))
+                .block_on(self.store.create_snapshot(&shard_id_str, tx, None))
         })
         .map_err(|e| {
             raft::StorageError::SnapshotCreationFailed(format!(

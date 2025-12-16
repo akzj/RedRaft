@@ -343,10 +343,7 @@ impl SyncServiceImpl {
                             }
                         }
                         Err(e) => {
-                            error!(
-                                "Error receiving snapshot chunk for task {}: {}",
-                                task_id, e
-                            );
+                            error!("Error receiving snapshot chunk for task {}: {}", task_id, e);
                             return Err(format!("Stream error: {}", e));
                         }
                     }
@@ -368,11 +365,9 @@ impl SyncServiceImpl {
         start_index: u64,
         end_index: u64,
     ) -> Result<(), String> {
-        if let Err(e) = task_manager.update_task_status(
-            task_id,
-            SyncStatus::InProgress,
-            SyncPhase::LogReplay,
-        ) {
+        if let Err(e) =
+            task_manager.update_task_status(task_id, SyncStatus::InProgress, SyncPhase::LogReplay)
+        {
             error!("Failed to update sync task phase: {}", e);
         }
 
@@ -495,11 +490,9 @@ impl SyncServiceImpl {
         );
 
         // Update task status to IN_PROGRESS
-        if let Err(e) = task_manager.update_task_status(
-            &task_id,
-            SyncStatus::InProgress,
-            SyncPhase::Preparing,
-        ) {
+        if let Err(e) =
+            task_manager.update_task_status(&task_id, SyncStatus::InProgress, SyncPhase::Preparing)
+        {
             error!("Failed to update sync task status: {}", e);
             return;
         }
@@ -527,7 +520,9 @@ impl SyncServiceImpl {
 
         // 2. Pull snapshot chunks if needed (for FULL_SYNC or SNAPSHOT_ONLY)
         if sync_type == SyncType::FullSync || sync_type == SyncType::SnapshotOnly {
-            if let Err(e) = Self::handle_snapshot_transfer(&task_manager, &mut sync_client, &task_id).await {
+            if let Err(e) =
+                Self::handle_snapshot_transfer(&task_manager, &mut sync_client, &task_id).await
+            {
                 error!("Failed to transfer snapshot for task {}: {}", task_id, e);
                 let _ = task_manager.set_task_error(&task_id, e);
                 return;
@@ -552,11 +547,9 @@ impl SyncServiceImpl {
         }
 
         // 4. Mark sync as completed
-        if let Err(e) = task_manager.update_task_status(
-            &task_id,
-            SyncStatus::Completed,
-            SyncPhase::Completing,
-        ) {
+        if let Err(e) =
+            task_manager.update_task_status(&task_id, SyncStatus::Completed, SyncPhase::Completing)
+        {
             error!("Failed to mark sync task as completed: {}", e);
         } else {
             info!("Sync task {} completed successfully", task_id);

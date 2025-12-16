@@ -2,6 +2,7 @@
 
 use crate::store::HybridStore;
 use rr_core::shard::ShardId;
+use rr_core::routing::RoutingTable;
 use crate::traits::{SnapshotStore, SnapshotStoreEntry, StoreError};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -12,10 +13,18 @@ impl SnapshotStore for HybridStore {
     ///
     /// Only flushes WAL and RocksDB to ensure all writes are persisted.
     /// Data is already stored on disk (WAL + Segment), so no need to generate or return data.
+    ///
+    /// # Arguments
+    /// - `shard_id`: Shard ID
+    /// - `channel`: Channel to send snapshot entries
+    /// - `key_range`: Optional slot range (slot_begin, slot_end) to filter keys.
+    ///   If Some((begin, end)), only keys with slot ∈ [begin, end) are included.
+    ///   If None, all keys are included.
     async fn create_snapshot(
         &self,
         shard_id: &ShardId,
         channel: tokio::sync::mpsc::Sender<SnapshotStoreEntry>,
+        key_range: Option<(u32, u32)>,
     ) -> Result<()> {
         // Get shard (must be done before moving into closure)
         let shard = {
@@ -33,6 +42,9 @@ impl SnapshotStore for HybridStore {
         // notify the main thread that the snapshot object is created
         // This allows load_snapshot to wait synchronously for snapshot object creation
         let (tx, rx) = tokio::sync::oneshot::channel();
+
+        // Move key_range into closure
+        let key_range = key_range;
 
         let _ = tokio::task::spawn_blocking(move || {
             // Helper function to send error through channel
@@ -68,6 +80,16 @@ impl SnapshotStore for HybridStore {
             // This allows load_snapshot to wait synchronously for snapshot object creation
             let _ = tx.send(());
 
+            // Helper function to check if key is in slot range
+            let key_in_range = |original_key: &[u8]| -> bool {
+                if let Some((slot_begin, slot_end)) = key_range {
+                    let slot = RoutingTable::slot_for_key(original_key);
+                    slot >= slot_begin && slot < slot_end
+                } else {
+                    true // No filtering if key_range is None
+                }
+            };
+
             // Iterate RocksDB entries (String and Hash)
             let iter = snapshot.iterator_cf(cf_handler, rocksdb::IteratorMode::Start);
             for item in iter {
@@ -89,6 +111,10 @@ impl SnapshotStore for HybridStore {
                 if key.starts_with(b"s:") {
                     // String: s:{key} -> value
                     let original_key = &key[2..];
+                    // Filter by slot range if specified
+                    if !key_in_range(original_key) {
+                        continue;
+                    }
                     let _ = channel.send(SnapshotStoreEntry::String(
                         bytes::Bytes::copy_from_slice(original_key),
                         bytes::Bytes::copy_from_slice(&value),
@@ -99,6 +125,10 @@ impl SnapshotStore for HybridStore {
                     let key_part = &key[2..];
                     if let Some(colon_pos) = key_part.iter().position(|&b| b == b':') {
                         let hash_key = &key_part[..colon_pos];
+                        // Filter by slot range if specified
+                        if !key_in_range(hash_key) {
+                            continue;
+                        }
                         let field = &key_part[colon_pos + 1..];
                         if let Err(e) = channel.blocking_send(SnapshotStoreEntry::Hash(
                             bytes::Bytes::copy_from_slice(hash_key),
@@ -115,10 +145,24 @@ impl SnapshotStore for HybridStore {
                 // Skip hash metadata (H:{key}) as we only need fields
             }
 
+            // Helper function to check if key is in slot range (for memory store)
+            let key_in_range = |key: &[u8]| -> bool {
+                if let Some((slot_begin, slot_end)) = key_range {
+                    let slot = RoutingTable::slot_for_key(key);
+                    slot >= slot_begin && slot < slot_end
+                } else {
+                    true // No filtering if key_range is None
+                }
+            };
+
             // Iterate Memory store entries (List, Set, ZSet, Bitmap)
             // Note: memory_snapshot was already created above before signaling
             let memory_data = memory_snapshot.read();
             for (key, data_cow) in memory_data.iter() {
+                // Filter by slot range if specified
+                if !key_in_range(key) {
+                    continue;
+                }
                 match data_cow {
                     crate::memory::DataCow::List(list) => {
                         // Send all list elements

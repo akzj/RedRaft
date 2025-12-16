@@ -8,17 +8,17 @@ use tokio::io::split;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
-use crate::node::RedRaftNode;
+use crate::node::RRNode;
 use resp::{AsyncRespEncoder, AsyncRespParser, Command, RespValue};
 
 /// Redis protocol server
 pub struct RedisServer {
-    node: Arc<RedRaftNode>,
+    node: Arc<RRNode>,
     addr: SocketAddr,
 }
 
 impl RedisServer {
-    pub fn new(node: Arc<RedRaftNode>, addr: SocketAddr) -> Self {
+    pub fn new(node: Arc<RRNode>, addr: SocketAddr) -> Self {
         Self { node, addr }
     }
 
@@ -49,7 +49,7 @@ impl RedisServer {
 /// Handle client connection
 async fn handle_client(
     stream: TcpStream,
-    node: Arc<RedRaftNode>,
+    node: Arc<RRNode>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (reader, writer) = split(stream);
     let mut parser = AsyncRespParser::new(reader);

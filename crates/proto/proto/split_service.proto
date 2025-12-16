@@ -12,7 +12,7 @@ package split_service;
 service SplitService {
   /// Start a shard split operation
   /// Initiates the split process from source shard to target shard(s)
-  rpc StartSplit(StartSplitRequest) returns (StartSplitResponse);
+  rpc StartSplit(StartSplitRequest) returns (StartSplitResponse); 
 
   /// Get split progress
   /// Query the progress of an ongoing split operation

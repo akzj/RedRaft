@@ -116,7 +116,7 @@ impl SnapshotService for SnapshotServiceImpl {
             .get_transfer_state(&transfer_id)
             .ok_or_else(|| Status::not_found(format!("Transfer {} not found", transfer_id)))?;
 
-        use proto::node::TransferStatus;
+        use proto::snapshot_service::TransferStatus;
 
         let index = state.chunk_index.read();
         let is_complete = state.is_completed();
