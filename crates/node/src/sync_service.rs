@@ -787,6 +787,7 @@ impl SyncService for SyncServiceImpl {
 }
 
 /// Stream snapshot chunks from PUSH side (source node)
+/// Streams chunks as they become available, without waiting for entire file generation
 async fn stream_snapshot_chunks_from_source(
     snapshot_transfer_manager: Arc<SnapshotTransferManager>,
     _node: Arc<RRNode>,
@@ -808,58 +809,154 @@ async fn stream_snapshot_chunks_from_source(
     let (snapshot_path, chunk_index) = get_transfer_state_info(&snapshot_transfer_manager, &task_id)
         .map_err(|e| format!("Failed to get transfer state for task {}: {}", task_id, e))?;
 
-    // Wait for snapshot file generation to complete (if still in progress)
-    wait_for_chunk(
-        &chunk_index,
-        0, // Wait for first chunk to be available
-        Duration::from_millis(100),
-        Duration::from_secs(300), // 5 minutes timeout
-    )
-    .await
-    .map_err(|e| format!("Failed to wait for snapshot file: {}", e))?;
+    // Find the starting chunk based on offset
+    // We need to wait for chunks to be generated if still generating
+    let (start_chunk_index, total_size, is_complete) = {
+        let index_guard = chunk_index.read();
+        let mut start_chunk_idx = 0u32;
 
-    // Get chunk index to find which chunk to read based on offset
-    // Clone chunk metadata to avoid holding lock across await points
-    let (chunks_metadata, total_chunks) = {
-        let chunk_index_guard = chunk_index.read();
-        let chunks: Vec<_> = chunk_index_guard.chunks.iter().cloned().collect();
-        let total = chunk_index_guard.generated_chunks;
-        (chunks, total)
-    };
+        // Find which chunk contains the start_offset
+        // If chunks are not yet generated, we'll start from chunk 0
+        for (idx, chunk) in index_guard.chunks.iter().enumerate() {
+            // Calculate chunk end offset: file_offset + header_len (4) + header_size + compressed_size
+            let header_size =
+                match bincode::serde::encode_to_vec(chunk, bincode::config::standard()) {
+                    Ok(bytes) => bytes.len() as u64,
+                    Err(_) => {
+                        // If serialization fails, use a rough estimate
+                        // ChunkMetadata is small, typically < 100 bytes
+                        100
+                    }
+                };
+            let chunk_end_offset =
+                chunk.file_offset + 4 + header_size + chunk.compressed_size as u64;
 
-    // Find the chunk that contains the requested offset
-    // We need to calculate which chunk index corresponds to the byte offset
-    let mut current_offset = 0u64;
-    let mut target_chunk_index = None;
-
-    for (idx, chunk_meta) in chunks_metadata.iter().enumerate() {
-        // Calculate chunk size including header
-        let header_size = 4 + bincode::serde::encode_to_vec(chunk_meta, bincode::config::standard())
-            .map_err(|e| format!("Failed to serialize chunk metadata: {}", e))?
-            .len();
-        let chunk_total_size = header_size as u64 + chunk_meta.compressed_size as u64;
-
-        if offset >= current_offset && offset < current_offset + chunk_total_size {
-            target_chunk_index = Some(idx as u32);
-            break;
+            if chunk.file_offset <= offset && offset < chunk_end_offset {
+                start_chunk_idx = idx as u32;
+                break;
+            }
+            if chunk.file_offset > offset {
+                // We've passed the start_offset, use previous chunk
+                if idx > 0 {
+                    start_chunk_idx = (idx - 1) as u32;
+                }
+                break;
+            }
         }
 
-        current_offset += chunk_total_size;
-    }
+        (
+            start_chunk_idx,
+            index_guard.total_uncompressed_size,
+            index_guard.is_complete,
+        )
+    };
 
-    let start_chunk_index = target_chunk_index
-        .ok_or_else(|| format!("Offset {} is beyond snapshot file size", offset))?;
+    info!(
+        "Starting to stream chunks for task {} from chunk {} (offset {})",
+        task_id, start_chunk_index, offset
+    );
 
-    for chunk_idx in start_chunk_index..total_chunks {
-        // Get chunk metadata from cloned vector
-        let chunk_metadata = chunks_metadata
-            .get(chunk_idx as usize)
-            .ok_or_else(|| format!("Chunk {} not found", chunk_idx))?
-            .clone();
+    // Stream chunks starting from start_chunk_index
+    // Process chunks one by one as they become available (streaming mode)
+    let mut current_chunk_index = start_chunk_index;
+    let mut is_complete_local = is_complete;
+    let mut first_chunk = true;
+
+    loop {
+        // Wait for chunk to be available (if still generating)
+        if !is_complete_local {
+            let wait_result = wait_for_chunk(
+                &chunk_index,
+                current_chunk_index,
+                Duration::from_millis(100), // Check every 100ms
+                Duration::from_secs(60),    // 60s timeout per chunk
+            )
+            .await;
+
+            if let Err(e) = wait_result {
+                let _ = tx
+                    .send(Ok(PullSyncDataResponse {
+                        task_id: task_id.clone(),
+                        data_type: SyncDataType::SnapshotChunk as i32,
+                        chunk_data: vec![],
+                        entry_logs: vec![],
+                        offset: 0,
+                        chunk_size: 0,
+                        is_last_chunk: true,
+                        total_size: 0,
+                        checksum: vec![],
+                        error_message: format!("Failed to wait for chunk {}: {}", current_chunk_index, e),
+                    }))
+                    .await;
+                return Err(e);
+            }
+        }
+
+        // Get chunk metadata
+        let chunk_metadata = {
+            let (meta, complete) = {
+                let index = chunk_index.read();
+                match index.get_chunk(current_chunk_index) {
+                    Some(meta) => (Some(meta.clone()), index.is_complete),
+                    None => (None, index.is_complete),
+                }
+            };
+
+            is_complete_local = complete;
+
+            match meta {
+                Some(meta) => meta,
+                None => {
+                    // Check if generation is complete
+                    if complete {
+                        // All chunks sent
+                        info!("All chunks sent for task {}", task_id);
+                        break;
+                    } else {
+                        let _ = tx
+                            .send(Ok(PullSyncDataResponse {
+                                task_id: task_id.clone(),
+                                data_type: SyncDataType::SnapshotChunk as i32,
+                                chunk_data: vec![],
+                                entry_logs: vec![],
+                                offset: 0,
+                                chunk_size: 0,
+                                is_last_chunk: true,
+                                total_size: 0,
+                                checksum: vec![],
+                                error_message: format!(
+                                    "Chunk {} not found and generation not complete",
+                                    current_chunk_index
+                                ),
+                            }))
+                            .await;
+                        return Err(format!("Chunk {} not found", current_chunk_index));
+                    }
+                }
+            }
+        };
 
         // Read chunk from file
-        let compressed_data = read_chunk_from_file(&snapshot_path, chunk_idx, &chunk_metadata)
-            .map_err(|e| format!("Failed to read chunk {}: {}", chunk_idx, e))?;
+        let compressed_data = match read_chunk_from_file(&snapshot_path, current_chunk_index, &chunk_metadata) {
+            Ok(data) => data,
+            Err(e) => {
+                let _ = tx
+                    .send(Ok(PullSyncDataResponse {
+                        task_id: task_id.clone(),
+                        data_type: SyncDataType::SnapshotChunk as i32,
+                        chunk_data: vec![],
+                        entry_logs: vec![],
+                        offset: 0,
+                        chunk_size: 0,
+                        is_last_chunk: true,
+                        total_size: 0,
+                        checksum: vec![],
+                        error_message: format!("Failed to read chunk {}: {}", current_chunk_index, e),
+                    }))
+                    .await;
+                return Err(e);
+            }
+        };
 
         // Calculate checksum (CRC32 of compressed data)
         use crc32fast::Hasher as Crc32Hasher;
@@ -867,8 +964,10 @@ async fn stream_snapshot_chunks_from_source(
         hasher.update(&compressed_data);
         let checksum = hasher.finalize().to_le_bytes().to_vec();
 
-        // Send chunk to client
+        // Determine if this is the last chunk
         let is_last = chunk_metadata.is_last;
+
+        // Create response
         let response = PullSyncDataResponse {
             task_id: task_id.clone(),
             data_type: SyncDataType::SnapshotChunk as i32,
@@ -877,12 +976,9 @@ async fn stream_snapshot_chunks_from_source(
             offset: chunk_metadata.file_offset,
             chunk_size: chunk_metadata.compressed_size,
             is_last_chunk: is_last,
-            total_size: if chunk_idx == start_chunk_index {
+            total_size: if first_chunk {
                 // Only send total size in first chunk
-                let index = chunk_index.read();
-                let total = index.total_uncompressed_size;
-                drop(index);
-                total
+                total_size
             } else {
                 0
             },
@@ -890,15 +986,21 @@ async fn stream_snapshot_chunks_from_source(
             error_message: String::new(),
         };
 
+        // Send response
         if tx.send(Ok(response)).await.is_err() {
-            warn!("Failed to send chunk {} for task {}", chunk_idx, task_id);
+            // Receiver dropped, client disconnected
+            info!("Client disconnected during snapshot transfer for task {}", task_id);
+            return Ok(());
+        }
+
+        first_chunk = false;
+
+        if is_last {
+            info!("Completed streaming snapshot for task {}", task_id);
             break;
         }
 
-        if is_last {
-            info!("Sent last chunk {} for task {}", chunk_idx, task_id);
-            break;
-        }
+        current_chunk_index += 1;
     }
 
     Ok(())
