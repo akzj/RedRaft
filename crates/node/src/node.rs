@@ -153,6 +153,31 @@ impl RRNode {
         &self.routing_table
     }
 
+    /// Get gRPC endpoint URI for a node
+    /// 
+    /// Retrieves the gRPC address from routing table and ensures it has
+    /// a protocol prefix (http:// or https://).
+    /// 
+    /// Returns the endpoint URI, or an error if the node is not found.
+    pub fn get_node_grpc_endpoint(&self, node_id: &str) -> Result<String, String> {
+        let grpc_addr = self
+            .routing_table
+            .get_grpc_address(&node_id.to_string())
+            .ok_or_else(|| format!("No gRPC address found for node {}", node_id))?;
+
+        // Ensure the address has a protocol prefix
+        // If it already has http:// or https://, use it as-is
+        // Otherwise, assume http:// (for development/non-TLS environments)
+        // Note: gRPC uses HTTP/2, so http:// is valid for non-TLS connections
+        let endpoint_uri = if grpc_addr.starts_with("http://") || grpc_addr.starts_with("https://") {
+            grpc_addr
+        } else {
+            format!("http://{}", grpc_addr)
+        };
+
+        Ok(endpoint_uri)
+    }
+
     /// Get existing Raft group
     ///
     /// Used for business request routing, will not create new Raft groups.
