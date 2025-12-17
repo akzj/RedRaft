@@ -402,10 +402,10 @@ pub async fn wait_for_chunk(
 pub fn get_transfer_state_info(
     transfer_manager: &SnapshotTransferManager,
     transfer_id: &str,
-) -> Result<(std::path::PathBuf, Arc<RwLock<ChunkIndex>>), String> {
+) -> anyhow::Result<(std::path::PathBuf, Arc<RwLock<ChunkIndex>>)> {
     let state = transfer_manager
         .get_transfer_state(transfer_id)
-        .ok_or_else(|| format!("Transfer {} not found", transfer_id))?;
+        .context(format!("Transfer {} not found", transfer_id))?;
 
     Ok((state.snapshot_path, state.chunk_index))
 }
@@ -413,10 +413,10 @@ pub fn get_transfer_state_info(
 /// Spawn async task to receive snapshot entries and forward to blocking channel
 fn spawn_async_receiver_task(
     mut rx: tokio::sync::mpsc::Receiver<storage::SnapshotStoreEntry>,
-    blocking_tx: std::sync::mpsc::Sender<Result<(Vec<u8>, bool), String>>,
+    blocking_tx: std::sync::mpsc::Sender<anyhow::Result<(Vec<u8>, bool)>>,
     chunk_index: Arc<RwLock<ChunkIndex>>,
     chunk_size: usize,
-) -> tokio::task::JoinHandle<Result<(), String>> {
+) -> tokio::task::JoinHandle<anyhow::Result<()>> {
     tokio::spawn(async move {
         let mut chunk_buffer = Vec::new();
 
@@ -429,7 +429,8 @@ fn spawn_async_receiver_task(
                     index.error = Some(format!("Snapshot creation error: {}", err));
                     index.notify.notify_waiters();
                     // Send error signal to blocking task
-                    let _ = blocking_tx.send(Err(format!("Snapshot creation error: {}", err)));
+                    let _ =
+                        blocking_tx.send(Err(anyhow::anyhow!("Snapshot creation error: {}", err)));
                     return Ok(());
                 }
                 storage::SnapshotStoreEntry::Completed => {
@@ -437,13 +438,17 @@ fn spawn_async_receiver_task(
                     if !chunk_buffer.is_empty() {
                         if blocking_tx.send(Ok((chunk_buffer, true))).is_err() {
                             error!("Failed to send final chunk to blocking task");
-                            return Ok(());
+                            return Err(anyhow::anyhow!(
+                                "Failed to send final chunk to blocking task"
+                            ));
                         }
                     } else {
                         // Send empty chunk to signal completion
                         if blocking_tx.send(Ok((Vec::new(), true))).is_err() {
                             error!("Failed to send completion signal to blocking task");
-                            return Ok(());
+                            return Err(anyhow::anyhow!(
+                                "Failed to send completion signal to blocking task"
+                            ));
                         }
                     }
                     info!("Snapshot data transfer completed");
@@ -457,8 +462,8 @@ fn spawn_async_receiver_task(
                             Err(e) => {
                                 error!("Failed to serialize entry: {}", e);
                                 let _ = blocking_tx
-                                    .send(Err(format!("Failed to serialize entry: {}", e)));
-                                return Ok(());
+                                    .send(Err(anyhow::anyhow!("Failed to serialize entry: {}", e)));
+                                return Err(anyhow::anyhow!("Failed to serialize entry: {}", e));
                             }
                         };
 
@@ -468,8 +473,9 @@ fn spawn_async_receiver_task(
                     {
                         // Send current chunk to blocking task for compression and writing
                         if blocking_tx.send(Ok((chunk_buffer, false))).is_err() {
-                            error!("Failed to send chunk to blocking task");
-                            return Ok(());
+                            let error = format!("Failed to send chunk to blocking task");
+                            error!("{}", error);
+                            return Err(anyhow::anyhow!("{}", error));
                         }
                         chunk_buffer = Vec::new();
                     }
@@ -496,13 +502,13 @@ fn write_chunk_to_file(
     chunk_index: Arc<RwLock<ChunkIndex>>,
     transfer_id: &str,
     is_last: bool,
-) -> Result<u64, String> {
+) -> anyhow::Result<u64> {
     use crc32fast::Hasher as Crc32Hasher;
     use std::io::Write;
 
     // Compress with zstd (CPU-intensive)
     let compressed = zstd::encode_all(buffer, zstd_level)
-        .map_err(|e| format!("Failed to compress chunk: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to compress chunk: {}", e))?;
 
     // Calculate CRC32 of compressed data (CPU-intensive)
     let mut hasher = Crc32Hasher::new();
@@ -521,19 +527,19 @@ fn write_chunk_to_file(
 
     // Serialize header with bincode (CPU-intensive)
     let header_bytes = bincode::serde::encode_to_vec(&header, bincode::config::standard())
-        .map_err(|e| format!("Failed to serialize chunk header: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to serialize chunk header: {}", e))?;
 
     // Write header length (u32) + header + compressed data
     let header_len = header_bytes.len() as u32;
     writer
         .write_all(&header_len.to_le_bytes())
-        .map_err(|e| format!("Failed to write header length: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to write header length: {}", e))?;
     writer
         .write_all(&header_bytes)
-        .map_err(|e| format!("Failed to write header: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to write header: {}", e))?;
     writer
         .write_all(&compressed)
-        .map_err(|e| format!("Failed to write compressed data: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to write compressed data: {}", e))?;
 
     // Update file offset (header_len (4) + header_bytes + compressed)
     let chunk_size = 4 + header_bytes.len() + compressed.len();
@@ -568,17 +574,17 @@ fn write_chunk_to_file(
 /// Spawn CPU-intensive task to compress and write chunks to file
 fn spawn_blocking_writer_task(
     file_path: std::path::PathBuf,
-    blocking_rx: std::sync::mpsc::Receiver<Result<(Vec<u8>, bool), String>>,
+    blocking_rx: std::sync::mpsc::Receiver<anyhow::Result<(Vec<u8>, bool)>>,
     chunk_index: Arc<RwLock<ChunkIndex>>,
     transfer_id: String,
     zstd_level: i32,
-) -> tokio::task::JoinHandle<Result<(u64, u64), String>> {
+) -> tokio::task::JoinHandle<anyhow::Result<(u64, u64)>> {
     tokio::task::spawn_blocking(move || {
         use std::fs::File;
         use std::io::{BufWriter, Write};
 
         let file = File::create(&file_path)
-            .map_err(|e| format!("Failed to create snapshot file: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create snapshot file: {}", e))?;
         let mut writer = BufWriter::new(file);
 
         let mut chunk_index_counter = 0u32;
@@ -610,23 +616,23 @@ fn spawn_blocking_writer_task(
                     }
                 }
                 Ok(Err(e)) => {
-                    return Err(e);
+                    return Err(anyhow::anyhow!("Blocking channel error: {}", e));
                 }
                 Err(e) => {
-                    return Err(format!("Blocking channel error: {}", e));
+                    return Err(anyhow::anyhow!("Blocking channel error: {}", e));
                 }
             }
         }
 
         writer
             .flush()
-            .map_err(|e| format!("Failed to flush snapshot file: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to flush snapshot file: {}", e))?;
 
         // Sync file to disk
         writer
             .get_ref()
             .sync_all()
-            .map_err(|e| format!("Failed to sync snapshot file: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to sync snapshot file: {}", e))?;
 
         Ok((total_uncompressed_size, total_compressed_size))
     })
@@ -634,22 +640,22 @@ fn spawn_blocking_writer_task(
 
 /// Wait for tasks to complete and update transfer state
 async fn wait_for_tasks_and_update_state(
-    async_handle: tokio::task::JoinHandle<Result<(), String>>,
-    write_handle: tokio::task::JoinHandle<Result<(u64, u64), String>>,
+    async_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
+    write_handle: tokio::task::JoinHandle<anyhow::Result<(u64, u64)>>,
     transfer_manager: &SnapshotTransferManager,
     transfer_id: &str,
     snapshot_path: std::path::PathBuf,
     chunk_index: Arc<RwLock<ChunkIndex>>,
-) -> Result<(), String> {
+) -> anyhow::Result<()> {
     // Wait for async receiving task to complete (it forwards data to blocking channel)
     async_handle
         .await
-        .map_err(|e| format!("Async receiving task failed: {:?}", e))??;
+        .map_err(|e| anyhow::anyhow!("Async receiving task failed: {:?}", e))??;
 
     // Wait for file writing to complete
     let (total_uncompressed, total_compressed) = write_handle
         .await
-        .map_err(|e| format!("File writing task failed: {:?}", e))??;
+        .map_err(|e| anyhow::anyhow!("File writing task failed: {:?}", e))??;
 
     // Update transfer state: mark generation as complete by updating total_size
     // Transfer can continue while we update the state
@@ -671,11 +677,12 @@ pub async fn generate_snapshot_file_async(
     transfer_manager: &SnapshotTransferManager,
     rx: tokio::sync::mpsc::Receiver<storage::SnapshotStoreEntry>,
     snapshot_config: crate::config::SnapshotConfig,
-) -> Result<(), String> {
+) -> anyhow::Result<()> {
     info!("Generating snapshot file for transfer {}", transfer_id);
 
     // Get transfer state information
-    let (snapshot_path, chunk_index) = get_transfer_state_info(transfer_manager, transfer_id)?;
+    let (snapshot_path, chunk_index) = get_transfer_state_info(transfer_manager, transfer_id)
+        .context("Failed to get transfer state info")?;
 
     // Create a blocking channel to pass data to CPU-intensive task
     // This allows async channel receiving without blocking tokio runtime

@@ -16,9 +16,8 @@ use crate::node::RRNode;
 use crate::snapshot_transfer::{self, SnapshotTransferManager};
 use proto::split_service::{
     split_service_server::SplitService, CancelSplitRequest, CancelSplitResponse,
-    CompleteSplitRequest, CompleteSplitResponse, GetSplitProgressRequest,
-    GetSplitProgressResponse, SplitPhase, SplitProgress, SplitStatus, StartSplitRequest,
-    StartSplitResponse,
+    CompleteSplitRequest, CompleteSplitResponse, GetSplitProgressRequest, GetSplitProgressResponse,
+    SplitPhase, SplitProgress, SplitStatus, StartSplitRequest, StartSplitResponse,
 };
 use rr_core::shard::ShardRouting;
 
@@ -215,10 +214,7 @@ pub struct SplitServiceImpl {
 }
 
 impl SplitServiceImpl {
-    pub fn new(
-        node: Arc<RRNode>,
-        snapshot_transfer_manager: Arc<SnapshotTransferManager>,
-    ) -> Self {
+    pub fn new(node: Arc<RRNode>, snapshot_transfer_manager: Arc<SnapshotTransferManager>) -> Self {
         Self {
             node,
             task_manager: Arc::new(SplitTaskManager::new()),
@@ -259,9 +255,17 @@ impl SplitServiceImpl {
             return;
         }
 
-        if let Err(e) = Self::create_target_shards(&node, &task_manager, &task_id, &target_shard_ids, &target_nodes).await {
+        if let Err(e) = Self::create_target_shards(
+            &node,
+            &task_manager,
+            &task_id,
+            &target_shard_ids,
+            &target_nodes,
+        )
+        .await
+        {
             error!("Failed to create target shards for task {}: {}", task_id, e);
-            let _ = task_manager.set_task_error(&task_id, e);
+            let _ = task_manager.set_task_error(&task_id, e.to_string());
             return;
         }
 
@@ -304,7 +308,7 @@ impl SplitServiceImpl {
                     "Failed to transfer snapshot to target shard {} for task {}: {}",
                     target_shard_id, task_id, e
                 );
-                let _ = task_manager.set_task_error(&task_id, e);
+                let _ = task_manager.set_task_error(&task_id, e.to_string());
                 return;
             }
 
@@ -349,7 +353,7 @@ impl SplitServiceImpl {
         .await
         {
             error!("Failed to update routing table for task {}: {}", task_id, e);
-            let _ = task_manager.set_task_error(&task_id, e);
+            let _ = task_manager.set_task_error(&task_id, e.to_string());
             return;
         }
 
@@ -372,7 +376,7 @@ impl SplitServiceImpl {
         task_id: &str,
         target_shard_ids: &[String],
         target_nodes: &[String],
-    ) -> Result<(), String> {
+    ) -> anyhow::Result<()> {
         info!(
             "Creating target shards for task {}: {:?}",
             task_id, target_shard_ids
@@ -381,19 +385,29 @@ impl SplitServiceImpl {
         for target_shard_id in target_shard_ids {
             // Check if shard already exists
             if node.get_raft_group(target_shard_id).is_some() {
-                warn!("Target shard {} already exists, skipping creation", target_shard_id);
+                warn!(
+                    "Target shard {} already exists, skipping creation",
+                    target_shard_id
+                );
                 continue;
             }
 
             // Create Raft group for target shard
-            match node.create_raft_group(target_shard_id.clone(), target_nodes.to_vec()).await {
+            match node
+                .create_raft_group(target_shard_id.clone(), target_nodes.to_vec())
+                .await
+            {
                 Ok(_) => {
-                    info!("Created target shard {} for task {}", target_shard_id, task_id);
+                    info!(
+                        "Created target shard {} for task {}",
+                        target_shard_id, task_id
+                    );
                 }
                 Err(e) => {
-                    return Err(format!(
+                    return Err(anyhow::anyhow!(
                         "Failed to create target shard {}: {}",
-                        target_shard_id, e
+                        target_shard_id,
+                        e
                     ));
                 }
             }
@@ -412,7 +426,7 @@ impl SplitServiceImpl {
         target_shard_id: &str,
         slot_start: u32,
         slot_end: u32,
-    ) -> Result<(), String> {
+    ) -> anyhow::Result<()> {
         info!(
             "Creating and transferring snapshot for task {}: source={}, target={}, slot_range=[{}, {})",
             task_id, source_shard_id, target_shard_id, slot_start, slot_end
@@ -421,14 +435,14 @@ impl SplitServiceImpl {
         // Get source shard RaftId (for validation)
         let _source_raft_id = node
             .get_raft_group(source_shard_id)
-            .ok_or_else(|| format!("Source shard {} not found", source_shard_id))?;
+            .ok_or_else(|| anyhow::anyhow!("Source shard {} not found", source_shard_id))?;
 
         // Get source state machine and store
         let store = {
             let state_machines = node.state_machines.lock();
-            let source_state_machine = state_machines
-                .get(source_shard_id)
-                .ok_or_else(|| format!("Source state machine {} not found", source_shard_id))?;
+            let source_state_machine = state_machines.get(source_shard_id).ok_or_else(|| {
+                anyhow::anyhow!("Source state machine {} not found", source_shard_id)
+            })?;
             source_state_machine.store().clone()
         };
 
@@ -448,13 +462,17 @@ impl SplitServiceImpl {
         // Create snapshot directory and file path
         let snapshot_dir = snapshot_config.transfer_dir.join(&transfer_id);
         std::fs::create_dir_all(&snapshot_dir).map_err(|e| {
-            format!("Failed to create snapshot directory for transfer {}: {}", transfer_id, e)
+            anyhow::anyhow!(
+                "Failed to create snapshot directory for transfer {}: {}",
+                transfer_id,
+                e
+            )
         })?;
         let snapshot_file = snapshot_dir.join("snapshot.dat");
 
         // Create chunk index
         let chunk_index = Arc::new(parking_lot::RwLock::new(
-            snapshot_transfer::ChunkIndex::new()
+            snapshot_transfer::ChunkIndex::new(),
         ));
 
         // Create channel for receiving snapshot data
@@ -468,7 +486,7 @@ impl SplitServiceImpl {
         store
             .create_snapshot(&shard_id_str, tx, key_range)
             .await
-            .map_err(|e| format!("Failed to create snapshot: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create snapshot: {}", e))?;
 
         // Register transfer as active
         snapshot_transfer_manager.register_transfer(
@@ -501,7 +519,8 @@ impl SplitServiceImpl {
                     "Failed to generate snapshot file for split task {} transfer {}: {}",
                     task_id_clone, transfer_id_clone, e
                 );
-                snapshot_transfer_manager_clone.mark_transfer_failed(&transfer_id_clone, e);
+                snapshot_transfer_manager_clone
+                    .mark_transfer_failed(&transfer_id_clone, e.to_string());
             } else {
                 info!(
                     "Snapshot file generated successfully for split task {} transfer {}",
@@ -544,10 +563,13 @@ impl SplitServiceImpl {
                 break;
             }
             if let Some(ref error) = error_msg {
-                return Err(format!("Snapshot generation failed: {}", error));
+                return Err(anyhow::anyhow!("Snapshot generation failed: {}", error));
             }
             if start.elapsed() > timeout {
-                return Err(format!("Timeout waiting for snapshot file generation ({}s)", timeout.as_secs()));
+                return Err(anyhow::anyhow!(
+                    "Timeout waiting for snapshot file generation ({}s)",
+                    timeout.as_secs()
+                ));
             }
             sleep(Duration::from_millis(100)).await;
         }
@@ -565,7 +587,7 @@ impl SplitServiceImpl {
         split_slot: u32,
         source_slot_start: u32,
         source_slot_end: u32,
-    ) -> Result<(), String> {
+    ) -> anyhow::Result<()> {
         info!(
             "Updating routing table for task {}: source={}, targets={:?}, split_slot={}",
             task_id, source_shard_id, target_shard_ids, split_slot
@@ -577,14 +599,11 @@ impl SplitServiceImpl {
         let source_shard_id_string = source_shard_id.to_string();
         let _source_routing = routing_table
             .get_shard_routing(&source_shard_id_string)
-            .ok_or_else(|| format!("Source shard routing {} not found", source_shard_id))?;
+            .ok_or_else(|| anyhow::anyhow!("Source shard routing {} not found", source_shard_id))?;
 
         // Update source shard routing: [source_slot_start, split_slot)
-        let updated_source_routing = ShardRouting::new(
-            source_shard_id.to_string(),
-            source_slot_start,
-            split_slot,
-        );
+        let updated_source_routing =
+            ShardRouting::new(source_shard_id.to_string(), source_slot_start, split_slot);
         routing_table.add_shard_routing(updated_source_routing);
 
         // Add target shard routings
@@ -600,11 +619,8 @@ impl SplitServiceImpl {
                 current_slot + slot_range_per_shard
             };
 
-            let target_routing = ShardRouting::new(
-                target_shard_id.clone(),
-                target_slot_start,
-                target_slot_end,
-            );
+            let target_routing =
+                ShardRouting::new(target_shard_id.clone(), target_slot_start, target_slot_end);
             routing_table.add_shard_routing(target_routing);
 
             info!(
@@ -762,7 +778,10 @@ impl SplitService for SplitServiceImpl {
             return Err(Status::invalid_argument("task_id is required"));
         }
 
-        info!("CancelSplit request: task_id={}, rollback={}", task_id, req.rollback);
+        info!(
+            "CancelSplit request: task_id={}, rollback={}",
+            task_id, req.rollback
+        );
 
         match self.task_manager.get_task(&task_id) {
             Some(task) => {
@@ -907,4 +926,3 @@ impl SplitService for SplitServiceImpl {
         }
     }
 }
-

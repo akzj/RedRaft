@@ -642,7 +642,7 @@ impl SnapshotStorage for KVStateMachine {
         let metadata_bytes = metadata.serialize().map_err(|e| {
             raft::StorageError::SnapshotCreationFailed(format!(
                 "Failed to serialize snapshot metadata: {}",
-                e
+                e.to_string()
             ))
         })?;
 
@@ -651,7 +651,7 @@ impl SnapshotStorage for KVStateMachine {
         std::fs::create_dir_all(&snapshot_dir).map_err(|e| {
             raft::StorageError::SnapshotCreationFailed(format!(
                 "Failed to create snapshot directory: {}",
-                e
+                e.to_string()
             ))
         })?;
         let snapshot_file = snapshot_dir.join("snapshot.dat");
@@ -735,7 +735,7 @@ impl SnapshotStorage for KVStateMachine {
                     "Failed to generate snapshot file for transfer {}: {}",
                     transfer_id_clone, e
                 );
-                snapshot_transfer_manager.mark_transfer_failed(&transfer_id_clone, e);
+                snapshot_transfer_manager.mark_transfer_failed(&transfer_id_clone, e.to_string());
             }
         });
 
