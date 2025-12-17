@@ -70,8 +70,6 @@ message PullSyncDataRequest {
   uint32 max_chunk_size = 4;
   /// Starting Raft index (for entry logs)
   uint64 start_index = 5;
-  /// Maximum number of entries to pull (for entry logs)
-  uint32 max_entries = 6;
 }
 
 /// Pull sync data response

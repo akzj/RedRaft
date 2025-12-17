@@ -410,88 +410,6 @@ pub fn get_transfer_state_info(
     Ok((state.snapshot_path, state.chunk_index))
 }
 
-/// Spawn async task to receive snapshot entries and forward to blocking channel
-fn spawn_async_receiver_task(
-    mut rx: tokio::sync::mpsc::Receiver<storage::SnapshotStoreEntry>,
-    blocking_tx: std::sync::mpsc::Sender<anyhow::Result<(Vec<u8>, bool)>>,
-    chunk_index: Arc<RwLock<ChunkIndex>>,
-    chunk_size: usize,
-) -> tokio::task::JoinHandle<anyhow::Result<()>> {
-    tokio::spawn(async move {
-        let mut chunk_buffer = Vec::new();
-
-        // Collect entries into chunks in async context
-        while let Some(entry) = rx.recv().await {
-            match entry {
-                storage::SnapshotStoreEntry::Error(err) => {
-                    error!("Received error from snapshot creation: {}", err);
-                    let mut index = chunk_index.write();
-                    index.error = Some(format!("Snapshot creation error: {}", err));
-                    index.notify.notify_waiters();
-                    // Send error signal to blocking task
-                    let _ =
-                        blocking_tx.send(Err(anyhow::anyhow!("Snapshot creation error: {}", err)));
-                    return Ok(());
-                }
-                storage::SnapshotStoreEntry::Completed => {
-                    // Send remaining buffer and completion signal
-                    if !chunk_buffer.is_empty() {
-                        if blocking_tx.send(Ok((chunk_buffer, true))).is_err() {
-                            error!("Failed to send final chunk to blocking task");
-                            return Err(anyhow::anyhow!(
-                                "Failed to send final chunk to blocking task"
-                            ));
-                        }
-                    } else {
-                        // Send empty chunk to signal completion
-                        if blocking_tx.send(Ok((Vec::new(), true))).is_err() {
-                            error!("Failed to send completion signal to blocking task");
-                            return Err(anyhow::anyhow!(
-                                "Failed to send completion signal to blocking task"
-                            ));
-                        }
-                    }
-                    info!("Snapshot data transfer completed");
-                    break;
-                }
-                _ => {
-                    // Serialize entry using bincode (lightweight operation, can stay in async)
-                    let serialized =
-                        match bincode::serde::encode_to_vec(&entry, bincode::config::standard()) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                error!("Failed to serialize entry: {}", e);
-                                let _ = blocking_tx
-                                    .send(Err(anyhow::anyhow!("Failed to serialize entry: {}", e)));
-                                return Err(anyhow::anyhow!("Failed to serialize entry: {}", e));
-                            }
-                        };
-
-                    // Check if adding this entry would exceed chunk size
-                    if chunk_buffer.len() + serialized.len() > chunk_size
-                        && !chunk_buffer.is_empty()
-                    {
-                        // Send current chunk to blocking task for compression and writing
-                        if blocking_tx.send(Ok((chunk_buffer, false))).is_err() {
-                            let error = format!("Failed to send chunk to blocking task");
-                            error!("{}", error);
-                            return Err(anyhow::anyhow!("{}", error));
-                        }
-                        chunk_buffer = Vec::new();
-                    }
-
-                    // Add entry to chunk buffer
-                    // Write entry length (u32) followed by serialized data
-                    let entry_len = serialized.len() as u32;
-                    chunk_buffer.extend_from_slice(&entry_len.to_le_bytes());
-                    chunk_buffer.extend_from_slice(&serialized);
-                }
-            }
-        }
-        Ok(())
-    })
-}
-
 /// Write a single chunk to file (compression, CRC32, header, and file I/O)
 fn write_chunk_to_file(
     writer: &mut std::io::BufWriter<std::fs::File>,
@@ -571,13 +489,14 @@ fn write_chunk_to_file(
     Ok(compressed.len() as u64)
 }
 
-/// Spawn CPU-intensive task to compress and write chunks to file
+/// Spawn CPU-intensive task to receive entries, serialize, chunk, compress and write to file
 fn spawn_blocking_writer_task(
     file_path: std::path::PathBuf,
-    blocking_rx: std::sync::mpsc::Receiver<anyhow::Result<(Vec<u8>, bool)>>,
+    rx: std::sync::mpsc::Receiver<storage::SnapshotStoreEntry>,
     chunk_index: Arc<RwLock<ChunkIndex>>,
     transfer_id: String,
     zstd_level: i32,
+    chunk_size: usize,
 ) -> tokio::task::JoinHandle<anyhow::Result<(u64, u64)>> {
     tokio::task::spawn_blocking(move || {
         use std::fs::File;
@@ -591,35 +510,88 @@ fn spawn_blocking_writer_task(
         let mut current_file_offset = 0u64;
         let mut total_uncompressed_size = 0u64;
         let mut total_compressed_size = 0u64;
+        let mut chunk_buffer = Vec::new();
 
-        // Receive chunks from blocking channel and process them
+        // Collect entries into chunks and write them
         loop {
-            match blocking_rx.recv() {
-                Ok(Ok((chunk_buffer, is_last))) => {
-                    let compressed_size = write_chunk_to_file(
-                        &mut writer,
-                        &chunk_buffer,
-                        chunk_index_counter,
-                        &mut current_file_offset,
-                        zstd_level,
-                        chunk_index.clone(),
-                        &transfer_id,
-                        is_last,
-                    )?;
+            match rx.recv() {
+                Ok(entry) => {
+                    match entry {
+                        storage::SnapshotStoreEntry::Error(err) => {
+                            error!("Received error from snapshot creation: {}", err);
+                            let mut index = chunk_index.write();
+                            index.error = Some(format!("Snapshot creation error: {}", err));
+                            index.notify.notify_waiters();
+                            return Err(anyhow::anyhow!("Snapshot creation error: {}", err));
+                        }
+                        storage::SnapshotStoreEntry::Completed => {
+                            // Send remaining buffer and completion signal
+                            if !chunk_buffer.is_empty() {
+                                let compressed_size = write_chunk_to_file(
+                                    &mut writer,
+                                    &chunk_buffer,
+                                    chunk_index_counter,
+                                    &mut current_file_offset,
+                                    zstd_level,
+                                    chunk_index.clone(),
+                                    &transfer_id,
+                                    true,
+                                )?;
 
-                    total_uncompressed_size += chunk_buffer.len() as u64;
-                    total_compressed_size += compressed_size;
+                                total_uncompressed_size += chunk_buffer.len() as u64;
+                                total_compressed_size += compressed_size;
+                            }
+                            info!("Snapshot data transfer completed");
+                            break;
+                        }
+                        _ => {
+                            // Serialize entry using bincode
+                            let serialized = match bincode::serde::encode_to_vec(
+                                &entry,
+                                bincode::config::standard(),
+                            ) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    error!("Failed to serialize entry: {}", e);
+                                    return Err(anyhow::anyhow!(
+                                        "Failed to serialize entry: {}",
+                                        e
+                                    ));
+                                }
+                            };
 
-                    chunk_index_counter += 1;
-                    if is_last {
-                        break;
+                            // Check if adding this entry would exceed chunk size
+                            if chunk_buffer.len() + serialized.len() > chunk_size
+                                && !chunk_buffer.is_empty()
+                            {
+                                // Write current chunk to file
+                                let compressed_size = write_chunk_to_file(
+                                    &mut writer,
+                                    &chunk_buffer,
+                                    chunk_index_counter,
+                                    &mut current_file_offset,
+                                    zstd_level,
+                                    chunk_index.clone(),
+                                    &transfer_id,
+                                    false,
+                                )?;
+
+                                total_uncompressed_size += chunk_buffer.len() as u64;
+                                total_compressed_size += compressed_size;
+                                chunk_index_counter += 1;
+                                chunk_buffer = Vec::new();
+                            }
+
+                            // Add entry to chunk buffer
+                            // Write entry length (u32) followed by serialized data
+                            let entry_len = serialized.len() as u32;
+                            chunk_buffer.extend_from_slice(&entry_len.to_le_bytes());
+                            chunk_buffer.extend_from_slice(&serialized);
+                        }
                     }
                 }
-                Ok(Err(e)) => {
-                    return Err(anyhow::anyhow!("Blocking channel error: {}", e));
-                }
                 Err(e) => {
-                    return Err(anyhow::anyhow!("Blocking channel error: {}", e));
+                    return Err(anyhow::anyhow!("Channel error: {}", e));
                 }
             }
         }
@@ -638,19 +610,30 @@ fn spawn_blocking_writer_task(
     })
 }
 
-/// Wait for tasks to complete and update transfer state
-async fn wait_for_tasks_and_update_state(
-    async_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
-    write_handle: tokio::task::JoinHandle<anyhow::Result<(u64, u64)>>,
-    transfer_manager: &SnapshotTransferManager,
+/// Async task to generate snapshot file from channel (chunk-based with zstd compression)
+/// Snapshot object is already created in load_snapshot, this function just reads from channel and writes to file
+pub async fn generate_snapshot_file_async(
+    _shard_id: &str,
     transfer_id: &str,
-    snapshot_path: std::path::PathBuf,
-    chunk_index: Arc<RwLock<ChunkIndex>>,
+    transfer_manager: &SnapshotTransferManager,
+    rx: std::sync::mpsc::Receiver<storage::SnapshotStoreEntry>,
+    snapshot_config: crate::config::SnapshotConfig,
 ) -> anyhow::Result<()> {
-    // Wait for async receiving task to complete (it forwards data to blocking channel)
-    async_handle
-        .await
-        .map_err(|e| anyhow::anyhow!("Async receiving task failed: {:?}", e))??;
+    info!("Generating snapshot file for transfer {}", transfer_id);
+
+    // Get transfer state information
+    let (snapshot_path, chunk_index) = get_transfer_state_info(transfer_manager, transfer_id)
+        .context("Failed to get transfer state info")?;
+
+    // Spawn CPU-intensive task to receive entries, serialize, chunk, compress and write to file
+    let write_handle = spawn_blocking_writer_task(
+        snapshot_path.clone(),
+        rx,
+        chunk_index.clone(),
+        transfer_id.to_string(),
+        snapshot_config.zstd_level,
+        snapshot_config.chunk_size,
+    );
 
     // Wait for file writing to complete
     let (total_uncompressed, total_compressed) = write_handle
@@ -667,52 +650,4 @@ async fn wait_for_tasks_and_update_state(
     );
 
     Ok(())
-}
-
-/// Async task to generate snapshot file from channel (chunk-based with zstd compression)
-/// Snapshot object is already created in load_snapshot, this function just reads from channel and writes to file
-pub async fn generate_snapshot_file_async(
-    _shard_id: &str,
-    transfer_id: &str,
-    transfer_manager: &SnapshotTransferManager,
-    rx: tokio::sync::mpsc::Receiver<storage::SnapshotStoreEntry>,
-    snapshot_config: crate::config::SnapshotConfig,
-) -> anyhow::Result<()> {
-    info!("Generating snapshot file for transfer {}", transfer_id);
-
-    // Get transfer state information
-    let (snapshot_path, chunk_index) = get_transfer_state_info(transfer_manager, transfer_id)
-        .context("Failed to get transfer state info")?;
-
-    // Create a blocking channel to pass data to CPU-intensive task
-    // This allows async channel receiving without blocking tokio runtime
-    let (blocking_tx, blocking_rx) = std::sync::mpsc::channel();
-
-    // Spawn async task to receive from async channel and forward to blocking channel
-    let async_handle = spawn_async_receiver_task(
-        rx,
-        blocking_tx,
-        chunk_index.clone(),
-        snapshot_config.chunk_size,
-    );
-
-    // Spawn CPU-intensive task to compress and write chunks to file
-    let write_handle = spawn_blocking_writer_task(
-        snapshot_path.clone(),
-        blocking_rx,
-        chunk_index.clone(),
-        transfer_id.to_string(),
-        snapshot_config.zstd_level,
-    );
-
-    // Wait for tasks to complete and update state
-    wait_for_tasks_and_update_state(
-        async_handle,
-        write_handle,
-        transfer_manager,
-        transfer_id,
-        snapshot_path,
-        chunk_index,
-    )
-    .await
 }

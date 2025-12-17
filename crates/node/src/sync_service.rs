@@ -283,7 +283,6 @@ impl SyncServiceImpl {
             chunk_index: 0,              // Start from first chunk
             max_chunk_size: 1024 * 1024, // 1MB chunks
             start_index: 0,
-            max_entries: 0,
         };
 
         match sync_client.pull_sync_data(Request::new(pull_request)).await {
@@ -382,7 +381,6 @@ impl SyncServiceImpl {
                 chunk_index: 0, // Not used for entry logs
                 max_chunk_size: 0,
                 start_index: current_index,
-                max_entries: 100, // Pull 100 entries at a time
             };
 
             match sync_client.pull_sync_data(Request::new(pull_request)).await {
@@ -721,7 +719,6 @@ impl SyncService for SyncServiceImpl {
                         node_clone,
                         task_id.clone(),
                         req.start_index,
-                        req.max_entries,
                         tx,
                     )
                     .await
@@ -930,7 +927,6 @@ async fn stream_entry_logs_from_source(
     node: Arc<RRNode>,
     task_id: String,
     start_index: u64,
-    max_entries: u32,
     tx: tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
 ) -> Result<()> {
     use proto::sync_service::EntryLog;
@@ -1016,15 +1012,10 @@ async fn stream_entry_logs_from_source(
     let mut reader = BufReader::new(file);
     let mut entry_logs = Vec::new();
     let mut current_index = 0u64;
-    let mut entries_read = 0u32;
 
     // Read entries from file
     // File format: [index (u64)][term (u64)][data_len (u32)][data]
     loop {
-        if entries_read >= max_entries {
-            break;
-        }
-
         // Read index
         let mut index_bytes = [0u8; 8];
         if reader.read_exact(&mut index_bytes).is_err() {
@@ -1032,8 +1023,14 @@ async fn stream_entry_logs_from_source(
         }
         let index = u64::from_le_bytes(index_bytes);
 
-        // Skip entries before start_index
-        if index < start_index {
+        // Get snapshot_index to skip entries already in snapshot
+        let snapshot_index = {
+            let snapshot_idx = writer_info.snapshot_index.read();
+            *snapshot_idx
+        };
+
+        // Skip entries before start_index or entries already in snapshot (index <= snapshot_index)
+        if index < start_index || (snapshot_index.is_some() && index <= snapshot_index.unwrap()) {
             // Read term and data_len to skip data
             let mut term_bytes = [0u8; 8];
             if reader.read_exact(&mut term_bytes).is_err() {
@@ -1089,7 +1086,6 @@ async fn stream_entry_logs_from_source(
             command_type,
         });
 
-        entries_read += 1;
         current_index = index;
 
         // Check if we've reached the latest index
@@ -1099,7 +1095,7 @@ async fn stream_entry_logs_from_source(
     }
 
     // Send entry logs
-    let is_last_chunk = current_index >= latest_index || entries_read < max_entries;
+    let is_last_chunk = current_index >= latest_index;
     let _ = tx
         .send(Ok(PullSyncDataResponse {
             task_id: task_id.clone(),

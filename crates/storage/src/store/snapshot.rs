@@ -25,7 +25,7 @@ impl SnapshotStore for HybridStore {
     async fn create_snapshot(
         &self,
         shard_id: &ShardId,
-        channel: tokio::sync::mpsc::Sender<SnapshotStoreEntry>,
+        channel: std::sync::mpsc::SyncSender<SnapshotStoreEntry>,
         key_range: Option<(u32, u32)>,
     ) -> anyhow::Result<u64> {
         // Get shard (must be done before moving into closure)
@@ -57,7 +57,7 @@ impl SnapshotStore for HybridStore {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // Helper function to send error through channel
                 let send_error = |err: StoreError| {
-                    let _ = channel.blocking_send(SnapshotStoreEntry::Error(err));
+                    let _ = channel.send(SnapshotStoreEntry::Error(err));
                 };
 
                 // Create snapshot inside the closure (after db is moved)
@@ -151,7 +151,7 @@ impl SnapshotStore for HybridStore {
                                 continue;
                             }
                             let field = &key_part[colon_pos + 1..];
-                            if let Err(e) = channel.blocking_send(SnapshotStoreEntry::Hash(
+                            if let Err(e) = channel.send(SnapshotStoreEntry::Hash(
                                 bytes::Bytes::copy_from_slice(hash_key),
                                 bytes::Bytes::copy_from_slice(field),
                                 bytes::Bytes::copy_from_slice(&value),
@@ -191,7 +191,7 @@ impl SnapshotStore for HybridStore {
                         crate::memory::DataCow::List(list) => {
                             // Send all list elements
                             for element in list.iter() {
-                                if let Err(e) = channel.blocking_send(SnapshotStoreEntry::List(
+                                if let Err(e) = channel.send(SnapshotStoreEntry::List(
                                     bytes::Bytes::copy_from_slice(key),
                                     element.clone(),
                                     apply_index,
@@ -208,7 +208,7 @@ impl SnapshotStore for HybridStore {
                         crate::memory::DataCow::Set(set) => {
                             // Send all set members
                             for member in set.members() {
-                                if let Err(e) = channel.blocking_send(SnapshotStoreEntry::Set(
+                                if let Err(e) = channel.send(SnapshotStoreEntry::Set(
                                     bytes::Bytes::copy_from_slice(key),
                                     member.clone(),
                                     apply_index,
@@ -228,7 +228,7 @@ impl SnapshotStore for HybridStore {
                             let members_with_scores =
                                 zset.range_by_score(f64::NEG_INFINITY, f64::INFINITY);
                             for (member, score) in members_with_scores {
-                                if let Err(e) = channel.blocking_send(SnapshotStoreEntry::ZSet(
+                                if let Err(e) = channel.send(SnapshotStoreEntry::ZSet(
                                     bytes::Bytes::copy_from_slice(key),
                                     score,
                                     member,
@@ -245,7 +245,7 @@ impl SnapshotStore for HybridStore {
                         }
                         crate::memory::DataCow::Bitmap(bitmap) => {
                             // Send bitmap data (BitmapData is Vec<u8>)
-                            if let Err(e) = channel.blocking_send(SnapshotStoreEntry::Bitmap(
+                            if let Err(e) = channel.send(SnapshotStoreEntry::Bitmap(
                                 bytes::Bytes::copy_from_slice(key),
                                 bytes::Bytes::copy_from_slice(bitmap),
                                 apply_index,
@@ -263,7 +263,7 @@ impl SnapshotStore for HybridStore {
                 drop(memory_data);
 
                 // Send completion signal
-                let _ = channel.blocking_send(SnapshotStoreEntry::Completed);
+                let _ = channel.send(SnapshotStoreEntry::Completed);
             }));
 
             // Handle panic: send error and signal to unblock main thread
@@ -275,7 +275,7 @@ impl SnapshotStore for HybridStore {
                 } else {
                     "Thread panicked with unknown error".to_string()
                 };
-                let _ = channel.blocking_send(SnapshotStoreEntry::Error(StoreError::Internal(
+                let _ = channel.send(SnapshotStoreEntry::Error(StoreError::Internal(
                     error_msg.clone(),
                 )));
                 error!("Snapshot creation thread panicked: {}", error_msg);

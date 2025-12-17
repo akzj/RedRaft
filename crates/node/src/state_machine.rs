@@ -321,7 +321,10 @@ impl StateMachine for KVStateMachine {
                     );
                 }
             };
-            (store.apply_with_index(index, index, &command), Some(command))
+            (
+                store.apply_with_index(index, index, &command),
+                Some(command),
+            )
         })
         .await
         .map_err(|e| raft::ApplyError::Internal(format!("Failed to apply command: {}", e)))?;
@@ -727,7 +730,7 @@ impl SnapshotStorage for KVStateMachine {
 
         // Create channel for receiving snapshot data
         // This channel will be used by create_snapshot to send snapshot entries
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let (tx, rx) = std::sync::mpsc::sync_channel(128);
 
         // Synchronously create snapshot object in load_snapshot context
         // This ensures state consistency - snapshot object (RocksDB snapshot + Memory COW)
@@ -744,19 +747,15 @@ impl SnapshotStorage for KVStateMachine {
         // Block on create_snapshot to ensure snapshot object is created synchronously
         // create_snapshot uses spawn_blocking internally and signals via oneshot when snapshot is ready
         // We block here to ensure snapshot object is created in synchronous context
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.store.create_snapshot(
-                &shard_id_str,
-                tx,
-                None,
-            ))
-        })
-        .map_err(|e| {
-            raft::StorageError::SnapshotCreationFailed(format!(
-                "Failed to create snapshot object: {}",
-                e
-            ))
-        })?;
+        self.store
+            .create_snapshot(&shard_id_str, tx, None)
+            .await
+            .map_err(|e| {
+                raft::StorageError::SnapshotCreationFailed(format!(
+                    "Failed to create snapshot object: {}",
+                    e
+                ))
+            })?;
 
         info!(
             "Snapshot object created for shard {} transfer {}",

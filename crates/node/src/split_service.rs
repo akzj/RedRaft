@@ -495,17 +495,25 @@ impl SplitServiceImpl {
         ));
 
         // Create channel for receiving snapshot data
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let (tx, rx) = std::sync::mpsc::sync_channel(128);
 
         // Create snapshot with slot range filter
         let shard_id_str = source_shard_id.to_string();
         let key_range = Some((slot_start, slot_end));
 
         use storage::SnapshotStore;
-        let apply_index = store
+        let snapshot_index = store
             .create_snapshot(&shard_id_str, tx, key_range)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create snapshot: {}", e))?;
+
+        // Set snapshot_index in log_replay_writer to skip duplicate entries
+        // Entries with index <= snapshot_index are already included in the snapshot
+        node.set_log_replay_snapshot_index(&task_id, snapshot_index);
+        info!(
+            "Set snapshot_index {} for log replay writer in task {}",
+            snapshot_index, task_id
+        );
 
         // Register transfer as active
         snapshot_transfer_manager.register_transfer(

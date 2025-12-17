@@ -62,6 +62,8 @@ pub struct LogReplayWriterInfo {
     pub notify: Arc<Notify>,
     /// Cache for latest entries (max 128 entries)
     pub cache: Arc<RwLock<VecDeque<CachedLogEntry>>>,
+    /// Snapshot apply_index - entries with index <= this value are already in snapshot
+    pub snapshot_index: Arc<RwLock<Option<u64>>>,
 }
 
 /// Log replay writer
@@ -74,6 +76,8 @@ pub struct LogReplayWriter {
     notify: Arc<Notify>,
     /// Cache for latest entries (max 128 entries)
     cache: Arc<RwLock<VecDeque<CachedLogEntry>>>,
+    /// Snapshot apply_index - entries with index <= this value are already in snapshot
+    snapshot_index: Arc<RwLock<Option<u64>>>,
     /// Batch size (number of commands to buffer before flushing)
     batch_size: usize,
     /// Flush interval (flush even if batch is not full)
@@ -100,6 +104,7 @@ impl LogReplayWriter {
             metadata: Arc::new(RwLock::new(LogReplayMetadata::default())),
             notify: Arc::new(Notify::new()),
             cache: Arc::new(RwLock::new(VecDeque::with_capacity(128))),
+            snapshot_index: Arc::new(RwLock::new(None)),
             batch_size,
             flush_interval,
         })
@@ -125,6 +130,17 @@ impl LogReplayWriter {
         &self.file_path
     }
 
+    /// Set snapshot index (apply_index of the snapshot)
+    /// Entries with index <= snapshot_index are already included in the snapshot
+    pub fn set_snapshot_index(&self, snapshot_index: u64) {
+        *self.snapshot_index.write() = Some(snapshot_index);
+    }
+
+    /// Get snapshot index reference
+    pub fn snapshot_index(&self) -> Arc<RwLock<Option<u64>>> {
+        self.snapshot_index.clone()
+    }
+
     /// Extract writer info for storage
     /// This allows storing the writer's components after the writer is moved into start()
     pub fn into_info(self) -> LogReplayWriterInfo {
@@ -133,6 +149,7 @@ impl LogReplayWriter {
             metadata: self.metadata,
             notify: self.notify,
             cache: self.cache,
+            snapshot_index: self.snapshot_index,
         }
     }
 

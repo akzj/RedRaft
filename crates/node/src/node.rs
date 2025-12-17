@@ -315,8 +315,20 @@ impl RRNode {
                 metadata: writer.metadata(),
                 notify: writer.notify(),
                 cache: writer.cache(),
+                snapshot_index: writer.snapshot_index(),
             }
         })
+    }
+
+    /// Set snapshot index for log replay writer
+    ///
+    /// # Arguments
+    /// - `task_id`: Split task ID
+    /// - `snapshot_index`: Snapshot apply_index - entries with index <= this value are already in snapshot
+    pub fn set_log_replay_snapshot_index(&self, task_id: &str, snapshot_index: u64) {
+        if let Some(writer) = self.log_replay_writers.read().get(task_id) {
+            writer.set_snapshot_index(snapshot_index);
+        }
     }
 
     /// Remove log replay writer for a split task

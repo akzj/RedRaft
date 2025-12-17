@@ -724,7 +724,7 @@ pub trait SnapshotStore: Send + Sync {
     async fn create_snapshot(
         &self,
         shard_id: &ShardId,
-        channel: tokio::sync::mpsc::Sender<SnapshotStoreEntry>,
+        channel: std::sync::mpsc::SyncSender<SnapshotStoreEntry>,
         key_range: Option<(u32, u32)>,
     ) -> anyhow::Result<u64>;
 
