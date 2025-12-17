@@ -17,13 +17,8 @@ use storage::traits::{
 pub async fn restore_snapshot_from_chunks(
     store: Arc<HybridStore>,
     blocking_rx: std::sync::mpsc::Receiver<Result<(Vec<u8>, bool), String>>,
-) -> Result<Result<u64, String>, tokio::task::JoinError> {
+) -> anyhow::Result<Result<u64, String>, tokio::task::JoinError> {
     tokio::task::spawn_blocking(move || {
-        // Clear existing data before restoring
-        if let Err(e) = store.flushdb() {
-            return Err(format!("Failed to flush database: {}", e));
-        }
-
         let mut entry_count = 0u64;
         let mut chunk_count = 0u32;
 
@@ -59,7 +54,7 @@ pub async fn restore_snapshot_from_chunks(
                         return Ok(entry_count);
                     }
                 }
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.to_string()),
             }
 
             if is_last {
@@ -79,7 +74,7 @@ fn process_decompressed_chunk(
     store: &Arc<HybridStore>,
     decompressed: &[u8],
     entry_count: &mut u64,
-) -> Result<bool, String> {
+) -> anyhow::Result<bool> {
     let mut cursor = 0;
     while cursor < decompressed.len() {
         match bincode::serde::decode_from_slice::<SnapshotStoreEntry, _>(
@@ -95,7 +90,9 @@ fn process_decompressed_chunk(
                         }
                         *entry_count += 1;
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("Failed to apply snapshot entry: {}", e));
+                    }
                 }
                 cursor += bytes_read;
             }
@@ -104,7 +101,7 @@ fn process_decompressed_chunk(
                     "Failed to deserialize snapshot entry at offset {}: {}",
                     cursor, e
                 );
-                return Err(format!("Failed to deserialize entry: {}", e));
+                return Err(anyhow::anyhow!("Failed to deserialize entry: {}", e));
             }
         }
     }
@@ -117,47 +114,47 @@ fn process_decompressed_chunk(
 fn apply_snapshot_entry(
     store: &Arc<HybridStore>,
     entry: SnapshotStoreEntry,
-) -> Result<bool, String> {
+) -> anyhow::Result<bool> {
     match entry {
         SnapshotStoreEntry::Completed => {
             info!("Received completion signal, snapshot restore finished");
             return Ok(true);
         }
         SnapshotStoreEntry::Error(err) => {
-            return Err(format!("Snapshot restore error: {}", err));
+            return Err(anyhow::anyhow!("Snapshot restore error: {}", err));
         }
-        SnapshotStoreEntry::String(key, value) => {
+        SnapshotStoreEntry::String(key, value, apply_index) => {
             store
-                .set(&key, value)
-                .map_err(|e| format!("Failed to restore String entry: {}", e))?;
+                .set(&key, value, apply_index)
+                .map_err(|e| anyhow::anyhow!("Failed to restore String entry: {}", e))?;
         }
-        SnapshotStoreEntry::Hash(key, field, value) => {
+        SnapshotStoreEntry::Hash(key, field, value, apply_index) => {
             store
-                .hset(&key, &field, value)
-                .map_err(|e| format!("Failed to restore Hash entry: {}", e))?;
+                .hset(&key, &field, value, apply_index)
+                .map_err(|e| anyhow::anyhow!("Failed to restore Hash entry: {}", e))?;
         }
-        SnapshotStoreEntry::List(key, element) => {
+        SnapshotStoreEntry::List(key, element, apply_index) => {
             store
-                .rpush(&key, vec![element])
-                .map_err(|e| format!("Failed to restore List entry: {}", e))?;
+                .rpush(&key, vec![element], apply_index)
+                .map_err(|e| anyhow::anyhow!("Failed to restore List entry: {}", e))?;
         }
-        SnapshotStoreEntry::Set(key, member) => {
+        SnapshotStoreEntry::Set(key, member, apply_index) => {
             store
-                .sadd(&key, vec![member])
-                .map_err(|e| format!("Failed to restore Set entry: {}", e))?;
+                .sadd(&key, vec![member], apply_index)
+                .map_err(|e| anyhow::anyhow!("Failed to restore Set entry: {}", e))?;
         }
-        SnapshotStoreEntry::ZSet(_key, _score, _member) => {
+        SnapshotStoreEntry::ZSet(_key, _score, _member, _apply_index) => {
             // ZSetStore is not implemented for HybridStore yet
             // For now, skip ZSet restoration (TODO: implement ZSetStore trait)
             warn!("ZSet restoration not yet implemented, skipping entry");
         }
-        SnapshotStoreEntry::Bitmap(key, bitmap) => {
+        SnapshotStoreEntry::Bitmap(key, bitmap, apply_index) => {
             // Bitmap is stored as bytes, need to set bits
             // For now, we'll store it as a string value
             // TODO: Implement proper bitmap restoration
             store
-                .set(&key, bitmap)
-                .map_err(|e| format!("Failed to restore Bitmap entry: {}", e))?;
+                .set(&key, bitmap, apply_index)
+                .map_err(|e| anyhow::anyhow!("Failed to restore Bitmap entry: {}", e))?;
         }
     }
 

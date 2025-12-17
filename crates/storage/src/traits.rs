@@ -98,22 +98,32 @@ pub type StoreResult<T> = Result<T, StoreError>;
 /// Recommended backend: RocksDB (persistent)
 pub trait StringStore: Send + Sync {
     /// GET: Get string value
-    fn get(&self, key: &[u8]) -> StoreResult<Option<Bytes>>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn get(&self, key: &[u8], read_index: u64) -> StoreResult<Option<Bytes>>;
 
     /// SET: Set string value
-    fn set(&self, key: &[u8], value: Bytes) -> StoreResult<()>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn set(&self, key: &[u8], value: Bytes, apply_index: u64) -> StoreResult<()>;
 
     /// SETNX: Set only if key does not exist
-    fn setnx(&self, key: &[u8], value: Bytes) -> StoreResult<bool>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn setnx(&self, key: &[u8], value: Bytes, apply_index: u64) -> StoreResult<bool>;
 
     /// SETEX: Set value with expiration time (seconds)
-    fn setex(&self, key: &[u8], value: Bytes, ttl_secs: u64) -> StoreResult<()>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn setex(&self, key: &[u8], value: Bytes, ttl_secs: u64, apply_index: u64) -> StoreResult<()>;
 
     /// MGET: Batch get
-    fn mget(&self, keys: &[&[u8]]) -> StoreResult<Vec<Option<Bytes>>> {
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn mget(&self, keys: &[&[u8]], read_index: u64) -> StoreResult<Vec<Option<Bytes>>> {
         let mut results = Vec::new();
         for k in keys {
-            match self.get(k) {
+            match self.get(k, read_index) {
                 Ok(val) => results.push(val),
                 Err(e) => return Err(e),
             }
@@ -122,41 +132,64 @@ pub trait StringStore: Send + Sync {
     }
 
     /// MSET: Batch set
-    fn mset(&self, kvs: Vec<(&[u8], Bytes)>) -> StoreResult<()> {
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn mset(&self, kvs: Vec<(&[u8], Bytes)>, apply_index: u64) -> StoreResult<()> {
         for (k, v) in kvs {
-            self.set(k, v)?;
+            self.set(k, v, apply_index)?;
         }
         Ok(())
     }
 
     /// INCR: Increment integer by 1
-    fn incr(&self, key: &[u8]) -> StoreResult<i64> {
-        self.incrby(key, 1)
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn incr(&self, key: &[u8], apply_index: u64) -> StoreResult<i64> {
+        self.incrby(key, 1, apply_index)
     }
 
     /// INCRBY: Increment integer by specified value
-    fn incrby(&self, key: &[u8], delta: i64) -> StoreResult<i64>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn incrby(&self, key: &[u8], delta: i64, apply_index: u64) -> StoreResult<i64>;
 
     /// DECR: Decrement integer by 1
-    fn decr(&self, key: &[u8]) -> StoreResult<i64> {
-        self.incrby(key, -1)
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn decr(&self, key: &[u8], apply_index: u64) -> StoreResult<i64> {
+        self.incrby(key, -1, apply_index)
     }
 
     /// DECRBY: Decrement integer by specified value
-    fn decrby(&self, key: &[u8], delta: i64) -> StoreResult<i64> {
-        self.incrby(key, -delta)
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn decrby(&self, key: &[u8], delta: i64, apply_index: u64) -> StoreResult<i64> {
+        self.incrby(key, -delta, apply_index)
     }
 
     /// APPEND: Append string
-    fn append(&self, key: &[u8], value: &[u8]) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn append(&self, key: &[u8], value: &[u8], apply_index: u64) -> StoreResult<usize>;
 
     /// STRLEN: Get string length
-    fn strlen(&self, key: &[u8]) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn strlen(&self, key: &[u8], read_index: u64) -> StoreResult<usize>;
 
     /// GETSET: Set new value and return old value
-    fn getset(&self, key: &[u8], value: Bytes) -> StoreResult<Option<Bytes>> {
-        let old = self.get(&key)?;
-        self.set(key, value)?;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification (for get)
+    /// - `apply_index`: Raft apply index for WAL logging (for set)
+    fn getset(
+        &self,
+        key: &[u8],
+        value: Bytes,
+        read_index: u64,
+        apply_index: u64,
+    ) -> StoreResult<Option<Bytes>> {
+        let old = self.get(&key, read_index)?;
+        self.set(key, value, apply_index)?;
         Ok(old)
     }
 }
@@ -172,50 +205,87 @@ pub trait StringStore: Send + Sync {
 /// Recommended backend: Memory (high performance)
 pub trait ListStore: Send + Sync {
     /// LPUSH: Insert elements from left
-    fn lpush(&self, key: &[u8], values: Vec<Bytes>) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn lpush(&self, key: &[u8], values: Vec<Bytes>, apply_index: u64) -> StoreResult<usize>;
 
     /// RPUSH: Insert elements from right
-    fn rpush(&self, key: &[u8], values: Vec<Bytes>) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn rpush(&self, key: &[u8], values: Vec<Bytes>, apply_index: u64) -> StoreResult<usize>;
 
     /// LPOP: Pop element from left
-    fn lpop(&self, key: &[u8]) -> StoreResult<Option<Bytes>>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn lpop(&self, key: &[u8], apply_index: u64) -> StoreResult<Option<Bytes>>;
 
     /// RPOP: Pop element from right
-    fn rpop(&self, key: &[u8]) -> StoreResult<Option<Bytes>>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn rpop(&self, key: &[u8], apply_index: u64) -> StoreResult<Option<Bytes>>;
 
     /// LRANGE: Get list range
-    fn lrange(&self, key: &[u8], start: i64, stop: i64) -> StoreResult<Vec<Bytes>>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn lrange(&self, key: &[u8], start: i64, stop: i64, read_index: u64)
+        -> StoreResult<Vec<Bytes>>;
 
     /// LLEN: Get list length
-    fn llen(&self, key: &[u8]) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn llen(&self, key: &[u8], read_index: u64) -> StoreResult<usize>;
 
     /// LINDEX: Get element at specified index
-    fn lindex(&self, key: &[u8], index: i64) -> StoreResult<Option<Bytes>>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn lindex(&self, key: &[u8], index: i64, read_index: u64) -> StoreResult<Option<Bytes>>;
 
     /// LSET: Set element at specified index
-    fn lset(&self, key: &[u8], index: i64, value: Bytes) -> StoreResult<()>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn lset(&self, key: &[u8], index: i64, value: Bytes, apply_index: u64) -> StoreResult<()>;
 
     /// LTRIM: Trim list to specified range
-    fn ltrim(&self, key: &[u8], start: i64, stop: i64) -> StoreResult<()> {
-        let _ = (key, start, stop);
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn ltrim(&self, key: &[u8], start: i64, stop: i64, apply_index: u64) -> StoreResult<()> {
+        let _ = (key, start, stop, apply_index);
         Err(StoreError::NotSupported)
     }
 
     /// LREM: Remove elements from list
-    fn lrem(&self, key: &[u8], count: i64, value: &[u8]) -> StoreResult<usize> {
-        let _ = (key, count, value);
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn lrem(&self, key: &[u8], count: i64, value: &[u8], apply_index: u64) -> StoreResult<usize> {
+        let _ = (key, count, value, apply_index);
         Ok(0)
     }
 
     /// LINSERT: Insert element before or after pivot
-    fn linsert(&self, key: &[u8], before: bool, pivot: &[u8], value: Bytes) -> StoreResult<i64> {
-        let _ = (key, before, pivot, value);
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn linsert(
+        &self,
+        key: &[u8],
+        before: bool,
+        pivot: &[u8],
+        value: Bytes,
+        apply_index: u64,
+    ) -> StoreResult<i64> {
+        let _ = (key, before, pivot, value, apply_index);
         Err(StoreError::NotSupported)
     }
 
     /// RPOPLPUSH: Pop from right, push to left of another list
-    fn rpoplpush(&self, source: &[u8], destination: &[u8]) -> StoreResult<Option<Bytes>> {
-        let _ = (source, destination);
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn rpoplpush(
+        &self,
+        source: &[u8],
+        destination: &[u8],
+        apply_index: u64,
+    ) -> StoreResult<Option<Bytes>> {
+        let _ = (source, destination, apply_index);
         Ok(None)
     }
 }
@@ -231,16 +301,27 @@ pub trait ListStore: Send + Sync {
 /// Recommended backend: RocksDB (persistent)
 pub trait HashStore: Send + Sync {
     /// HGET: Get hash field value
-    fn hget(&self, key: &[u8], field: &[u8]) -> StoreResult<Option<Bytes>>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn hget(&self, key: &[u8], field: &[u8], read_index: u64) -> StoreResult<Option<Bytes>>;
 
     /// HSET: Set hash field value, returns true if field is new
-    fn hset(&self, key: &[u8], field: &[u8], value: Bytes) -> StoreResult<bool>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn hset(&self, key: &[u8], field: &[u8], value: Bytes, apply_index: u64) -> StoreResult<bool>;
 
     /// HMGET: Batch get hash fields
-    fn hmget(&self, key: &[u8], fields: &[&[u8]]) -> StoreResult<Vec<Option<Bytes>>> {
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn hmget(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        read_index: u64,
+    ) -> StoreResult<Vec<Option<Bytes>>> {
         let mut results = Vec::new();
         for f in fields {
-            match self.hget(key, f) {
+            match self.hget(key, f, read_index) {
                 Ok(val) => results.push(val),
                 Err(e) => return Err(e),
             }
@@ -249,42 +330,68 @@ pub trait HashStore: Send + Sync {
     }
 
     /// HMSET: Batch set hash fields
-    fn hmset(&self, key: &[u8], fvs: Vec<(&[u8], Bytes)>) -> StoreResult<()> {
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn hmset(&self, key: &[u8], fvs: Vec<(&[u8], Bytes)>, apply_index: u64) -> StoreResult<()> {
         for (f, v) in fvs {
-            self.hset(key, f, v)?;
+            self.hset(key, f, v, apply_index)?;
         }
         Ok(())
     }
 
     /// HDEL: Delete hash fields
-    fn hdel(&self, key: &[u8], fields: &[&[u8]]) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn hdel(&self, key: &[u8], fields: &[&[u8]], apply_index: u64) -> StoreResult<usize>;
 
     /// HEXISTS: Check if hash field exists
-    fn hexists(&self, key: &[u8], field: &[u8]) -> StoreResult<bool> {
-        Ok(self.hget(key, field)?.is_some())
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn hexists(&self, key: &[u8], field: &[u8], read_index: u64) -> StoreResult<bool> {
+        Ok(self.hget(key, field, read_index)?.is_some())
     }
 
     /// HGETALL: Get all hash fields and values
-    fn hgetall(&self, key: &[u8]) -> StoreResult<Vec<(Bytes, Bytes)>>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn hgetall(&self, key: &[u8], read_index: u64) -> StoreResult<Vec<(Bytes, Bytes)>>;
 
     /// HKEYS: Get all hash field names
-    fn hkeys(&self, key: &[u8]) -> StoreResult<Vec<Bytes>>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn hkeys(&self, key: &[u8], read_index: u64) -> StoreResult<Vec<Bytes>>;
 
     /// HVALS: Get all hash field values
-    fn hvals(&self, key: &[u8]) -> StoreResult<Vec<Bytes>>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn hvals(&self, key: &[u8], read_index: u64) -> StoreResult<Vec<Bytes>>;
 
     /// HLEN: Get number of hash fields
-    fn hlen(&self, key: &[u8]) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn hlen(&self, key: &[u8], read_index: u64) -> StoreResult<usize>;
 
     /// HINCRBY: Increment hash field integer
-    fn hincrby(&self, key: &[u8], field: &[u8], delta: i64) -> StoreResult<i64>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn hincrby(&self, key: &[u8], field: &[u8], delta: i64, apply_index: u64) -> StoreResult<i64>;
 
     /// HSETNX: Set hash field only if it does not exist
-    fn hsetnx(&self, key: &[u8], field: &[u8], value: Bytes) -> StoreResult<bool> {
-        if self.hexists(key, &field)? {
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification (for exists check)
+    /// - `apply_index`: Raft apply index for WAL logging (for set)
+    fn hsetnx(
+        &self,
+        key: &[u8],
+        field: &[u8],
+        value: Bytes,
+        read_index: u64,
+        apply_index: u64,
+    ) -> StoreResult<bool> {
+        if self.hexists(key, &field, read_index)? {
             Ok(false)
         } else {
-            self.hset(key, field, value)?;
+            self.hset(key, field, value, apply_index)?;
             Ok(true)
         }
     }
@@ -301,47 +408,67 @@ pub trait HashStore: Send + Sync {
 /// Recommended backend: Memory (high performance)
 pub trait SetStore: Send + Sync {
     /// SADD: Add set members
-    fn sadd(&self, key: &[u8], members: Vec<Bytes>) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn sadd(&self, key: &[u8], members: Vec<Bytes>, apply_index: u64) -> StoreResult<usize>;
 
     /// SREM: Remove set members
-    fn srem(&self, key: &[u8], members: &[&[u8]]) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn srem(&self, key: &[u8], members: &[&[u8]], apply_index: u64) -> StoreResult<usize>;
 
     /// SMEMBERS: Get all set members
-    fn smembers(&self, key: &[u8]) -> StoreResult<Vec<Bytes>>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn smembers(&self, key: &[u8], read_index: u64) -> StoreResult<Vec<Bytes>>;
 
     /// SISMEMBER: Check if set member exists
-    fn sismember(&self, key: &[u8], member: &[u8]) -> StoreResult<bool>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn sismember(&self, key: &[u8], member: &[u8], read_index: u64) -> StoreResult<bool>;
 
     /// SCARD: Get set size
-    fn scard(&self, key: &[u8]) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn scard(&self, key: &[u8], read_index: u64) -> StoreResult<usize>;
 
     /// SPOP: Remove and return random member(s)
-    fn spop(&self, key: &[u8], count: usize) -> StoreResult<Vec<Bytes>> {
-        let _ = (key, count);
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn spop(&self, key: &[u8], count: usize, apply_index: u64) -> StoreResult<Vec<Bytes>> {
+        let _ = (key, count, apply_index);
         Ok(Vec::new())
     }
 
     /// SRANDMEMBER: Get random member(s) without removing
-    fn srandmember(&self, key: &[u8], count: i64) -> StoreResult<Vec<Bytes>> {
-        let _ = (key, count);
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn srandmember(&self, key: &[u8], count: i64, read_index: u64) -> StoreResult<Vec<Bytes>> {
+        let _ = (key, count, read_index);
         Ok(Vec::new())
     }
 
     /// SINTER: Intersection of multiple sets
-    fn sinter(&self, keys: &[&[u8]]) -> StoreResult<Vec<Bytes>> {
-        let _ = keys;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn sinter(&self, keys: &[&[u8]], read_index: u64) -> StoreResult<Vec<Bytes>> {
+        let _ = (keys, read_index);
         Ok(Vec::new())
     }
 
     /// SUNION: Union of multiple sets
-    fn sunion(&self, keys: &[&[u8]]) -> StoreResult<Vec<Bytes>> {
-        let _ = keys;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn sunion(&self, keys: &[&[u8]], read_index: u64) -> StoreResult<Vec<Bytes>> {
+        let _ = (keys, read_index);
         Ok(Vec::new())
     }
 
     /// SDIFF: Difference of multiple sets
-    fn sdiff(&self, keys: &[&[u8]]) -> StoreResult<Vec<Bytes>> {
-        let _ = keys;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn sdiff(&self, keys: &[&[u8]], read_index: u64) -> StoreResult<Vec<Bytes>> {
+        let _ = (keys, read_index);
         Ok(Vec::new())
     }
 }
@@ -357,45 +484,63 @@ pub trait SetStore: Send + Sync {
 /// Recommended backend: Memory (high performance)
 pub trait ZSetStore: Send + Sync {
     /// ZADD: Add members with scores
-    fn zadd(&self, key: &[u8], members: Vec<(f64, Bytes)>) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn zadd(&self, key: &[u8], members: Vec<(f64, Bytes)>, apply_index: u64) -> StoreResult<usize>;
 
     /// ZREM: Remove members
-    fn zrem(&self, key: &[u8], members: &[&[u8]]) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn zrem(&self, key: &[u8], members: &[&[u8]], apply_index: u64) -> StoreResult<usize>;
 
     /// ZSCORE: Get member score
-    fn zscore(&self, key: &[u8], member: &[u8]) -> StoreResult<Option<f64>>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn zscore(&self, key: &[u8], member: &[u8], read_index: u64) -> StoreResult<Option<f64>>;
 
     /// ZRANK: Get member rank (0-based)
-    fn zrank(&self, key: &[u8], member: &[u8]) -> StoreResult<Option<usize>>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn zrank(&self, key: &[u8], member: &[u8], read_index: u64) -> StoreResult<Option<usize>>;
 
     /// ZREVRANK: Get member reverse rank
-    fn zrevrank(&self, key: &[u8], member: &[u8]) -> StoreResult<Option<usize>> {
-        let _ = (key, member);
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn zrevrank(&self, key: &[u8], member: &[u8], read_index: u64) -> StoreResult<Option<usize>> {
+        let _ = (key, member, read_index);
         Ok(None)
     }
 
     /// ZRANGE: Get members by rank range
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
     fn zrange(
         &self,
         key: &[u8],
         start: i64,
         stop: i64,
         with_scores: bool,
+        read_index: u64,
     ) -> StoreResult<Vec<(Bytes, f64)>>;
 
     /// ZREVRANGE: Get members by reverse rank range
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
     fn zrevrange(
         &self,
         key: &[u8],
         start: i64,
         stop: i64,
         with_scores: bool,
+        read_index: u64,
     ) -> StoreResult<Vec<(Bytes, f64)>> {
-        let _ = (key, start, stop, with_scores);
+        let _ = (key, start, stop, with_scores, read_index);
         Ok(Vec::new())
     }
 
     /// ZRANGEBYSCORE: Get members by score range
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
     fn zrangebyscore(
         &self,
         key: &[u8],
@@ -404,42 +549,55 @@ pub trait ZSetStore: Send + Sync {
         with_scores: bool,
         offset: Option<usize>,
         count: Option<usize>,
+        read_index: u64,
     ) -> StoreResult<Vec<(Bytes, f64)>> {
-        let _ = (key, min, max, with_scores, offset, count);
+        let _ = (key, min, max, with_scores, offset, count, read_index);
         Ok(Vec::new())
     }
 
     /// ZCARD: Get sorted set size
-    fn zcard(&self, key: &[u8]) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn zcard(&self, key: &[u8], read_index: u64) -> StoreResult<usize>;
 
     /// ZCOUNT: Count members in score range
-    fn zcount(&self, key: &[u8], min: f64, max: f64) -> StoreResult<usize> {
-        let _ = (key, min, max);
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn zcount(&self, key: &[u8], min: f64, max: f64, read_index: u64) -> StoreResult<usize> {
+        let _ = (key, min, max, read_index);
         Ok(0)
     }
 
     /// ZINCRBY: Increment member score
-    fn zincrby(&self, key: &[u8], delta: f64, member: &[u8]) -> StoreResult<f64>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn zincrby(&self, key: &[u8], delta: f64, member: &[u8], apply_index: u64) -> StoreResult<f64>;
 
     /// ZINTERSTORE: Store intersection of sorted sets
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
     fn zinterstore(
         &self,
         destination: &[u8],
         keys: &[&[u8]],
         weights: Option<&[f64]>,
+        apply_index: u64,
     ) -> StoreResult<usize> {
-        let _ = (destination, keys, weights);
+        let _ = (destination, keys, weights, apply_index);
         Ok(0)
     }
 
     /// ZUNIONSTORE: Store union of sorted sets
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
     fn zunionstore(
         &self,
         destination: &[u8],
         keys: &[&[u8]],
         weights: Option<&[f64]>,
+        apply_index: u64,
     ) -> StoreResult<usize> {
-        let _ = (destination, keys, weights);
+        let _ = (destination, keys, weights, apply_index);
         Ok(0)
     }
 }
@@ -453,41 +611,70 @@ pub trait ZSetStore: Send + Sync {
 /// Supports: DEL, EXISTS, KEYS, TYPE, TTL, EXPIRE, PERSIST, DBSIZE, FLUSHDB, RENAME
 pub trait KeyStore: Send + Sync {
     /// DEL: Delete keys (supports multiple)
-    fn del(&self, keys: &[&[u8]]) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn del(&self, keys: &[&[u8]], apply_index: u64) -> StoreResult<usize>;
 
     /// EXISTS: Check if keys exist (supports multiple)
-    fn exists(&self, keys: &[&[u8]]) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn exists(&self, keys: &[&[u8]], read_index: u64) -> StoreResult<usize>;
 
     /// KEYS: Get all keys matching pattern (simplified, only * wildcard)
-    fn keys(&self, pattern: &[u8]) -> StoreResult<Vec<Bytes>>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn keys(&self, pattern: &[u8], read_index: u64) -> StoreResult<Vec<Bytes>>;
 
     /// TYPE: Get key type
-    fn key_type(&self, key: &[u8]) -> StoreResult<Option<&'static str>>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn key_type(&self, key: &[u8], read_index: u64) -> StoreResult<Option<&'static str>>;
 
     /// TTL: Get remaining expiration time (seconds), -1 for never expire, -2 for key not found
-    fn ttl(&self, key: &[u8]) -> StoreResult<i64>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn ttl(&self, key: &[u8], read_index: u64) -> StoreResult<i64>;
 
     /// EXPIRE: Set expiration time (seconds)
-    fn expire(&self, key: &[u8], ttl_secs: u64) -> StoreResult<bool>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn expire(&self, key: &[u8], ttl_secs: u64, apply_index: u64) -> StoreResult<bool>;
 
     /// PERSIST: Remove expiration time
-    fn persist(&self, key: &[u8]) -> StoreResult<bool>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn persist(&self, key: &[u8], apply_index: u64) -> StoreResult<bool>;
 
     /// DBSIZE: Get number of key-value pairs
-    fn dbsize(&self) -> StoreResult<usize>;
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification
+    fn dbsize(&self, read_index: u64) -> StoreResult<usize>;
 
     /// FLUSHDB: Clear all data
-    fn flushdb(&self) -> StoreResult<()>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn flushdb(&self, apply_index: u64) -> StoreResult<()>;
 
     /// RENAME: Rename key
-    fn rename(&self, key: &[u8], new_key: &[u8]) -> StoreResult<()>;
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    fn rename(&self, key: &[u8], new_key: &[u8], apply_index: u64) -> StoreResult<()>;
 
     /// RENAMENX: Rename key only if new key does not exist
-    fn renamenx(&self, key: &[u8], new_key: &[u8]) -> StoreResult<bool> {
-        if self.exists(&[&new_key])? > 0 {
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification (for exists check)
+    /// - `apply_index`: Raft apply index for WAL logging (for rename)
+    fn renamenx(
+        &self,
+        key: &[u8],
+        new_key: &[u8],
+        read_index: u64,
+        apply_index: u64,
+    ) -> StoreResult<bool> {
+        if self.exists(&[&new_key], read_index)? > 0 {
             Ok(false)
         } else {
-            self.rename(key, new_key.as_ref())?;
+            self.rename(key, new_key.as_ref(), apply_index)?;
             Ok(true)
         }
     }
@@ -499,19 +686,19 @@ pub trait KeyStore: Send + Sync {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum SnapshotStoreEntry {
-    // key, field, value
-    Hash(bytes::Bytes, bytes::Bytes, bytes::Bytes),
-    // key, first element
-    List(bytes::Bytes, bytes::Bytes),
-    // key, element
-    Set(bytes::Bytes, bytes::Bytes),
-    // key, score, element
-    ZSet(bytes::Bytes, f64, bytes::Bytes),
+    // key, field, value, apply_index
+    Hash(bytes::Bytes, bytes::Bytes, bytes::Bytes, u64),
+    // key, first element, apply_index
+    List(bytes::Bytes, bytes::Bytes, u64),
+    // key, element, apply_index
+    Set(bytes::Bytes, bytes::Bytes, u64),
+    // key, score, element, apply_index
+    ZSet(bytes::Bytes, f64, bytes::Bytes, u64),
 
-    // key, bitmap
-    Bitmap(bytes::Bytes, bytes::Bytes),
-    // key, value
-    String(bytes::Bytes, bytes::Bytes),
+    // key, bitmap, apply_index
+    Bitmap(bytes::Bytes, bytes::Bytes, u64),
+    // key, value, apply_index
+    String(bytes::Bytes, bytes::Bytes, u64),
 
     // Error
     Error(StoreError),
@@ -539,10 +726,10 @@ pub trait SnapshotStore: Send + Sync {
         shard_id: &ShardId,
         channel: tokio::sync::mpsc::Sender<SnapshotStoreEntry>,
         key_range: Option<(u32, u32)>,
-    ) -> Result<()>;
+    ) -> anyhow::Result<u64>;
 
     /// Restore from snapshot data
-    fn restore_from_snapshot(&self, snapshot: &[u8]) -> Result<(), String>;
+    fn restore_from_snapshot(&self, snapshot: &[u8]) -> anyhow::Result<()>;
 
     /// Create split snapshot - only contains data within specified slot range
     ///
@@ -558,13 +745,13 @@ pub trait SnapshotStore: Send + Sync {
         slot_start: u32,
         slot_end: u32,
         total_slots: u32,
-    ) -> Result<Vec<u8>, String>;
+    ) -> anyhow::Result<Vec<u8>>;
 
     /// Restore from split snapshot - merge into existing data
     ///
     /// Unlike restore_from_snapshot, this method does not clear existing data,
     /// but merges the snapshot data into it.
-    fn merge_from_snapshot(&self, snapshot: &[u8]) -> Result<usize, String>;
+    fn merge_from_snapshot(&self, snapshot: &[u8]) -> anyhow::Result<usize>;
 
     /// Delete all keys within specified slot range
     ///
@@ -577,7 +764,12 @@ pub trait SnapshotStore: Send + Sync {
     ///
     /// # Returns
     /// Number of keys deleted
-    fn delete_keys_in_slot_range(&self, slot_start: u32, slot_end: u32, total_slots: u32) -> usize;
+    fn delete_keys_in_slot_range(
+        &self,
+        slot_start: u32,
+        slot_end: u32,
+        total_slots: u32,
+    ) -> anyhow::Result<usize>;
 }
 
 // ============================================================================
@@ -610,18 +802,26 @@ pub trait RedisStore:
     /// Execute Redis command
     ///
     /// Unified command execution entry, calls corresponding operation method based on Command type
-    fn apply(&self, cmd: &Command) -> ApplyResult {
+    ///
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification (used for read operations)
+    /// - `apply_index`: Raft apply index for WAL logging (used for write operations)
+    /// - `cmd`: Command to execute
+    ///
+    /// For read-only commands, `apply_index` can be 0.
+    /// For write commands, `read_index` can be 0 (or same as `apply_index` for consistency checks).
+    fn apply(&self, read_index: u64, apply_index: u64, cmd: &Command) -> ApplyResult {
         match cmd {
             // ==================== Connection/Management Commands ====================
             Command::Ping { message } => {
                 ApplyResult::Pong(message.as_ref().map(|m| Bytes::from(m.clone())))
             }
             Command::Echo { message } => ApplyResult::Value(Some(Bytes::from(message.clone()))),
-            Command::DbSize => match self.dbsize() {
+            Command::DbSize => match self.dbsize(read_index) {
                 Ok(size) => ApplyResult::Integer(size as i64),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::FlushDb => match self.flushdb() {
+            Command::FlushDb => match self.flushdb(apply_index) {
                 Ok(()) => ApplyResult::Ok,
                 Err(e) => ApplyResult::Error(e),
             },
@@ -631,18 +831,18 @@ pub trait RedisStore:
             }
 
             // ==================== String Read Commands ====================
-            Command::Get { key } => match self.get(key) {
+            Command::Get { key } => match self.get(key, read_index) {
                 Ok(val) => ApplyResult::Value(val),
                 Err(e) => ApplyResult::Error(e),
             },
             Command::MGet { keys } => {
                 let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
-                match self.mget(&keys_refs) {
+                match self.mget(&keys_refs, read_index) {
                     Ok(vals) => ApplyResult::Array(vals),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
-            Command::StrLen { key } => match self.strlen(key) {
+            Command::StrLen { key } => match self.strlen(key, read_index) {
                 Ok(len) => ApplyResult::Integer(len as i64),
                 Err(e) => ApplyResult::Error(e),
             },
@@ -663,7 +863,7 @@ pub trait RedisStore:
             } => {
                 // Handle XX condition: key must exist
                 if *xx {
-                    match self.get(key) {
+                    match self.get(key, read_index) {
                         Ok(None) => return ApplyResult::Value(None),
                         Err(e) => return ApplyResult::Error(e),
                         Ok(Some(_)) => {}
@@ -671,26 +871,27 @@ pub trait RedisStore:
                 }
                 // Handle NX condition: key must not exist
                 if *nx {
-                    match self.setnx(key.as_ref(), Bytes::from(value.clone())) {
+                    match self.setnx(key.as_ref(), Bytes::from(value.clone()), apply_index) {
                         Ok(false) => return ApplyResult::Value(None),
                         Err(e) => return ApplyResult::Error(e),
                         Ok(true) => {}
                     }
                 } else {
-                    if let Err(e) = self.set(key.as_ref(), Bytes::from(value.clone())) {
+                    if let Err(e) = self.set(key.as_ref(), Bytes::from(value.clone()), apply_index)
+                    {
                         return ApplyResult::Error(e);
                     }
                 }
                 // Handle expiration time
                 if let Some(secs) = ex {
-                    let _ = self.expire(key, *secs);
+                    let _ = self.expire(key, *secs, apply_index);
                 } else if let Some(ms) = px {
-                    let _ = self.expire(key, *ms / 1000);
+                    let _ = self.expire(key, *ms / 1000, apply_index);
                 }
                 ApplyResult::Ok
             }
             Command::SetNx { key, value } => {
-                match self.setnx(key.as_ref(), Bytes::from(value.clone())) {
+                match self.setnx(key.as_ref(), Bytes::from(value.clone()), apply_index) {
                     Ok(result) => ApplyResult::Integer(if result { 1 } else { 0 }),
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -699,7 +900,12 @@ pub trait RedisStore:
                 key,
                 seconds,
                 value,
-            } => match self.setex(key.as_ref(), Bytes::from(value.clone()), *seconds) {
+            } => match self.setex(
+                key.as_ref(),
+                Bytes::from(value.clone()),
+                *seconds,
+                apply_index,
+            ) {
                 Ok(()) => ApplyResult::Ok,
                 Err(e) => ApplyResult::Error(e),
             },
@@ -711,6 +917,7 @@ pub trait RedisStore:
                 key.as_ref(),
                 Bytes::from(value.clone()),
                 *milliseconds / 1000,
+                apply_index,
             ) {
                 Ok(()) => ApplyResult::Ok,
                 Err(e) => ApplyResult::Error(e),
@@ -720,7 +927,7 @@ pub trait RedisStore:
                     .iter()
                     .map(|(k, v)| (k.as_ref(), Bytes::from(v.clone())))
                     .collect();
-                match self.mset(kvs_converted) {
+                match self.mset(kvs_converted, apply_index) {
                     Ok(()) => ApplyResult::Ok,
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -729,7 +936,7 @@ pub trait RedisStore:
                 // Check if all keys do not exist
                 let mut all_new = true;
                 for (k, _) in kvs.iter() {
-                    match self.get(k) {
+                    match self.get(k, read_index) {
                         Ok(Some(_)) => {
                             all_new = false;
                             break;
@@ -743,7 +950,7 @@ pub trait RedisStore:
                         .iter()
                         .map(|(k, v)| (k.as_ref(), Bytes::from(v.clone())))
                         .collect();
-                    match self.mset(kvs_converted) {
+                    match self.mset(kvs_converted, apply_index) {
                         Ok(()) => ApplyResult::Integer(1),
                         Err(e) => ApplyResult::Error(e),
                     }
@@ -751,11 +958,11 @@ pub trait RedisStore:
                     ApplyResult::Integer(0)
                 }
             }
-            Command::Incr { key } => match self.incr(key) {
+            Command::Incr { key } => match self.incr(key, apply_index) {
                 Ok(v) => ApplyResult::Integer(v),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::IncrBy { key, delta } => match self.incrby(key, *delta) {
+            Command::IncrBy { key, delta } => match self.incrby(key, *delta, apply_index) {
                 Ok(v) => ApplyResult::Integer(v),
                 Err(e) => ApplyResult::Error(e),
             },
@@ -763,20 +970,25 @@ pub trait RedisStore:
                 // TODO: Implement INCRBYFLOAT
                 ApplyResult::Error(StoreError::Internal("INCRBYFLOAT not implemented".into()))
             }
-            Command::Decr { key } => match self.decr(key) {
+            Command::Decr { key } => match self.decr(key, apply_index) {
                 Ok(v) => ApplyResult::Integer(v),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::DecrBy { key, delta } => match self.decrby(key, *delta) {
+            Command::DecrBy { key, delta } => match self.decrby(key, *delta, apply_index) {
                 Ok(v) => ApplyResult::Integer(v),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::Append { key, value } => match self.append(key, value) {
+            Command::Append { key, value } => match self.append(key, value, apply_index) {
                 Ok(len) => ApplyResult::Integer(len as i64),
                 Err(e) => ApplyResult::Error(e),
             },
             Command::GetSet { key, value } => {
-                match self.getset(key.as_ref(), Bytes::from(value.clone())) {
+                match self.getset(
+                    key.as_ref(),
+                    Bytes::from(value.clone()),
+                    read_index,
+                    apply_index,
+                ) {
                     Ok(old) => ApplyResult::Value(old),
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -788,24 +1000,26 @@ pub trait RedisStore:
             }
 
             // ==================== List Read Commands ====================
-            Command::LLen { key } => match self.llen(key) {
+            Command::LLen { key } => match self.llen(key, read_index) {
                 Ok(len) => ApplyResult::Integer(len as i64),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::LIndex { key, index } => match self.lindex(key, *index) {
+            Command::LIndex { key, index } => match self.lindex(key, *index, read_index) {
                 Ok(val) => ApplyResult::Value(val),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::LRange { key, start, stop } => match self.lrange(key, *start, *stop) {
-                Ok(list) => ApplyResult::Array(list.into_iter().map(Some).collect()),
-                Err(e) => ApplyResult::Error(e),
-            },
+            Command::LRange { key, start, stop } => {
+                match self.lrange(key, *start, *stop, read_index) {
+                    Ok(list) => ApplyResult::Array(list.into_iter().map(Some).collect()),
+                    Err(e) => ApplyResult::Error(e),
+                }
+            }
 
             // ==================== List Write Commands ====================
             Command::LPush { key, values } => {
                 let values_converted: Vec<Bytes> =
                     values.iter().map(|v| Bytes::from(v.clone())).collect();
-                match self.lpush(key, values_converted) {
+                match self.lpush(key, values_converted, apply_index) {
                     Ok(len) => ApplyResult::Integer(len as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -813,63 +1027,66 @@ pub trait RedisStore:
             Command::RPush { key, values } => {
                 let values_converted: Vec<Bytes> =
                     values.iter().map(|v| Bytes::from(v.clone())).collect();
-                match self.rpush(key, values_converted) {
+                match self.rpush(key, values_converted, apply_index) {
                     Ok(len) => ApplyResult::Integer(len as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
-            Command::LPop { key } => match self.lpop(key) {
+            Command::LPop { key } => match self.lpop(key, apply_index) {
                 Ok(val) => ApplyResult::Value(val),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::RPop { key } => match self.rpop(key) {
+            Command::RPop { key } => match self.rpop(key, apply_index) {
                 Ok(val) => ApplyResult::Value(val),
                 Err(e) => ApplyResult::Error(e),
             },
             Command::LSet { key, index, value } => {
-                match self.lset(key, *index, Bytes::from(value.clone())) {
+                match self.lset(key, *index, Bytes::from(value.clone()), apply_index) {
                     Ok(()) => ApplyResult::Ok,
                     Err(e) => ApplyResult::Error(e),
                 }
             }
-            Command::LTrim { key, start, stop } => match self.ltrim(key, *start, *stop) {
-                Ok(()) => ApplyResult::Ok,
-                Err(e) => ApplyResult::Error(e),
-            },
-            Command::LRem { key, count, value } => match self.lrem(key, *count, value) {
+            Command::LTrim { key, start, stop } => {
+                match self.ltrim(key, *start, *stop, apply_index) {
+                    Ok(()) => ApplyResult::Ok,
+                    Err(e) => ApplyResult::Error(e),
+                }
+            }
+            Command::LRem { key, count, value } => match self.lrem(key, *count, value, apply_index)
+            {
                 Ok(removed) => ApplyResult::Integer(removed as i64),
                 Err(e) => ApplyResult::Error(e),
             },
 
             // ==================== Hash Read Commands ====================
-            Command::HGet { key, field } => match self.hget(key, field) {
+            Command::HGet { key, field } => match self.hget(key, field, read_index) {
                 Ok(val) => ApplyResult::Value(val),
                 Err(e) => ApplyResult::Error(e),
             },
             Command::HMGet { key, fields } => {
                 let fields_refs: Vec<&[u8]> = fields.iter().map(|f| f.as_ref()).collect();
-                match self.hmget(key, &fields_refs) {
+                match self.hmget(key, &fields_refs, read_index) {
                     Ok(vals) => ApplyResult::Array(vals),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
-            Command::HGetAll { key } => match self.hgetall(key) {
+            Command::HGetAll { key } => match self.hgetall(key, read_index) {
                 Ok(kvs) => ApplyResult::KeyValues(kvs),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::HKeys { key } => match self.hkeys(key) {
+            Command::HKeys { key } => match self.hkeys(key, read_index) {
                 Ok(keys) => ApplyResult::Array(keys.into_iter().map(Some).collect()),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::HVals { key } => match self.hvals(key) {
+            Command::HVals { key } => match self.hvals(key, read_index) {
                 Ok(vals) => ApplyResult::Array(vals.into_iter().map(Some).collect()),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::HLen { key } => match self.hlen(key) {
+            Command::HLen { key } => match self.hlen(key, read_index) {
                 Ok(len) => ApplyResult::Integer(len as i64),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::HExists { key, field } => match self.hexists(key, field) {
+            Command::HExists { key, field } => match self.hexists(key, field, read_index) {
                 Ok(exists) => ApplyResult::Integer(if exists { 1 } else { 0 }),
                 Err(e) => ApplyResult::Error(e),
             },
@@ -880,13 +1097,19 @@ pub trait RedisStore:
                     .iter()
                     .map(|(f, v)| (f.as_ref(), Bytes::from(v.clone())))
                     .collect();
-                match self.hmset(key, fvs_converted) {
+                match self.hmset(key, fvs_converted, apply_index) {
                     Ok(()) => ApplyResult::Integer(fvs.len() as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
             Command::HSetNx { key, field, value } => {
-                match self.hsetnx(key.as_ref(), field.as_ref(), Bytes::from(value.clone())) {
+                match self.hsetnx(
+                    key.as_ref(),
+                    field.as_ref(),
+                    Bytes::from(value.clone()),
+                    read_index,
+                    apply_index,
+                ) {
                     Ok(result) => ApplyResult::Integer(if result { 1 } else { 0 }),
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -896,57 +1119,59 @@ pub trait RedisStore:
                     .iter()
                     .map(|(f, v)| (f.as_ref(), Bytes::from(v.clone())))
                     .collect();
-                match self.hmset(key, fvs_converted) {
+                match self.hmset(key, fvs_converted, apply_index) {
                     Ok(()) => ApplyResult::Ok,
                     Err(e) => ApplyResult::Error(e),
                 }
             }
             Command::HDel { key, fields } => {
                 let fields_refs: Vec<&[u8]> = fields.iter().map(|f| f.as_ref()).collect();
-                match self.hdel(key, &fields_refs) {
+                match self.hdel(key, &fields_refs, apply_index) {
                     Ok(count) => ApplyResult::Integer(count as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
-            Command::HIncrBy { key, field, delta } => match self.hincrby(key, field, *delta) {
-                Ok(v) => ApplyResult::Integer(v),
-                Err(e) => ApplyResult::Error(e),
-            },
+            Command::HIncrBy { key, field, delta } => {
+                match self.hincrby(key, field, *delta, apply_index) {
+                    Ok(v) => ApplyResult::Integer(v),
+                    Err(e) => ApplyResult::Error(e),
+                }
+            }
             Command::HIncrByFloat { .. } => {
                 // TODO: Implement HINCRBYFLOAT
                 ApplyResult::Error(StoreError::Internal("HINCRBYFLOAT not implemented".into()))
             }
 
             // ==================== Set Read Commands ====================
-            Command::SMembers { key } => match self.smembers(key) {
+            Command::SMembers { key } => match self.smembers(key, read_index) {
                 Ok(members) => ApplyResult::Array(members.into_iter().map(Some).collect()),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::SIsMember { key, member } => match self.sismember(key, member) {
+            Command::SIsMember { key, member } => match self.sismember(key, member, read_index) {
                 Ok(exists) => ApplyResult::Integer(if exists { 1 } else { 0 }),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::SCard { key } => match self.scard(key) {
+            Command::SCard { key } => match self.scard(key, read_index) {
                 Ok(card) => ApplyResult::Integer(card as i64),
                 Err(e) => ApplyResult::Error(e),
             },
             Command::SInter { keys } => {
                 let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
-                match self.sinter(&keys_refs) {
+                match self.sinter(&keys_refs, read_index) {
                     Ok(result) => ApplyResult::Array(result.into_iter().map(Some).collect()),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
             Command::SUnion { keys } => {
                 let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
-                match self.sunion(&keys_refs) {
+                match self.sunion(&keys_refs, read_index) {
                     Ok(result) => ApplyResult::Array(result.into_iter().map(Some).collect()),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
             Command::SDiff { keys } => {
                 let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
-                match self.sdiff(&keys_refs) {
+                match self.sdiff(&keys_refs, read_index) {
                     Ok(result) => ApplyResult::Array(result.into_iter().map(Some).collect()),
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -956,50 +1181,52 @@ pub trait RedisStore:
             Command::SAdd { key, members } => {
                 let members_converted: Vec<Bytes> =
                     members.iter().map(|m| Bytes::from(m.clone())).collect();
-                match self.sadd(key, members_converted) {
+                match self.sadd(key, members_converted, apply_index) {
                     Ok(count) => ApplyResult::Integer(count as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
             Command::SRem { key, members } => {
                 let members_refs: Vec<&[u8]> = members.iter().map(|m| m.as_ref()).collect();
-                match self.srem(key, &members_refs) {
+                match self.srem(key, &members_refs, apply_index) {
                     Ok(count) => ApplyResult::Integer(count as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
-            Command::SPop { key, count } => match self.spop(key, count.unwrap_or(1) as usize) {
-                Ok(result) => {
-                    if result.len() == 1 {
-                        ApplyResult::Value(result.into_iter().next())
-                    } else {
-                        ApplyResult::Array(result.into_iter().map(Some).collect())
+            Command::SPop { key, count } => {
+                match self.spop(key, count.unwrap_or(1) as usize, apply_index) {
+                    Ok(result) => {
+                        if result.len() == 1 {
+                            ApplyResult::Value(result.into_iter().next())
+                        } else {
+                            ApplyResult::Array(result.into_iter().map(Some).collect())
+                        }
                     }
+                    Err(e) => ApplyResult::Error(e),
                 }
-                Err(e) => ApplyResult::Error(e),
-            },
+            }
 
             // ==================== Key Read Commands ====================
             Command::Exists { keys } => {
                 let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
-                match self.exists(&keys_refs) {
+                match self.exists(&keys_refs, read_index) {
                     Ok(count) => ApplyResult::Integer(count as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
-            Command::Type { key } => match self.key_type(key) {
+            Command::Type { key } => match self.key_type(key, read_index) {
                 Ok(typ) => ApplyResult::Type(typ),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::Ttl { key } => match self.ttl(key) {
+            Command::Ttl { key } => match self.ttl(key, read_index) {
                 Ok(ttl) => ApplyResult::Integer(ttl),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::PTtl { key } => match self.ttl(key) {
+            Command::PTtl { key } => match self.ttl(key, read_index) {
                 Ok(ttl) => ApplyResult::Integer(ttl * 1000),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::Keys { pattern } => match self.keys(pattern) {
+            Command::Keys { pattern } => match self.keys(pattern, read_index) {
                 Ok(keys) => ApplyResult::Array(keys.into_iter().map(Some).collect()),
                 Err(e) => ApplyResult::Error(e),
             },
@@ -1011,31 +1238,33 @@ pub trait RedisStore:
             // ==================== Key Write Commands ====================
             Command::Del { keys } => {
                 let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
-                match self.del(&keys_refs) {
+                match self.del(&keys_refs, apply_index) {
                     Ok(count) => ApplyResult::Integer(count as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
-            Command::Expire { key, seconds } => match self.expire(key, *seconds) {
+            Command::Expire { key, seconds } => match self.expire(key, *seconds, apply_index) {
                 Ok(result) => ApplyResult::Integer(if result { 1 } else { 0 }),
                 Err(e) => ApplyResult::Error(e),
             },
             Command::PExpire { key, milliseconds } => {
-                match self.expire(key, *milliseconds / 1000) {
+                match self.expire(key, *milliseconds / 1000, apply_index) {
                     Ok(result) => ApplyResult::Integer(if result { 1 } else { 0 }),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
-            Command::Persist { key } => match self.persist(key) {
+            Command::Persist { key } => match self.persist(key, apply_index) {
                 Ok(result) => ApplyResult::Integer(if result { 1 } else { 0 }),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::Rename { key, new_key } => match self.rename(key.as_ref(), new_key.as_ref()) {
-                Ok(()) => ApplyResult::Ok,
-                Err(e) => ApplyResult::Error(e),
-            },
+            Command::Rename { key, new_key } => {
+                match self.rename(key.as_ref(), new_key.as_ref(), apply_index) {
+                    Ok(()) => ApplyResult::Ok,
+                    Err(e) => ApplyResult::Error(e),
+                }
+            }
             Command::RenameNx { key, new_key } => {
-                match self.renamenx(key.as_ref(), new_key.as_ref()) {
+                match self.renamenx(key.as_ref(), new_key.as_ref(), read_index, apply_index) {
                     Ok(true) => ApplyResult::Integer(1),
                     Ok(false) => ApplyResult::Integer(0),
                     Err(e) => ApplyResult::Error(e),
@@ -1050,15 +1279,15 @@ pub trait RedisStore:
     /// For stores that don't support WAL (like MemoryStore), this is equivalent to `apply`.
     ///
     /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification (used for read operations)
     /// - `apply_index`: Raft log apply index (used for WAL logging and recovery)
     /// - `cmd`: Command to execute
     ///
     /// # Returns
     /// Command execution result
-    fn apply_with_index(&self, apply_index: u64, cmd: &Command) -> ApplyResult {
+    fn apply_with_index(&self, read_index: u64, apply_index: u64, cmd: &Command) -> ApplyResult {
         // Default implementation: just call apply (for stores without WAL support)
         // Stores with WAL support (like HybridStore) should override this method
-        let _ = apply_index; // Suppress unused warning
-        self.apply(cmd)
+        self.apply(read_index, apply_index, cmd)
     }
 }

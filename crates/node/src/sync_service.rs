@@ -925,7 +925,7 @@ async fn stream_snapshot_chunks_from_source(
 }
 
 /// Stream entry logs from PUSH side (source node)
-#[allow(unused_variables)]
+/// Reads from log replay writer file created during split operation
 async fn stream_entry_logs_from_source(
     node: Arc<RRNode>,
     task_id: String,
@@ -933,41 +933,185 @@ async fn stream_entry_logs_from_source(
     max_entries: u32,
     tx: tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
 ) -> Result<()> {
-    // TODO: Implement entry log streaming from source
-    // This would:
-    // 1. Extract source shard ID from task_id or get from context
-    // 2. Get RaftId for source shard
-    // 3. Read log entries from storage starting from start_index
-    // 4. Convert LogEntry to EntryLog proto messages
-    // 5. Send entry logs in batches via channel
-    // 6. Update progress (if we track it on PUSH side)
+    use proto::sync_service::EntryLog;
+    use std::io::{BufReader, Read};
 
-    warn!(
-        "Entry log streaming from source not yet implemented for sync task {}",
-        task_id
-    );
+    // Get log replay writer information from node
+    let writer_info = match node.get_log_replay_writer(&task_id) {
+        Some(info) => info,
+        None => {
+            let error_msg = format!("Log replay writer not found for task {}", task_id);
+            warn!("{}", error_msg);
+            let _ = tx
+                .send(Ok(PullSyncDataResponse {
+                    task_id: task_id.clone(),
+                    data_type: SyncDataType::EntryLog as i32,
+                    chunk_data: vec![],
+                    entry_logs: vec![],
+                    offset: 0,
+                    chunk_size: 0,
+                    is_last_chunk: true,
+                    total_size: 0,
+                    checksum: vec![],
+                    error_message: error_msg,
+                }))
+                .await;
+            return Ok(());
+        }
+    };
 
-    // TODO: Read log entries from storage
-    // Example:
-    // let source_shard_id = extract_from_task_id(&task_id);
-    // let raft_id = node.get_raft_group(&source_shard_id)?;
-    // let storage = node.storage(); // Need to expose storage
-    // let entries = storage.get_log_entries(&raft_id, start_index, max_entries).await?;
-    // Convert to EntryLog and send
+    // Check metadata for latest index
+    let latest_index = {
+        let meta = writer_info.metadata.read();
+        meta.latest_index
+    };
 
-    // For now, send an empty response
+    if start_index > latest_index {
+        // No more entries to send
+        let _ = tx
+            .send(Ok(PullSyncDataResponse {
+                task_id: task_id.clone(),
+                data_type: SyncDataType::EntryLog as i32,
+                chunk_data: vec![],
+                entry_logs: vec![],
+                offset: 0,
+                chunk_size: 0,
+                is_last_chunk: true,
+                total_size: 0,
+                checksum: vec![],
+                error_message: String::new(),
+            }))
+            .await;
+        return Ok(());
+    }
+
+    // Open file for reading
+    let file = match std::fs::File::open(&writer_info.file_path) {
+        Ok(f) => f,
+        Err(e) => {
+            let error_msg = format!(
+                "Failed to open log replay file {}: {}",
+                writer_info.file_path.display(),
+                e
+            );
+            error!("{}", error_msg);
+            let _ = tx
+                .send(Ok(PullSyncDataResponse {
+                    task_id: task_id.clone(),
+                    data_type: SyncDataType::EntryLog as i32,
+                    chunk_data: vec![],
+                    entry_logs: vec![],
+                    offset: 0,
+                    chunk_size: 0,
+                    is_last_chunk: true,
+                    total_size: 0,
+                    checksum: vec![],
+                    error_message: error_msg,
+                }))
+                .await;
+            return Ok(());
+        }
+    };
+
+    let mut reader = BufReader::new(file);
+    let mut entry_logs = Vec::new();
+    let mut current_index = 0u64;
+    let mut entries_read = 0u32;
+
+    // Read entries from file
+    // File format: [index (u64)][term (u64)][data_len (u32)][data]
+    loop {
+        if entries_read >= max_entries {
+            break;
+        }
+
+        // Read index
+        let mut index_bytes = [0u8; 8];
+        if reader.read_exact(&mut index_bytes).is_err() {
+            break; // End of file or error
+        }
+        let index = u64::from_le_bytes(index_bytes);
+
+        // Skip entries before start_index
+        if index < start_index {
+            // Read term and data_len to skip data
+            let mut term_bytes = [0u8; 8];
+            if reader.read_exact(&mut term_bytes).is_err() {
+                break;
+            }
+            let mut len_bytes = [0u8; 4];
+            if reader.read_exact(&mut len_bytes).is_err() {
+                break;
+            }
+            let data_len = u32::from_le_bytes(len_bytes);
+            // Skip data
+            let mut skip_buf = vec![0u8; data_len as usize];
+            if reader.read_exact(&mut skip_buf).is_err() {
+                break;
+            }
+            continue;
+        }
+
+        // Read term
+        let mut term_bytes = [0u8; 8];
+        if reader.read_exact(&mut term_bytes).is_err() {
+            break;
+        }
+        let term = u64::from_le_bytes(term_bytes);
+
+        // Read data length
+        let mut len_bytes = [0u8; 4];
+        if reader.read_exact(&mut len_bytes).is_err() {
+            break;
+        }
+        let data_len = u32::from_le_bytes(len_bytes);
+
+        // Read command data
+        let mut command_data = vec![0u8; data_len as usize];
+        if reader.read_exact(&mut command_data).is_err() {
+            break;
+        }
+
+        // Deserialize command to get command type
+        let command_type = match bincode::serde::decode_from_slice::<resp::Command, _>(
+            &command_data,
+            bincode::config::standard(),
+        ) {
+            Ok((cmd, _)) => cmd.name().to_string(),
+            Err(_) => "unknown".to_string(),
+        };
+
+        // Create EntryLog
+        entry_logs.push(EntryLog {
+            index,
+            term,
+            command: command_data,
+            command_type,
+        });
+
+        entries_read += 1;
+        current_index = index;
+
+        // Check if we've reached the latest index
+        if index >= latest_index {
+            break;
+        }
+    }
+
+    // Send entry logs
+    let is_last_chunk = current_index >= latest_index || entries_read < max_entries;
     let _ = tx
         .send(Ok(PullSyncDataResponse {
             task_id: task_id.clone(),
             data_type: SyncDataType::EntryLog as i32,
             chunk_data: vec![],
-            entry_logs: vec![],
+            entry_logs,
             offset: 0,
             chunk_size: 0,
-            is_last_chunk: true,
+            is_last_chunk,
             total_size: 0,
             checksum: vec![],
-            error_message: "Entry log streaming from source not yet implemented".to_string(),
+            error_message: String::new(),
         }))
         .await;
 

@@ -12,14 +12,17 @@ use tonic::{Request, Response, Status};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::log_replay_writer::LogReplayWriter;
 use crate::node::RRNode;
 use crate::snapshot_transfer::{self, SnapshotTransferManager};
+use crate::state_machine::ReplayLogConfig;
 use proto::split_service::{
     split_service_server::SplitService, CancelSplitRequest, CancelSplitResponse,
     CompleteSplitRequest, CompleteSplitResponse, GetSplitProgressRequest, GetSplitProgressResponse,
     SplitPhase, SplitProgress, SplitStatus, StartSplitRequest, StartSplitResponse,
 };
 use rr_core::shard::ShardRouting;
+use std::time::Duration;
 
 /// Split task state
 #[derive(Debug, Clone)]
@@ -28,8 +31,8 @@ pub struct SplitTask {
     pub task_id: String,
     /// Source shard ID
     pub source_shard_id: String,
-    /// Target shard IDs
-    pub target_shard_ids: Vec<String>,
+    /// Target shard ID
+    pub target_shard_id: String,
     /// Split slot
     pub split_slot: u32,
     /// Source slot range
@@ -55,7 +58,7 @@ impl SplitTask {
     fn new(
         task_id: String,
         source_shard_id: String,
-        target_shard_ids: Vec<String>,
+        target_shard_id: String,
         split_slot: u32,
         source_slot_start: u32,
         source_slot_end: u32,
@@ -69,7 +72,7 @@ impl SplitTask {
         Self {
             task_id,
             source_shard_id,
-            target_shard_ids,
+            target_shard_id,
             split_slot,
             source_slot_start,
             source_slot_end,
@@ -119,7 +122,7 @@ impl SplitTaskManager {
         &self,
         task_id: String,
         source_shard_id: String,
-        target_shard_ids: Vec<String>,
+        target_shard_id: String,
         split_slot: u32,
         source_slot_start: u32,
         source_slot_end: u32,
@@ -133,7 +136,7 @@ impl SplitTaskManager {
         let task = SplitTask::new(
             task_id.clone(),
             source_shard_id,
-            target_shard_ids,
+            target_shard_id,
             split_slot,
             source_slot_start,
             source_slot_end,
@@ -146,6 +149,21 @@ impl SplitTaskManager {
 
     pub fn get_task(&self, task_id: &str) -> Option<SplitTask> {
         self.tasks.read().get(task_id).cloned()
+    }
+
+    /// Get all active split tasks for a source shard
+    pub fn get_tasks_for_source_shard(&self, source_shard_id: &str) -> Vec<SplitTask> {
+        self.tasks
+            .read()
+            .values()
+            .filter(|task| task.source_shard_id == source_shard_id)
+            .cloned()
+            .collect()
+    }
+
+    /// Get tasks reader for iteration (used by state machine)
+    pub fn tasks(&self) -> parking_lot::RwLockReadGuard<'_, HashMap<String, SplitTask>> {
+        self.tasks.read()
     }
 
     pub fn update_task_status(
@@ -234,38 +252,28 @@ impl SplitServiceImpl {
         task_manager: Arc<SplitTaskManager>,
         task_id: String,
         source_shard_id: String,
-        target_shard_ids: Vec<String>,
+        target_shard_id: String,
         split_slot: u32,
         source_slot_start: u32,
         source_slot_end: u32,
         target_nodes: Vec<String>,
+        source_state_machine: Arc<crate::state_machine::KVStateMachine>,
     ) {
         info!(
-            "Starting split task {}: source_shard={}, target_shards={:?}, split_slot={}",
-            task_id, source_shard_id, target_shard_ids, split_slot
+            "Starting split task {}: source_shard={}, target_shard={}, split_slot={}, target_nodes={:?}",
+            task_id, source_shard_id, target_shard_id, split_slot, target_nodes
         );
 
-        // Phase 1: Preparing - Create target shards
+        // Phase 1: Preparing
+        // Note: Target shard should already be created on target nodes by the control plane
+        // (e.g., Pilot) before starting the split operation. The current node only handles
+        // snapshot creation and transfer for load balancing purposes.
         if let Err(e) = task_manager.update_task_status(
             &task_id,
             SplitStatus::InProgress,
             SplitPhase::Preparing,
         ) {
             error!("Failed to update split task status: {}", e);
-            return;
-        }
-
-        if let Err(e) = Self::create_target_shards(
-            &node,
-            &task_manager,
-            &task_id,
-            &target_shard_ids,
-            &target_nodes,
-        )
-        .await
-        {
-            error!("Failed to create target shards for task {}: {}", task_id, e);
-            let _ = task_manager.set_task_error(&task_id, e.to_string());
             return;
         }
 
@@ -278,41 +286,80 @@ impl SplitServiceImpl {
             error!("Failed to update split task phase: {}", e);
         }
 
-        // Calculate slot ranges for each target shard
-        // For simplicity, we'll split the range [split_slot, source_slot_end) evenly
-        // In production, this should be more sophisticated
-        let slot_range_per_shard = (source_slot_end - split_slot) / target_shard_ids.len() as u32;
-        let mut current_slot = split_slot;
+        // Create log replay writer and register with state machine
+        let log_replay_file_path = {
+            let config = node.config();
+            config
+                .snapshot
+                .transfer_dir
+                .join(&task_id)
+                .join("replay.log")
+        };
 
-        for (idx, target_shard_id) in target_shard_ids.iter().enumerate() {
-            let target_slot_start = current_slot;
-            let target_slot_end = if idx == target_shard_ids.len() - 1 {
-                source_slot_end
-            } else {
-                current_slot + slot_range_per_shard
-            };
-
-            if let Err(e) = Self::create_and_transfer_snapshot(
-                &node,
-                &snapshot_transfer_manager,
-                &task_manager,
-                &task_id,
-                &source_shard_id,
-                target_shard_id,
-                target_slot_start,
-                target_slot_end,
-            )
-            .await
-            {
+        let (log_replay_tx, log_replay_rx) = tokio::sync::mpsc::channel(1000);
+        let log_replay_writer = match LogReplayWriter::new(
+            log_replay_file_path.clone(),
+            100,                        // batch_size
+            Duration::from_millis(100), // flush_interval
+        ) {
+            Ok(writer) => writer,
+            Err(e) => {
                 error!(
-                    "Failed to transfer snapshot to target shard {} for task {}: {}",
-                    target_shard_id, task_id, e
+                    "Failed to create log replay writer for task {}: {}",
+                    task_id, e
                 );
                 let _ = task_manager.set_task_error(&task_id, e.to_string());
                 return;
             }
+        };
 
-            current_slot = target_slot_end;
+        // Register replay log config with source shard's state machine
+        let replay_config = ReplayLogConfig {
+            tx: log_replay_tx,
+            slot_range: (split_slot, source_slot_end),
+            task_id: task_id.clone(),
+        };
+        source_state_machine.add_replay_log(replay_config);
+        info!(
+            "Registered log replay for task {}: source={}, slot_range=[{}, {})",
+            task_id, source_shard_id, split_slot, source_slot_end
+        );
+
+        // Start log replay writer task first (now start() doesn't consume self)
+        let log_replay_handle = log_replay_writer.start(log_replay_rx);
+
+        // Register log replay writer with node (after starting, so we can store it)
+        node.register_log_replay_writer(task_id.clone(), log_replay_writer);
+        info!(
+            "Registered log replay writer for task {} at {}",
+            task_id,
+            log_replay_file_path.display()
+        );
+        info!("Started log replay writer for task {}", task_id);
+
+        // Transfer snapshot to target shard with slot range [split_slot, source_slot_end)
+        if let Err(e) = Self::create_and_transfer_snapshot(
+            &node,
+            &snapshot_transfer_manager,
+            &task_manager,
+            &task_id,
+            &source_shard_id,
+            &target_shard_id,
+            split_slot,
+            source_slot_end,
+        )
+        .await
+        {
+            error!(
+                "Failed to transfer snapshot to target shard {} for task {}: {}",
+                target_shard_id, task_id, e
+            );
+            // Clean up: remove replay log config and wait for writer to finish
+            source_state_machine.remove_replay_log(&task_id);
+            node.remove_log_replay_writer(&task_id);
+            drop(log_replay_handle); // Drop handle to signal writer to stop
+            let _ = task_manager.set_task_error(&task_id, e.to_string());
+            return;
         }
 
         // Phase 3: Log Replay - Replay incremental logs
@@ -324,12 +371,19 @@ impl SplitServiceImpl {
             error!("Failed to update split task phase: {}", e);
         }
 
-        // TODO: Implement log replay
+        // Wait for log replay to complete (commands are being written to file in background)
+        // TODO: Implement log replay application to target shard
         // This would involve:
-        // - Getting current Raft index from source shard
-        // - Replaying logs from snapshot index to current index
-        // - Applying logs to target shards
-        info!("Log replay phase for task {} (TODO: implement)", task_id);
+        // - Reading replay log file
+        // - Applying logs to target shard
+        // - Waiting for target shard to catch up
+        info!(
+            "Log replay phase for task {}: commands are being captured to replay.log",
+            task_id
+        );
+
+        // Note: log_replay_writer continues running in background, capturing commands
+        // The writer will be cleaned up when split completes or fails
 
         // Phase 4: Switching - Update routing table
         if let Err(e) = task_manager.update_task_status(
@@ -345,7 +399,7 @@ impl SplitServiceImpl {
             &task_manager,
             &task_id,
             &source_shard_id,
-            &target_shard_ids,
+            &target_shard_id,
             split_slot,
             source_slot_start,
             source_slot_end,
@@ -353,6 +407,10 @@ impl SplitServiceImpl {
         .await
         {
             error!("Failed to update routing table for task {}: {}", task_id, e);
+            // Clean up: remove replay log config
+            source_state_machine.remove_replay_log(&task_id);
+            node.remove_log_replay_writer(&task_id);
+            drop(log_replay_handle); // Drop handle to signal writer to stop
             let _ = task_manager.set_task_error(&task_id, e.to_string());
             return;
         }
@@ -367,53 +425,14 @@ impl SplitServiceImpl {
         } else {
             info!("Split task {} completed successfully", task_id);
         }
-    }
 
-    /// Create target shards (Raft groups)
-    async fn create_target_shards(
-        node: &Arc<RRNode>,
-        task_manager: &Arc<SplitTaskManager>,
-        task_id: &str,
-        target_shard_ids: &[String],
-        target_nodes: &[String],
-    ) -> anyhow::Result<()> {
-        info!(
-            "Creating target shards for task {}: {:?}",
-            task_id, target_shard_ids
-        );
-
-        for target_shard_id in target_shard_ids {
-            // Check if shard already exists
-            if node.get_raft_group(target_shard_id).is_some() {
-                warn!(
-                    "Target shard {} already exists, skipping creation",
-                    target_shard_id
-                );
-                continue;
-            }
-
-            // Create Raft group for target shard
-            match node
-                .create_raft_group(target_shard_id.clone(), target_nodes.to_vec())
-                .await
-            {
-                Ok(_) => {
-                    info!(
-                        "Created target shard {} for task {}",
-                        target_shard_id, task_id
-                    );
-                }
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "Failed to create target shard {}: {}",
-                        target_shard_id,
-                        e
-                    ));
-                }
-            }
-        }
-
-        Ok(())
+        // Clean up: remove replay log config from state machine
+        // The log_replay_writer will continue running until channel is closed
+        source_state_machine.remove_replay_log(&task_id);
+        node.remove_log_replay_writer(&task_id);
+        info!("Removed log replay config for task {}", task_id);
+        // Drop handle to signal writer to stop (channel will be closed when tx is dropped)
+        drop(log_replay_handle);
     }
 
     /// Create snapshot with slot range filter and transfer to target shard
@@ -483,7 +502,7 @@ impl SplitServiceImpl {
         let key_range = Some((slot_start, slot_end));
 
         use storage::SnapshotStore;
-        store
+        let apply_index = store
             .create_snapshot(&shard_id_str, tx, key_range)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create snapshot: {}", e))?;
@@ -577,20 +596,20 @@ impl SplitServiceImpl {
         Ok(())
     }
 
-    /// Update routing table with new shard routings
+    /// Update routing table with new shard routing
     async fn update_routing_table(
         node: &Arc<RRNode>,
         task_manager: &Arc<SplitTaskManager>,
         task_id: &str,
         source_shard_id: &str,
-        target_shard_ids: &[String],
+        target_shard_id: &str,
         split_slot: u32,
         source_slot_start: u32,
         source_slot_end: u32,
     ) -> anyhow::Result<()> {
         info!(
-            "Updating routing table for task {}: source={}, targets={:?}, split_slot={}",
-            task_id, source_shard_id, target_shard_ids, split_slot
+            "Updating routing table for task {}: source={}, target={}, split_slot={}",
+            task_id, source_shard_id, target_shard_id, split_slot
         );
 
         let routing_table = node.routing_table();
@@ -606,30 +625,15 @@ impl SplitServiceImpl {
             ShardRouting::new(source_shard_id.to_string(), source_slot_start, split_slot);
         routing_table.add_shard_routing(updated_source_routing);
 
-        // Add target shard routings
-        // Calculate slot ranges for each target shard
-        let slot_range_per_shard = (source_slot_end - split_slot) / target_shard_ids.len() as u32;
-        let mut current_slot = split_slot;
+        // Add target shard routing: [split_slot, source_slot_end)
+        let target_routing =
+            ShardRouting::new(target_shard_id.to_string(), split_slot, source_slot_end);
+        routing_table.add_shard_routing(target_routing);
 
-        for (idx, target_shard_id) in target_shard_ids.iter().enumerate() {
-            let target_slot_start = current_slot;
-            let target_slot_end = if idx == target_shard_ids.len() - 1 {
-                source_slot_end
-            } else {
-                current_slot + slot_range_per_shard
-            };
-
-            let target_routing =
-                ShardRouting::new(target_shard_id.clone(), target_slot_start, target_slot_end);
-            routing_table.add_shard_routing(target_routing);
-
-            info!(
-                "Added routing for target shard {}: slot_range=[{}, {})",
-                target_shard_id, target_slot_start, target_slot_end
-            );
-
-            current_slot = target_slot_end;
-        }
+        info!(
+            "Added routing for target shard {}: slot_range=[{}, {})",
+            target_shard_id, split_slot, source_slot_end
+        );
 
         info!("Routing table updated for task {}", task_id);
         Ok(())
@@ -646,8 +650,8 @@ impl SplitService for SplitServiceImpl {
         let task_id = req.split_task_id.clone();
 
         info!(
-            "StartSplit request: task_id={}, source_shard={}, target_shards={:?}, split_slot={}",
-            task_id, req.source_shard_id, req.target_shard_ids, req.split_slot
+            "StartSplit request: task_id={}, source_shard={}, target_shard={}, split_slot={}",
+            task_id, req.source_shard_id, req.target_shard_id, req.split_slot
         );
 
         // Validate request
@@ -657,26 +661,28 @@ impl SplitService for SplitServiceImpl {
         if req.source_shard_id.is_empty() {
             return Err(Status::invalid_argument("source_shard_id is required"));
         }
-        if req.target_shard_ids.is_empty() {
-            return Err(Status::invalid_argument("target_shard_ids is required"));
+        if req.target_shard_id.is_empty() {
+            return Err(Status::invalid_argument("target_shard_id is required"));
         }
 
-        // Check if source shard exists
-        let source_shard_exists = self.node.get_raft_group(&req.source_shard_id).is_some();
-
-        if !source_shard_exists {
-            return Ok(Response::new(StartSplitResponse {
-                split_task_id: task_id,
-                success: false,
-                error_message: format!("Source shard {} not found", req.source_shard_id),
-            }));
-        }
+        // Get source state machine at the beginning to avoid state inconsistency
+        // Clone Arc to hold a reference throughout the split operation
+        let source_state_machine = match self.node.get_state_machine(&req.source_shard_id) {
+            Some(sm) => sm,
+            None => {
+                return Ok(Response::new(StartSplitResponse {
+                    split_task_id: task_id,
+                    success: false,
+                    error_message: format!("Source shard {} not found", req.source_shard_id),
+                }));
+            }
+        };
 
         // Create split task
         match self.task_manager.create_task(
             task_id.clone(),
             req.source_shard_id,
-            req.target_shard_ids,
+            req.target_shard_id,
             req.split_slot,
             req.source_slot_start,
             req.source_slot_end,
@@ -701,11 +707,12 @@ impl SplitService for SplitServiceImpl {
                         task_manager_clone,
                         task_id_clone,
                         task.source_shard_id.clone(),
-                        task.target_shard_ids.clone(),
+                        task.target_shard_id.clone(),
                         task.split_slot,
                         task.source_slot_start,
                         task.source_slot_end,
                         task.target_nodes.clone(),
+                        source_state_machine,
                     )
                     .await;
                 });
@@ -829,7 +836,7 @@ impl SplitService for SplitServiceImpl {
                 // TODO: Perform rollback if requested
                 // This would involve:
                 // 1. Stopping ongoing split operations
-                // 2. Cleaning up target shards if rollback=true
+                // 2. Cleaning up target shard if rollback=true
                 // 3. Removing split state from routing table
                 // 4. Restoring source shard to normal state
 

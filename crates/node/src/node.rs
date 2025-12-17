@@ -15,15 +15,20 @@ use raft::{
 };
 
 use crate::config::Config;
+use crate::log_replay_writer::LogReplayWriter;
 use crate::snapshot_transfer::SnapshotTransferManager;
 use crate::state_machine::KVStateMachine;
+use parking_lot::RwLock as ParkingLotRwLock;
 use proto::node::{
     node_service_server::NodeService, GetRaftStateRequest, GetRaftStateResponse, Role as ProtoRole,
 };
 use raft::event::Role as RaftRole;
 use resp::{Command, CommandType, RespValue};
 use rr_core::routing::RoutingTable;
+use std::collections::VecDeque;
+use std::path::PathBuf;
 use storage::{traits::KeyStore, ApplyResult as StoreApplyResult, RedisStore};
+use tokio::sync::Notify;
 use tonic::{Request, Response, Status};
 
 /// Pending request tracker
@@ -109,6 +114,9 @@ pub struct RRNode {
     /// Used to reuse connections across different services (SyncService, SplitService, etc.)
     grpc_client_pool:
         Arc<parking_lot::RwLock<std::collections::HashMap<String, Arc<tonic::transport::Channel>>>>,
+    /// Log replay writers (task_id -> LogReplayWriter)
+    /// Used to store log replay writer for split operations
+    log_replay_writers: Arc<ParkingLotRwLock<HashMap<String, LogReplayWriter>>>,
     /// Configuration
     config: Config,
 }
@@ -134,6 +142,7 @@ impl RRNode {
             pending_requests: PendingRequests::new(),
             snapshot_transfer_manager: Arc::new(SnapshotTransferManager::new()),
             grpc_client_pool: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+            log_replay_writers: Arc::new(ParkingLotRwLock::new(HashMap::new())),
             config,
         }
     }
@@ -262,6 +271,62 @@ impl RRNode {
         }
     }
 
+    /// Get state machine for a shard
+    ///
+    /// Returns a cloned Arc reference to the state machine.
+    /// This allows holding a reference throughout an operation to avoid state inconsistency.
+    ///
+    /// # Arguments
+    /// - `shard_id`: Shard ID
+    ///
+    /// # Returns
+    /// - `Some(Arc<KVStateMachine>)`: State machine if shard exists
+    /// - `None`: If shard does not exist
+    pub fn get_state_machine(&self, shard_id: &str) -> Option<Arc<KVStateMachine>> {
+        self.state_machines.lock().get(shard_id).cloned()
+    }
+
+    /// Register log replay writer for a split task
+    ///
+    /// Stores the log replay writer.
+    ///
+    /// # Arguments
+    /// - `task_id`: Split task ID
+    /// - `writer`: Log replay writer
+    pub fn register_log_replay_writer(&self, task_id: String, writer: LogReplayWriter) {
+        self.log_replay_writers.write().insert(task_id, writer);
+    }
+
+    /// Get log replay writer for a split task
+    ///
+    /// # Arguments
+    /// - `task_id`: Split task ID
+    ///
+    /// # Returns
+    /// - `Some(LogReplayWriterInfo)`: Log replay writer info if exists (extracted from writer)
+    /// - `None`: If task does not exist
+    pub fn get_log_replay_writer(
+        &self,
+        task_id: &str,
+    ) -> Option<crate::log_replay_writer::LogReplayWriterInfo> {
+        self.log_replay_writers.read().get(task_id).map(|writer| {
+            crate::log_replay_writer::LogReplayWriterInfo {
+                file_path: writer.file_path().clone(),
+                metadata: writer.metadata(),
+                notify: writer.notify(),
+                cache: writer.cache(),
+            }
+        })
+    }
+
+    /// Remove log replay writer for a split task
+    ///
+    /// # Arguments
+    /// - `task_id`: Split task ID
+    pub fn remove_log_replay_writer(&self, task_id: &str) {
+        self.log_replay_writers.write().remove(task_id);
+    }
+
     /// Create Raft group (for Pilot control plane only)
     ///
     /// # Important
@@ -387,7 +452,10 @@ impl RRNode {
             // Commands without key: use first available state machine
             // storage will handle PING, ECHO, etc.
             if let Some((_group_id, sm)) = state_machines.iter().next() {
-                let result = sm.store().apply(&cmd);
+                // For read operations, use current apply_index as read_index
+                // apply_index can be 0 for read-only commands
+                let read_index = sm.apply_index().load(std::sync::atomic::Ordering::SeqCst);
+                let result = sm.store().apply(read_index, 0, &cmd);
                 return Ok(apply_result_to_resp(result));
             } else {
                 // No state machines available, but PING/ECHO can still work
@@ -419,7 +487,10 @@ impl RRNode {
 
         // Read from state machine
         if let Some(sm) = state_machines.get(&raft_id.group) {
-            let result = sm.store().apply(&cmd);
+            // For read operations, use current apply_index as read_index
+            // apply_index can be 0 for read-only commands
+            let read_index = sm.apply_index().load(std::sync::atomic::Ordering::SeqCst);
+            let result = sm.store().apply(read_index, 0, &cmd);
             Ok(apply_result_to_resp(result))
         } else {
             Err("State machine not found".to_string())
@@ -507,7 +578,9 @@ impl RRNode {
                 let state_machines = self.state_machines.lock();
                 for sm in state_machines.values() {
                     // HybridStore implements RedisStore, so we can call flushdb directly
-                    let _ = sm.store().flushdb();
+                    // Use current apply_index for flushdb operation
+                    let apply_index = sm.apply_index().load(std::sync::atomic::Ordering::SeqCst);
+                    let _ = sm.store().flushdb(apply_index);
                 }
                 Ok(RespValue::SimpleString(bytes::Bytes::from("OK")))
             }

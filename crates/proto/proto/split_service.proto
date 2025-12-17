@@ -11,7 +11,7 @@ package split_service;
 /// Split service for shard splitting operations
 service SplitService {
   /// Start a shard split operation
-  /// Initiates the split process from source shard to target shard(s)
+  /// Initiates the split process from source shard to target shard
   rpc StartSplit(StartSplitRequest) returns (StartSplitResponse); 
 
   /// Get split progress
@@ -33,8 +33,8 @@ message StartSplitRequest {
   string split_task_id = 1;
   /// Source shard ID (the shard to be split)
   string source_shard_id = 2;
-  /// Target shard ID(s) (the new shard(s) created from split)
-  repeated string target_shard_ids = 3;
+  /// Target shard ID (the new shard created from split)
+  string target_shard_id = 3;
   /// Split slot (the slot boundary where to split)
   /// Data with slot < split_slot stays in source, >= split_slot goes to target
   uint32 split_slot = 4;
@@ -42,7 +42,7 @@ message StartSplitRequest {
   uint32 source_slot_start = 5;
   /// Source slot range (end slot of source shard, exclusive)
   uint32 source_slot_end = 6;
-  /// Target nodes for new shard(s)
+  /// Target nodes for new shard
   repeated string target_nodes = 7;
 }
 
@@ -130,7 +130,7 @@ enum SplitStatus {
 /// Split phase
 enum SplitPhase {
   SPLIT_PHASE_UNSPECIFIED = 0;
-  /// Preparing phase: creating target shards, updating routing table
+  /// Preparing phase: creating target shard, updating routing table
   SPLIT_PHASE_PREPARING = 1;
   /// Snapshot transfer phase: transferring snapshot data from source to target
   SPLIT_PHASE_SNAPSHOT_TRANSFER = 2;

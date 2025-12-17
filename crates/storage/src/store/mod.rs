@@ -18,20 +18,103 @@ mod set;
 mod snapshot;
 mod string;
 
-use crate::memory;
+use crate::memory::{self, MemStoreCow};
 use crate::rocksdb::ShardedRocksDB;
 use crate::snapshot::{SegmentGenerator, SnapshotConfig, WalWriter};
-use rr_core::shard::ShardId;
 use crate::traits::StoreError;
 use anyhow::Result;
 use parking_lot::RwLock;
 use resp::Command;
 use rr_core::routing::RoutingTable;
+use rr_core::shard::ShardId;
 use rr_core::shard::{ShardRouting, TOTAL_SLOTS};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tracing::{error, info};
+
+/// Shard metadata
+#[derive(Debug, Clone)]
+pub struct ShardMetadata {
+    /// Raft log apply index (last applied log entry index)
+    /// This is set when creating a snapshot
+    pub apply_index: Option<u64>,
+
+    /// Last snapshot index (for incremental snapshots)
+    pub last_snapshot_index: Option<u64>,
+
+    /// Shard creation time
+    pub created_at: u64,
+
+    /// Last update time
+    pub last_updated: u64,
+}
+
+impl ShardMetadata {
+    /// Verify read_index is valid (should be <= current apply_index)
+    ///
+    /// # Arguments
+    /// - `read_index`: Raft read index to verify
+    ///
+    /// # Returns
+    /// - `Ok(())`: Read index is valid
+    /// - `Err(StoreError::Internal)`: Read index exceeds apply index
+    pub fn verify_read_index(&self, read_index: u64) -> Result<(), StoreError> {
+        if let Some(apply_index) = self.apply_index {
+            if read_index > apply_index {
+                return Err(StoreError::Internal(format!(
+                    "Read index {} exceeds apply index {}",
+                    read_index, apply_index
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn new() -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        Self {
+            apply_index: None,
+            last_snapshot_index: None,
+            created_at: now,
+            last_updated: now,
+        }
+    }
+
+    /// Update apply index (called during snapshot creation)
+    pub fn set_apply_index(&mut self, index: u64) {
+        self.apply_index = Some(index);
+        self.last_updated = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+    }
+
+    /// Update snapshot index
+    pub fn set_snapshot_index(&mut self, index: u64) {
+        self.last_snapshot_index = Some(index);
+        self.last_updated = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+    }
+
+    /// Get apply index
+    pub fn get_apply_index(&self) -> Option<u64> {
+        self.apply_index
+    }
+}
+
+impl Default for ShardMetadata {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Sharded Store with RocksDB and Memory backends
 ///
@@ -41,7 +124,8 @@ use tracing::{error, info};
 #[derive(Clone)]
 pub struct ShardedStore {
     rocksdb: ShardedRocksDB,
-    memory: memory::ShardStore,
+    memory: MemStoreCow,
+    metadata: ShardMetadata,
 }
 
 /// Locked Sharded Store with RwLock protection
@@ -53,8 +137,12 @@ pub type LockedShardedStore = Arc<RwLock<ShardedStore>>;
 
 impl ShardedStore {
     /// Create a new ShardedStore
-    pub fn new(rocksdb: ShardedRocksDB, memory: memory::ShardStore) -> Self {
-        Self { rocksdb, memory }
+    pub fn new(rocksdb: ShardedRocksDB, memory: MemStoreCow) -> Self {
+        Self {
+            rocksdb,
+            memory,
+            metadata: ShardMetadata::new(),
+        }
     }
 
     /// Get reference to RocksDB (for read operations)
@@ -68,12 +156,12 @@ impl ShardedStore {
     }
 
     /// Get reference to Memory store (for read operations)
-    pub fn memory(&self) -> &memory::ShardStore {
+    pub fn memory(&self) -> &MemStoreCow {
         &self.memory
     }
 
     /// Get mutable reference to Memory store (for write operations)
-    pub fn memory_mut(&mut self) -> &mut memory::ShardStore {
+    pub fn memory_mut(&mut self) -> &mut MemStoreCow {
         &mut self.memory
     }
 }
@@ -95,6 +183,8 @@ pub struct HybridStore {
     segment_generator: Arc<RwLock<SegmentGenerator>>,
 
     routing_table: Arc<RoutingTable>,
+
+    last_applied_index: Arc<AtomicU64>,
 
     /// Snapshot configuration
     snapshot_config: SnapshotConfig,
@@ -135,6 +225,7 @@ impl HybridStore {
             rocksdb,
             rocksdb_path,
             snapshot_config,
+            last_applied_index: Arc::new(AtomicU64::new(0)),
             shards: Arc::new(RwLock::new(HashMap::new())),
             wal_writer: Arc::new(RwLock::new(wal_writer)),
             segment_generator: Arc::new(RwLock::new(segment_generator)),
@@ -163,13 +254,19 @@ impl HybridStore {
     /// Apply command with apply_index (for WAL logging)
     ///
     /// This method executes the command and writes it to WAL for recovery.
+    ///
+    /// # Arguments
+    /// - `read_index`: Raft read index for linearizability verification (used for read operations)
+    /// - `apply_index`: Raft apply index for WAL logging (used for write operations)
+    /// - `command`: Command to execute
     pub fn apply_with_index(
         &self,
+        read_index: u64,
         apply_index: u64,
         command: &Command,
     ) -> crate::traits::ApplyResult {
         // 1. Execute command using RedisStore trait's apply method
-        let result = crate::traits::RedisStore::apply(self, command);
+        let result = crate::traits::RedisStore::apply(self, read_index, apply_index, command);
 
         // 2. Extract key and write to WAL (only for write commands)
         if Self::is_write_command(command) {
@@ -183,6 +280,8 @@ impl HybridStore {
                     // Don't fail the command execution if WAL write fails
                 }
             }
+            self.last_applied_index
+                .store(apply_index, std::sync::atomic::Ordering::SeqCst);
         }
 
         result
@@ -249,12 +348,12 @@ impl HybridStore {
         // Generate segment for each shard
         for (shard_id, shard) in shards.iter() {
             let shard_guard = shard.read();
-            let memory_store = &shard_guard.memory().store;
+            let memory_store = shard_guard.memory();
 
             // Get current apply_index from shard metadata (if available)
             // For now, use WAL size as a proxy for apply_index
-            // TODO: Track actual apply_index per shard
-            let apply_index = shard_guard.memory().metadata.apply_index.unwrap_or(0);
+            // Track actual apply_index per shard
+            let apply_index = shard_guard.metadata.apply_index.unwrap_or(0);
 
             match segment_generator.generate_segment(shard_id, memory_store, apply_index) {
                 Ok(metadata) => {
@@ -406,7 +505,7 @@ mod tests {
             xx: false,
         };
 
-        let result = store.apply_with_index(1, &command);
+        let result = store.apply_with_index(1, 1, &command);
         assert!(matches!(result, crate::traits::ApplyResult::Ok));
 
         // Flush WAL and verify it was written

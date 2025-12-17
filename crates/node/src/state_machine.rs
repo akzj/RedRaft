@@ -25,6 +25,17 @@ use crate::node::PendingRequests;
 use crate::snapshot_transfer::SnapshotTransferManager;
 use rr_core::routing::RoutingTable;
 
+/// Log replay configuration for split operations
+#[derive(Clone)]
+pub struct ReplayLogConfig {
+    /// Channel sender for forwarding commands
+    pub tx: tokio::sync::mpsc::Sender<(u64, u64, resp::Command)>,
+    /// Slot range (begin, end) - commands with slot in [begin, end) will be forwarded
+    pub slot_range: (u32, u32),
+    /// Split task ID
+    pub task_id: String,
+}
+
 /// KV state machine
 #[derive(Clone)]
 pub struct KVStateMachine {
@@ -50,6 +61,9 @@ pub struct KVStateMachine {
     config: Config,
     /// Routing table for node address lookup
     routing_table: Arc<rr_core::routing::RoutingTable>,
+    /// Active log replay configurations for split operations
+    /// Each entry contains channel, slot range, and task_id
+    replay_logs: Arc<parking_lot::RwLock<Vec<ReplayLogConfig>>>,
 }
 
 impl KVStateMachine {
@@ -75,6 +89,7 @@ impl KVStateMachine {
             snapshot_transfer_manager,
             config,
             routing_table,
+            replay_logs: Arc::new(parking_lot::RwLock::new(Vec::new())),
         }
     }
 
@@ -101,7 +116,18 @@ impl KVStateMachine {
             snapshot_transfer_manager,
             config,
             routing_table,
+            replay_logs: Arc::new(parking_lot::RwLock::new(Vec::new())),
         }
+    }
+
+    /// Add a log replay configuration for split operation
+    pub fn add_replay_log(&self, config: ReplayLogConfig) {
+        self.replay_logs.write().push(config);
+    }
+
+    /// Remove a log replay configuration by task_id
+    pub fn remove_replay_log(&self, task_id: &str) {
+        self.replay_logs.write().retain(|c| c.task_id != task_id);
     }
 
     /// Get storage backend reference (for read operations)
@@ -277,7 +303,7 @@ impl StateMachine for KVStateMachine {
 
         // Execute command with apply_index (for WAL logging) in blocking thread pool
         // to avoid blocking async runtime since storage operations are synchronous
-        let result = tokio::task::spawn_blocking(move || {
+        let (result, command_opt) = tokio::task::spawn_blocking(move || {
             // Deserialize to Command
             let command: Command = match bincode::serde::decode_from_slice(
                 cmd.as_slice(),
@@ -286,13 +312,16 @@ impl StateMachine for KVStateMachine {
                 Ok((cmd, _)) => cmd,
                 Err(e) => {
                     warn!("Failed to deserialize command at index {}: {}", index, e);
-                    return StoreApplyResult::Error(StoreError::Internal(format!(
-                        "Failed to deserialize command at index {}: {}",
-                        index, e
-                    )));
+                    return (
+                        StoreApplyResult::Error(StoreError::Internal(format!(
+                            "Failed to deserialize command at index {}: {}",
+                            index, e
+                        ))),
+                        None,
+                    );
                 }
             };
-            store.apply_with_index(index, &command)
+            (store.apply_with_index(index, index, &command), Some(command))
         })
         .await
         .map_err(|e| raft::ApplyError::Internal(format!("Failed to apply command: {}", e)))?;
@@ -305,6 +334,43 @@ impl StateMachine for KVStateMachine {
             .store(index, std::sync::atomic::Ordering::SeqCst);
         self.term.store(term, std::sync::atomic::Ordering::SeqCst);
 
+        // Check if command should be forwarded to log replay channels
+        // If key's slot matches any replay log slot range, forward command
+        if let Some(command) = command_opt {
+            if let Some(key) = command.get_key() {
+                let slot = rr_core::routing::RoutingTable::slot_for_key(key);
+                // Collect matching replay configs (clone tx to avoid holding lock across await)
+                let matching_configs: Vec<_> = {
+                    let replay_logs = self.replay_logs.read();
+                    replay_logs
+                        .iter()
+                        .filter_map(|replay_config| {
+                            let (slot_begin, slot_end) = replay_config.slot_range;
+                            if slot >= slot_begin && slot < slot_end {
+                                Some((replay_config.tx.clone(), replay_config.task_id.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                };
+
+                // Send to matching channels (without holding the lock)
+                for (tx, task_id) in matching_configs {
+                    let cmd_clone = command.clone();
+                    if let Err(e) = tx.send((index, term, cmd_clone)).await {
+                        warn!("Failed to send command to log replay channel at index {} for task {}: {}",
+                    index, task_id, e
+                );
+                    } else {
+                        debug!(
+                    "Forwarded command for key {:?} (slot {}) to log replay at index {} for task {}",
+                    key, slot, index, task_id
+                );
+                    }
+                }
+            }
+        }
         Ok(())
     }
 

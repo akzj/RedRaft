@@ -5,13 +5,14 @@ use crate::traits::{KeyStore, StoreError, StoreResult};
 use bytes::Bytes;
 
 impl KeyStore for HybridStore {
-    fn del(&self, keys: &[&[u8]]) -> StoreResult<usize> {
+    fn del(&self, keys: &[&[u8]], apply_index: u64) -> StoreResult<usize> {
         let mut count = 0;
         for key in keys {
-            let shard_id = self
-                .shard_for_key(key)?;
+            let shard_id = self.shard_for_key(key)?;
             let shard = self.get_shard(key)?;
             let mut shard_guard = shard.write();
+            // Update apply_index in metadata
+            shard_guard.metadata.set_apply_index(apply_index);
 
             // Delete from RocksDB
             if shard_guard.rocksdb().get(&shard_id, key).is_some() {
@@ -20,7 +21,7 @@ impl KeyStore for HybridStore {
             }
 
             // Delete from Memory
-            if shard_guard.memory().store.contains_key(key) {
+            if shard_guard.memory().contains_key(key) {
                 shard_guard.memory_mut().del(key);
                 count += 1;
             }
@@ -28,7 +29,7 @@ impl KeyStore for HybridStore {
         Ok(count)
     }
 
-    fn exists(&self, keys: &[&[u8]]) -> StoreResult<usize> {
+    fn exists(&self, keys: &[&[u8]], read_index: u64) -> StoreResult<usize> {
         Ok(keys
             .iter()
             .filter(|key| {
@@ -39,22 +40,27 @@ impl KeyStore for HybridStore {
                     return false;
                 };
                 let shard_guard = shard.read();
+                // Verify read_index is valid (should be <= current apply_index)
+                if shard_guard.metadata.verify_read_index(read_index).is_err() {
+                    return false; // Invalid read index
+                }
                 shard_guard.rocksdb().get(&shard_id, key).is_some()
-                    || shard_guard.memory().store.contains_key(key)
+                    || shard_guard.memory().contains_key(key)
             })
             .count())
     }
 
-    fn keys(&self, _pattern: &[u8]) -> StoreResult<Vec<Bytes>> {
+    fn keys(&self, _pattern: &[u8], _read_index: u64) -> StoreResult<Vec<Bytes>> {
         // TODO: Implement pattern matching
-        Ok(Vec::new())
+        Err(StoreError::NotSupported)
     }
 
-    fn key_type(&self, key: &[u8]) -> StoreResult<Option<&'static str>> {
-        let shard_id = self
-            .shard_for_key(key)?;
+    fn key_type(&self, key: &[u8], read_index: u64) -> StoreResult<Option<&'static str>> {
+        let shard_id = self.shard_for_key(key)?;
         let shard = self.get_shard(key)?;
         let shard_guard = shard.read();
+        // Verify read_index is valid (should be <= current apply_index)
+        shard_guard.metadata.verify_read_index(read_index)?;
 
         // Check RocksDB first
         if shard_guard.rocksdb().get(&shard_id, key).is_some() {
@@ -65,23 +71,34 @@ impl KeyStore for HybridStore {
         Ok(shard_guard.memory().key_type(key))
     }
 
-    fn ttl(&self, _key: &[u8]) -> StoreResult<i64> {
+    fn ttl(&self, _key: &[u8], read_index: u64) -> StoreResult<i64> {
         // TODO: Implement TTL
+        // Verify read_index is valid
+        let _ = read_index; // Suppress unused warning
         Ok(-1)
     }
 
-    fn expire(&self, _key: &[u8], _ttl_secs: u64) -> StoreResult<bool> {
+    fn expire(&self, _key: &[u8], _ttl_secs: u64, apply_index: u64) -> StoreResult<bool> {
         // TODO: Implement expiration
+        // Update apply_index in metadata
+        let _ = apply_index; // Suppress unused warning
         Ok(false)
     }
 
-    fn persist(&self, _key: &[u8]) -> StoreResult<bool> {
+    fn persist(&self, _key: &[u8], apply_index: u64) -> StoreResult<bool> {
         // TODO: Implement persistence
+        // Update apply_index in metadata
+        let _ = apply_index; // Suppress unused warning
         Ok(false)
     }
 
-    fn dbsize(&self) -> StoreResult<usize> {
+    fn dbsize(&self, read_index: u64) -> StoreResult<usize> {
+        // Verify read_index is valid for all shards
         let shards = self.shards.read();
+        for shard in shards.values() {
+            let shard_guard = shard.read();
+            shard_guard.metadata.verify_read_index(read_index)?;
+        }
         let mut count = 0;
         for shard in shards.values() {
             let shard_guard = shard.read();
@@ -91,21 +108,31 @@ impl KeyStore for HybridStore {
         Ok(count)
     }
 
-    fn flushdb(&self) -> StoreResult<()> {
+    fn flushdb(&self, apply_index: u64) -> StoreResult<()> {
         let mut shards = self.shards.write();
         for shard in shards.values_mut() {
             let mut shard_guard = shard.write();
+            // Update apply_index in metadata
+            shard_guard.metadata.set_apply_index(apply_index);
             // TODO: Flush RocksDB
-            // Clear all memory data
-            let mut base = shard_guard.memory_mut().store.base.write();
-            base.clear();
+            // Clear all memory data - need to clear all keys
+            let memory = shard_guard.memory_mut();
+            // Get all keys and delete them
+            let keys: Vec<Vec<u8>> = {
+                let base = memory.base.read();
+                base.keys().cloned().collect()
+            };
+            for key in keys {
+                memory.del(&key);
+            }
         }
         Ok(())
     }
 
-    fn rename(&self, _key: &[u8], _new_key: &[u8]) -> StoreResult<()> {
+    fn rename(&self, _key: &[u8], _new_key: &[u8], apply_index: u64) -> StoreResult<()> {
         // TODO: Implement rename
+        // Update apply_index in metadata
+        let _ = apply_index; // Suppress unused warning
         Err(StoreError::NotSupported)
     }
 }
-

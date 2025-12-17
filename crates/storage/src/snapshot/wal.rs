@@ -7,11 +7,11 @@
 //! - Timed rotation + metadata file
 
 use crate::snapshot::SnapshotConfig;
-use rr_core::routing::RoutingTable;
-use rr_core::shard::ShardId;
 use anyhow::Result;
 use crossbeam_channel;
 use resp::Command;
+use rr_core::routing::RoutingTable;
+use rr_core::shard::ShardId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};

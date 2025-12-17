@@ -27,7 +27,7 @@ impl SnapshotStore for HybridStore {
         shard_id: &ShardId,
         channel: tokio::sync::mpsc::Sender<SnapshotStoreEntry>,
         key_range: Option<(u32, u32)>,
-    ) -> Result<()> {
+    ) -> anyhow::Result<u64> {
         // Get shard (must be done before moving into closure)
         let shard = {
             let shards = self.shards.read();
@@ -70,9 +70,9 @@ impl SnapshotStore for HybridStore {
                     None => {
                         let err =
                             StoreError::Internal(format!("Column Family {} not found", cf_name));
-                        send_error(err);
+                        send_error(err.clone());
                         // Signal error to unblock waiting thread (must send before return)
-                        let _ = tx.send(());
+                        let _ = tx.send(Err(err));
                         return;
                     }
                 };
@@ -82,12 +82,22 @@ impl SnapshotStore for HybridStore {
                 // Create Memory COW snapshot BEFORE signaling snapshot object is ready
                 // This ensures state consistency - snapshot object is fully created before signaling
                 let mut shard_guard = shard.write();
-                let memory_snapshot = shard_guard.memory_mut().store.make_snapshot();
+                let memory_snapshot = shard_guard.memory_mut().make_snapshot();
+
+                let apply_index = match shard_guard.metadata.get_apply_index() {
+                    Some(apply_index) => apply_index,
+                    None => {
+                        let err = StoreError::Internal("Apply index not found".to_string());
+                        send_error(err);
+                        return;
+                    }
+                };
+
                 drop(shard_guard); // Release write lock immediately
 
                 // Signal that snapshot object is fully created (RocksDB snapshot + Memory COW)
                 // This allows load_snapshot to wait synchronously for snapshot object creation
-                let _ = tx.send(());
+                let _ = tx.send(Ok(apply_index));
 
                 // Helper function to check if key is in slot range
                 let key_in_range = |original_key: &[u8]| -> bool {
@@ -128,6 +138,7 @@ impl SnapshotStore for HybridStore {
                         let _ = channel.send(SnapshotStoreEntry::String(
                             bytes::Bytes::copy_from_slice(original_key),
                             bytes::Bytes::copy_from_slice(&value),
+                            apply_index,
                         ));
                     } else if key.len() >= 2 && key[0] == key_prefix::HASH && key[1] == b':' {
                         // Hash field: h:{key}:{field} -> value
@@ -144,6 +155,7 @@ impl SnapshotStore for HybridStore {
                                 bytes::Bytes::copy_from_slice(hash_key),
                                 bytes::Bytes::copy_from_slice(field),
                                 bytes::Bytes::copy_from_slice(&value),
+                                apply_index,
                             )) {
                                 let err = StoreError::Internal(format!(
                                     "Failed to send Hash entry: {}",
@@ -182,6 +194,7 @@ impl SnapshotStore for HybridStore {
                                 if let Err(e) = channel.blocking_send(SnapshotStoreEntry::List(
                                     bytes::Bytes::copy_from_slice(key),
                                     element.clone(),
+                                    apply_index,
                                 )) {
                                     let err = StoreError::Internal(format!(
                                         "Failed to send List entry: {}",
@@ -198,6 +211,7 @@ impl SnapshotStore for HybridStore {
                                 if let Err(e) = channel.blocking_send(SnapshotStoreEntry::Set(
                                     bytes::Bytes::copy_from_slice(key),
                                     member.clone(),
+                                    apply_index,
                                 )) {
                                     let err = StoreError::Internal(format!(
                                         "Failed to send Set entry: {}",
@@ -218,6 +232,7 @@ impl SnapshotStore for HybridStore {
                                     bytes::Bytes::copy_from_slice(key),
                                     score,
                                     member,
+                                    apply_index,
                                 )) {
                                     let err = StoreError::Internal(format!(
                                         "Failed to send ZSet entry: {}",
@@ -233,6 +248,7 @@ impl SnapshotStore for HybridStore {
                             if let Err(e) = channel.blocking_send(SnapshotStoreEntry::Bitmap(
                                 bytes::Bytes::copy_from_slice(key),
                                 bytes::Bytes::copy_from_slice(bitmap),
+                                apply_index,
                             )) {
                                 let err = StoreError::Internal(format!(
                                     "Failed to send Bitmap entry: {}",
@@ -268,18 +284,27 @@ impl SnapshotStore for HybridStore {
             // Always signal to unblock main thread, even on panic
             // This prevents main thread from blocking forever if thread panics
             // Use cloned sender that wasn't moved into the closure
-            let _ = tx_for_panic.send(());
+            let _ = tx_for_panic.send(Err(StoreError::Internal(
+                "Snapshot creation thread panicked".to_string(),
+            )));
         });
 
         // Wait for signal (blocking receive)
         // This will unblock when thread sends signal, even on panic
-        rx.recv()
-            .map_err(|e| anyhow::anyhow!("Failed to receive snapshot creation signal: {}", e))?;
 
-        Ok(())
+        let apply_index = rx
+            .recv()
+            .map_err(|e| anyhow::anyhow!("Failed to receive snapshot creation signal: {}", e))?
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to get apply index from snapshot creation signal: {}",
+                    e
+                )
+            })?;
+        Ok(apply_index)
     }
 
-    fn restore_from_snapshot(&self, _snapshot: &[u8]) -> Result<(), String> {
+    fn restore_from_snapshot(&self, _snapshot: &[u8]) -> anyhow::Result<()> {
         // TODO: Implement snapshot restoration
         Ok(())
     }
@@ -289,14 +314,14 @@ impl SnapshotStore for HybridStore {
         _slot_start: u32,
         _slot_end: u32,
         _total_slots: u32,
-    ) -> Result<Vec<u8>, String> {
+    ) -> anyhow::Result<Vec<u8>> {
         // TODO: Implement split snapshot
         Ok(Vec::new())
     }
 
-    fn merge_from_snapshot(&self, _snapshot: &[u8]) -> Result<usize, String> {
+    fn merge_from_snapshot(&self, _snapshot: &[u8]) -> anyhow::Result<usize> {
         // TODO: Implement merge snapshot
-        Ok(0)
+        Err(anyhow::anyhow!("Not implemented"))
     }
 
     fn delete_keys_in_slot_range(
@@ -304,8 +329,8 @@ impl SnapshotStore for HybridStore {
         _slot_start: u32,
         _slot_end: u32,
         _total_slots: u32,
-    ) -> usize {
+    ) -> anyhow::Result<usize> {
         // TODO: Implement delete keys in slot range
-        0
+        Err(anyhow::anyhow!("Not implemented"))
     }
 }

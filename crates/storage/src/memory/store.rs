@@ -13,63 +13,6 @@ use crate::{
     memory::{ListData, SetDataCow, ZSetDataCow},
 };
 
-/// Shard metadata
-#[derive(Debug, Clone)]
-pub struct ShardMetadata {
-    /// Raft log apply index (last applied log entry index)
-    /// This is set when creating a snapshot
-    pub apply_index: Option<u64>,
-
-    /// Last snapshot index (for incremental snapshots)
-    pub last_snapshot_index: Option<u64>,
-
-    /// Shard creation time
-    pub created_at: u64,
-
-    /// Last update time
-    pub last_updated: u64,
-}
-
-impl ShardMetadata {
-    pub fn new() -> Self {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        Self {
-            apply_index: None,
-            last_snapshot_index: None,
-            created_at: now,
-            last_updated: now,
-        }
-    }
-
-    /// Update apply index (called during snapshot creation)
-    pub fn set_apply_index(&mut self, index: u64) {
-        self.apply_index = Some(index);
-        self.last_updated = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-    }
-
-    /// Update snapshot index
-    pub fn set_snapshot_index(&mut self, index: u64) {
-        self.last_snapshot_index = Some(index);
-        self.last_updated = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-    }
-}
-
-impl Default for ShardMetadata {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Unified data type enum with COW support
 ///
 /// Wraps all Redis data types (List, Set, ZSet, Bitmap) in a single enum.
@@ -147,17 +90,15 @@ impl DataCow {
     }
 
     /// Serialize base data for snapshot
-    /// 
+    ///
     /// Extracts base data from COW structure and serializes it
     pub fn serialize_base(&self) -> Result<Vec<u8>, String> {
-        use bincode::serde::encode_to_vec;
         use bincode::config::standard;
-        
+        use bincode::serde::encode_to_vec;
+
         match self {
-            DataCow::List(list) => {
-                encode_to_vec(list, standard())
-                    .map_err(|e| format!("Failed to serialize ListData: {}", e))
-            }
+            DataCow::List(list) => encode_to_vec(list, standard())
+                .map_err(|e| format!("Failed to serialize ListData: {}", e)),
             DataCow::Set(set_cow) => {
                 let base = set_cow.get_base_for_serialization();
                 encode_to_vec(&*base, standard())
@@ -168,10 +109,8 @@ impl DataCow {
                 encode_to_vec(&*base, standard())
                     .map_err(|e| format!("Failed to serialize ZSetData: {}", e))
             }
-            DataCow::Bitmap(bitmap) => {
-                encode_to_vec(bitmap, standard())
-                    .map_err(|e| format!("Failed to serialize BitmapData: {}", e))
-            }
+            DataCow::Bitmap(bitmap) => encode_to_vec(bitmap, standard())
+                .map_err(|e| format!("Failed to serialize BitmapData: {}", e)),
         }
     }
 }
@@ -464,48 +403,5 @@ impl MemStoreCow {
             let base = self.base.read();
             base.len()
         }
-    }
-}
-
-/// Shard data container
-///
-/// Contains all data structures (List, Set, ZSet, Bitmap) in a unified store
-/// with type detection and COW support.
-/// 
-#[derive(Clone)]
-pub struct ShardStore {
-    /// Unified store for all data types with COW support
-    pub store: MemStoreCow,
-
-    /// Shard metadata
-    pub metadata: ShardMetadata,
-}
-
-impl ShardStore {
-    pub fn new() -> Self {
-        Self {
-            store: MemStoreCow::new(),
-            metadata: ShardMetadata::new(),
-        }
-    }
-
-    /// Get key type (O(1) lookup)
-    pub fn key_type(&self, key: &[u8]) -> Option<&'static str> {
-        self.store.key_type(key)
-    }
-
-    /// Check if key exists (O(1) lookup)
-    pub fn contains_key(&self, key: &[u8]) -> bool {
-        self.store.contains_key(key)
-    }
-
-    /// Delete key from any data type
-    pub fn del(&mut self, key: &[u8]) -> bool {
-        self.store.del(key)
-    }
-
-    /// Get total key count across all data types
-    pub fn key_count(&self) -> usize {
-        self.store.key_count()
     }
 }
