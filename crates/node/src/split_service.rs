@@ -81,15 +81,10 @@ impl SplitTask {
             phase: SplitPhase::Preparing as i32,
             progress: SplitProgress {
                 current_phase: SplitPhase::Preparing as i32,
-                snapshot_progress_percent: 0,
-                log_replay_progress_percent: 0,
                 bytes_transferred: 0,
-                bytes_total: 0,
                 keys_transferred: 0,
-                keys_total: 0,
                 current_replay_index: 0,
                 target_replay_index: 0,
-                estimated_seconds_remaining: 0,
             },
             created_at: now,
             updated_at: now,
@@ -511,7 +506,8 @@ impl SplitServiceImpl {
 
         // Set snapshot_index in log_replay_writer to skip duplicate entries
         // Entries with index <= snapshot_index are already included in the snapshot
-        node.set_log_replay_snapshot_index(&task_id, snapshot_index).await;
+        node.set_log_replay_snapshot_index(&task_id, snapshot_index)
+            .await;
         info!(
             "Set snapshot_index {} for log replay writer in task {}",
             snapshot_index, task_id
@@ -581,8 +577,6 @@ impl SplitServiceImpl {
                     .get_task(task_id)
                     .map(|t| t.progress)
                     .unwrap_or_default();
-                progress.snapshot_progress_percent = 100;
-                progress.bytes_total = total_uncompressed_size;
                 progress.bytes_transferred = total_uncompressed_size;
                 let _ = task_manager.update_task_progress(task_id, progress);
                 info!(

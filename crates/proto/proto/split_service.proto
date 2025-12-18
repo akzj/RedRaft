@@ -12,11 +12,12 @@ package split_service;
 service SplitService {
   /// Start a shard split operation
   /// Initiates the split process from source shard to target shard
-  rpc StartSplit(StartSplitRequest) returns (StartSplitResponse); 
+  rpc StartSplit(StartSplitRequest) returns (StartSplitResponse);
 
   /// Get split progress
   /// Query the progress of an ongoing split operation
-  rpc GetSplitProgress(GetSplitProgressRequest) returns (GetSplitProgressResponse);
+  rpc GetSplitProgress(GetSplitProgressRequest)
+      returns (GetSplitProgressResponse);
 
   /// Cancel split operation
   /// Cancel an ongoing split operation and rollback if needed
@@ -146,23 +147,12 @@ enum SplitPhase {
 message SplitProgress {
   /// Current phase
   SplitPhase current_phase = 1;
-  /// Snapshot transfer progress (0-100)
-  uint32 snapshot_progress_percent = 2;
-  /// Log replay progress (0-100)
-  uint32 log_replay_progress_percent = 3;
   /// Total bytes transferred
   uint64 bytes_transferred = 4;
-  /// Total bytes expected
-  uint64 bytes_total = 5;
   /// Number of keys transferred
   uint64 keys_transferred = 6;
-  /// Total number of keys
-  uint64 keys_total = 7;
   /// Current Raft index being replayed
   uint64 current_replay_index = 8;
   /// Target Raft index to reach
   uint64 target_replay_index = 9;
-  /// Estimated time remaining (seconds)
-  uint64 estimated_seconds_remaining = 10;
 }
-

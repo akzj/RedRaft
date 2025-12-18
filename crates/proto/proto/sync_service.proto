@@ -83,14 +83,10 @@ message PullSyncDataResponse {
   bytes chunk_data = 3;
   /// Entry logs (for entry log batch)
   repeated EntryLog entry_logs = 4;
-  /// Starting byte offset of this chunk (for snapshot)
-  uint64 offset = 5;
   /// Chunk size in bytes
   uint32 chunk_size = 6;
   /// Whether this is the last chunk
   bool is_last_chunk = 7;
-  /// Total data size in bytes (only in first chunk for snapshot)
-  uint64 total_size = 8;
   /// Chunk checksum (CRC32 or SHA256)
   bytes checksum = 9;
   /// Error message (if failed, stream will end)
@@ -188,8 +184,6 @@ message SyncProgress {
   uint32 log_replay_progress_percent = 3;
   /// Total bytes transferred
   uint64 bytes_transferred = 4;
-  /// Total bytes expected
-  uint64 bytes_total = 5;
   /// Number of entry logs transferred
   uint64 entries_transferred = 6;
   /// Total number of entry logs

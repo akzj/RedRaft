@@ -92,7 +92,6 @@ impl SyncTask {
                 snapshot_progress_percent: 0,
                 log_replay_progress_percent: 0,
                 bytes_transferred: 0,
-                bytes_total: 0,
                 entries_transferred: 0,
                 entries_total: 0,
                 current_index: start_index,
@@ -294,16 +293,8 @@ impl SyncServiceImpl {
                 while let Some(chunk_result) = stream.message().await.transpose() {
                     match chunk_result {
                         Ok(chunk) => {
-                            if first_chunk && chunk.total_size > 0 {
-                                // Update total size in progress
-                                let mut progress = task_manager
-                                    .get_task(task_id)
-                                    .map(|t| t.progress)
-                                    .unwrap_or_default();
-                                progress.bytes_total = chunk.total_size;
-                                let _ = task_manager.update_task_progress(task_id, progress);
-                                first_chunk = false;
-                            }
+                            // Process chunk (total_size field removed)
+                            first_chunk = false;
 
                             total_bytes += chunk.chunk_size as u64;
 
@@ -319,10 +310,6 @@ impl SyncServiceImpl {
                                 .map(|t| t.progress)
                                 .unwrap_or_default();
                             progress.bytes_transferred = total_bytes;
-                            if progress.bytes_total > 0 {
-                                progress.snapshot_progress_percent =
-                                    ((total_bytes * 100) / progress.bytes_total) as u32;
-                            }
                             let _ = task_manager.update_task_progress(task_id, progress);
 
                             if chunk.is_last_chunk {
@@ -803,12 +790,6 @@ async fn stream_snapshot_chunks_from_source(
             anyhow::anyhow!("Failed to get transfer state for task {}: {}", task_id, e)
         })?;
 
-    // Get total size and completion status
-    let total_size = {
-        let index_guard = chunk_index_arc.read();
-        index_guard.total_uncompressed_size
-    };
-
     info!(
         "Starting to stream chunks for task {} from chunk {}",
         task_id, chunk_index
@@ -817,7 +798,6 @@ async fn stream_snapshot_chunks_from_source(
     // Stream chunks starting from chunk_index
     // Process chunks one by one as they become available (streaming mode)
     let mut current_chunk_index = chunk_index;
-    let mut first_chunk = true;
 
     // Helper function to send error response and return error
     async fn send_error_and_return(
@@ -880,15 +860,8 @@ async fn stream_snapshot_chunks_from_source(
             data_type: SyncDataType::SnapshotChunk as i32,
             chunk_data: compressed_data,
             entry_logs: vec![],
-            offset: chunk_metadata.file_offset,
             chunk_size: chunk_metadata.compressed_size,
             is_last_chunk: is_last,
-            total_size: if first_chunk {
-                // Only send total size in first chunk
-                total_size
-            } else {
-                0
-            },
             checksum: chunk_metadata.crc32.to_le_bytes().to_vec(),
             error_message: String::new(),
         };
@@ -902,8 +875,6 @@ async fn stream_snapshot_chunks_from_source(
             );
             return Ok(());
         }
-
-        first_chunk = false;
 
         if is_last {
             info!("Completed streaming snapshot for task {}", task_id);
@@ -930,10 +901,8 @@ async fn send_entry_log_response(
             data_type: SyncDataType::EntryLog as i32,
             chunk_data: vec![],
             entry_logs,
-            offset: 0,
             chunk_size: 0,
             is_last_chunk,
-            total_size: 0,
             checksum: vec![],
             error_message,
         }))
