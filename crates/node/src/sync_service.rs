@@ -715,13 +715,8 @@ impl SyncService for SyncServiceImpl {
                     .await
                 }
                 SyncDataType::EntryLog => {
-                    stream_entry_logs_from_source(
-                        node_clone,
-                        task_id.clone(),
-                        req.start_index,
-                        tx,
-                    )
-                    .await
+                    stream_entry_logs_from_source(node_clone, task_id.clone(), req.start_index, tx)
+                        .await
                 }
                 _ => {
                     error!("Invalid data type for sync task {}", task_id);
@@ -921,184 +916,17 @@ async fn stream_snapshot_chunks_from_source(
     Ok(())
 }
 
-/// Stream entry logs from PUSH side (source node)
-/// Reads from log replay writer file created during split operation
-async fn stream_entry_logs_from_source(
-    node: Arc<RRNode>,
-    task_id: String,
-    start_index: u64,
-    tx: tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
-) -> Result<()> {
-    use proto::sync_service::EntryLog;
-    use std::io::{BufReader, Read};
-
-    // Get log replay writer information from node
-    let writer_info = match node.get_log_replay_writer(&task_id) {
-        Some(info) => info,
-        None => {
-            let error_msg = format!("Log replay writer not found for task {}", task_id);
-            warn!("{}", error_msg);
-            let _ = tx
-                .send(Ok(PullSyncDataResponse {
-                    task_id: task_id.clone(),
-                    data_type: SyncDataType::EntryLog as i32,
-                    chunk_data: vec![],
-                    entry_logs: vec![],
-                    offset: 0,
-                    chunk_size: 0,
-                    is_last_chunk: true,
-                    total_size: 0,
-                    checksum: vec![],
-                    error_message: error_msg,
-                }))
-                .await;
-            return Ok(());
-        }
-    };
-
-    // Check metadata for latest index
-    let latest_index = {
-        let meta = writer_info.metadata.read();
-        meta.latest_index
-    };
-
-    if start_index > latest_index {
-        // No more entries to send
-        let _ = tx
-            .send(Ok(PullSyncDataResponse {
-                task_id: task_id.clone(),
-                data_type: SyncDataType::EntryLog as i32,
-                chunk_data: vec![],
-                entry_logs: vec![],
-                offset: 0,
-                chunk_size: 0,
-                is_last_chunk: true,
-                total_size: 0,
-                checksum: vec![],
-                error_message: String::new(),
-            }))
-            .await;
-        return Ok(());
-    }
-
-    // Open file for reading
-    let file = match std::fs::File::open(&writer_info.file_path) {
-        Ok(f) => f,
-        Err(e) => {
-            let error_msg = format!(
-                "Failed to open log replay file {}: {}",
-                writer_info.file_path.display(),
-                e
-            );
-            error!("{}", error_msg);
-            let _ = tx
-                .send(Ok(PullSyncDataResponse {
-                    task_id: task_id.clone(),
-                    data_type: SyncDataType::EntryLog as i32,
-                    chunk_data: vec![],
-                    entry_logs: vec![],
-                    offset: 0,
-                    chunk_size: 0,
-                    is_last_chunk: true,
-                    total_size: 0,
-                    checksum: vec![],
-                    error_message: error_msg,
-                }))
-                .await;
-            return Ok(());
-        }
-    };
-
-    let mut reader = BufReader::new(file);
-    let mut entry_logs = Vec::new();
-    let mut current_index = 0u64;
-
-    // Read entries from file
-    // File format: [index (u64)][term (u64)][data_len (u32)][data]
-    loop {
-        // Read index
-        let mut index_bytes = [0u8; 8];
-        if reader.read_exact(&mut index_bytes).is_err() {
-            break; // End of file or error
-        }
-        let index = u64::from_le_bytes(index_bytes);
-
-        // Get snapshot_index to skip entries already in snapshot
-        let snapshot_index = {
-            let snapshot_idx = writer_info.snapshot_index.read();
-            *snapshot_idx
-        };
-
-        // Skip entries before start_index or entries already in snapshot (index <= snapshot_index)
-        if index < start_index || (snapshot_index.is_some() && index <= snapshot_index.unwrap()) {
-            // Read term and data_len to skip data
-            let mut term_bytes = [0u8; 8];
-            if reader.read_exact(&mut term_bytes).is_err() {
-                break;
-            }
-            let mut len_bytes = [0u8; 4];
-            if reader.read_exact(&mut len_bytes).is_err() {
-                break;
-            }
-            let data_len = u32::from_le_bytes(len_bytes);
-            // Skip data
-            let mut skip_buf = vec![0u8; data_len as usize];
-            if reader.read_exact(&mut skip_buf).is_err() {
-                break;
-            }
-            continue;
-        }
-
-        // Read term
-        let mut term_bytes = [0u8; 8];
-        if reader.read_exact(&mut term_bytes).is_err() {
-            break;
-        }
-        let term = u64::from_le_bytes(term_bytes);
-
-        // Read data length
-        let mut len_bytes = [0u8; 4];
-        if reader.read_exact(&mut len_bytes).is_err() {
-            break;
-        }
-        let data_len = u32::from_le_bytes(len_bytes);
-
-        // Read command data
-        let mut command_data = vec![0u8; data_len as usize];
-        if reader.read_exact(&mut command_data).is_err() {
-            break;
-        }
-
-        // Deserialize command to get command type
-        let command_type = match bincode::serde::decode_from_slice::<resp::Command, _>(
-            &command_data,
-            bincode::config::standard(),
-        ) {
-            Ok((cmd, _)) => cmd.name().to_string(),
-            Err(_) => "unknown".to_string(),
-        };
-
-        // Create EntryLog
-        entry_logs.push(EntryLog {
-            index,
-            term,
-            command: command_data,
-            command_type,
-        });
-
-        current_index = index;
-
-        // Check if we've reached the latest index
-        if index >= latest_index {
-            break;
-        }
-    }
-
-    // Send entry logs
-    let is_last_chunk = current_index >= latest_index;
+/// Helper function to send entry log response
+async fn send_entry_log_response(
+    tx: &tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
+    task_id: &str,
+    entry_logs: Vec<proto::sync_service::EntryLog>,
+    is_last_chunk: bool,
+    error_message: String,
+) {
     let _ = tx
         .send(Ok(PullSyncDataResponse {
-            task_id: task_id.clone(),
+            task_id: task_id.to_string(),
             data_type: SyncDataType::EntryLog as i32,
             chunk_data: vec![],
             entry_logs,
@@ -1107,9 +935,63 @@ async fn stream_entry_logs_from_source(
             is_last_chunk,
             total_size: 0,
             checksum: vec![],
-            error_message: String::new(),
+            error_message,
         }))
         .await;
+}
+
+/// Stream entry logs from PUSH side (source node)
+/// Reads from log replay writer file created during split operation
+async fn stream_entry_logs_from_source(
+    node: Arc<RRNode>,
+    task_id: String,
+    start_index: u64,
+    tx: tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
+) -> Result<()> {
+    // Create iterator starting from start_index
+    let mut iterator = match node.create_log_replay_iterator(&task_id, start_index).await {
+        Ok(iter) => iter,
+        Err(e) => {
+            let error_msg = format!("Failed to create log replay iterator: {}", e);
+            warn!("{}", error_msg);
+            send_entry_log_response(&tx, &task_id, vec![], true, error_msg).await;
+            return Ok(());
+        }
+    };
+
+    const BATCH_SIZE: usize = 100; // Number of entries to send per batch
+    let mut entry_logs = Vec::new();
+
+    // Read entries using iterator
+    loop {
+        // Only call next() if there might be more data
+        match iterator.next().await {
+            Ok(Some(entry_log)) => {
+                entry_logs.push(entry_log);
+
+                // Send batch when full
+                if entry_logs.len() >= BATCH_SIZE {
+                    send_entry_log_response(&tx, &task_id, entry_logs, false, String::new()).await;
+                    entry_logs = Vec::new();
+                }
+            }
+            Ok(None) => {
+                // Iterator exhausted (should not happen with current implementation)
+                break;
+            }
+            Err(e) => {
+                let error_msg = format!("Error reading log replay entry: {}", e);
+                error!("{}", error_msg);
+                send_entry_log_response(&tx, &task_id, vec![], true, error_msg).await;
+                return Ok(());
+            }
+        }
+    }
+
+    // Send remaining entries
+    if !entry_logs.is_empty() {
+        send_entry_log_response(&tx, &task_id, entry_logs, false, String::new()).await;
+    }
 
     Ok(())
 }

@@ -106,8 +106,6 @@ message EntryLog {
   uint64 term = 2;
   /// Command data
   bytes command = 3;
-  /// Command type
-  string command_type = 4;
 }
 
 /// Get sync status request

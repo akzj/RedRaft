@@ -297,27 +297,42 @@ impl RRNode {
         self.log_replay_writers.write().insert(task_id, writer);
     }
 
-    /// Get log replay writer for a split task
+    /// Create log replay iterator for a split task
     ///
     /// # Arguments
     /// - `task_id`: Split task ID
+    /// - `start_index`: Starting apply_index to read from
     ///
     /// # Returns
-    /// - `Some(LogReplayWriterInfo)`: Log replay writer info if exists (extracted from writer)
-    /// - `None`: If task does not exist
-    pub fn get_log_replay_writer(
+    /// - `Ok(LogReplayIterator)`: Iterator if task exists
+    /// - `Err`: If task does not exist or iterator creation fails
+    pub async fn create_log_replay_iterator(
         &self,
         task_id: &str,
-    ) -> Option<crate::log_replay_writer::LogReplayWriterInfo> {
-        self.log_replay_writers.read().get(task_id).map(|writer| {
-            crate::log_replay_writer::LogReplayWriterInfo {
-                file_path: writer.file_path().clone(),
-                metadata: writer.metadata(),
-                notify: writer.notify(),
-                cache: writer.cache(),
-                snapshot_index: writer.snapshot_index(),
-            }
-        })
+        start_index: u64,
+    ) -> anyhow::Result<crate::log_replay_writer::LogReplayIterator> {
+        use crate::log_replay_writer::LogReplayIterator;
+
+        let writer_info = self
+            .log_replay_writers
+            .read()
+            .get(task_id)
+            .map(|writer| {
+                let file_path = writer.file_path().clone();
+                let mut index_file_path = file_path.clone();
+                index_file_path.set_extension("idx");
+                crate::log_replay_writer::LogReplayWriterInfo {
+                    file_path,
+                    index_file_path,
+                    metadata: writer.metadata(),
+                    notify: writer.notify(),
+                    cache: writer.cache(),
+                    snapshot_index: writer.snapshot_index(),
+                }
+            })
+            .ok_or_else(|| anyhow::anyhow!("Log replay writer not found for task {}", task_id))?;
+
+        LogReplayIterator::new(writer_info, start_index).await
     }
 
     /// Set snapshot index for log replay writer
@@ -325,9 +340,17 @@ impl RRNode {
     /// # Arguments
     /// - `task_id`: Split task ID
     /// - `snapshot_index`: Snapshot apply_index - entries with index <= this value are already in snapshot
-    pub fn set_log_replay_snapshot_index(&self, task_id: &str, snapshot_index: u64) {
-        if let Some(writer) = self.log_replay_writers.read().get(task_id) {
-            writer.set_snapshot_index(snapshot_index);
+    pub async fn set_log_replay_snapshot_index(&self, task_id: &str, snapshot_index: u64) {
+        // Get snapshot_index Arc reference to avoid holding the lock across await
+        let snapshot_index_arc = {
+            self.log_replay_writers
+                .read()
+                .get(task_id)
+                .map(|writer| writer.snapshot_index())
+        };
+
+        if let Some(snapshot_index_arc) = snapshot_index_arc {
+            *snapshot_index_arc.write().await = Some(snapshot_index);
         }
     }
 

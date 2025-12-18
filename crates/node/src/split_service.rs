@@ -301,7 +301,9 @@ impl SplitServiceImpl {
             log_replay_file_path.clone(),
             100,                        // batch_size
             Duration::from_millis(100), // flush_interval
-        ) {
+        )
+        .await
+        {
             Ok(writer) => writer,
             Err(e) => {
                 error!(
@@ -509,7 +511,7 @@ impl SplitServiceImpl {
 
         // Set snapshot_index in log_replay_writer to skip duplicate entries
         // Entries with index <= snapshot_index are already included in the snapshot
-        node.set_log_replay_snapshot_index(&task_id, snapshot_index);
+        node.set_log_replay_snapshot_index(&task_id, snapshot_index).await;
         info!(
             "Set snapshot_index {} for log replay writer in task {}",
             snapshot_index, task_id
