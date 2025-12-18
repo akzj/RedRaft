@@ -19,6 +19,7 @@ use proto::sync_service::{
     GetSyncStatusResponse, PullSyncDataRequest, PullSyncDataResponse, StartSyncRequest,
     StartSyncResponse, SyncDataType, SyncPhase, SyncProgress, SyncStatus, SyncType,
 };
+use raft::{Event, RequestId};
 use storage::store::HybridStore;
 use storage::traits::{
     HashStore, KeyStore, ListStore, SetStore, SnapshotStoreEntry, StringStore, ZSetStore,
@@ -565,12 +566,37 @@ impl SyncServiceImpl {
                                 }
 
                                 if !chunk.entry_logs.is_empty() {
-                                    // TODO: Apply entry logs to target shard
-                                    // This would involve:
-                                    // - Getting target shard RaftId
-                                    // - Converting EntryLog to LogEntry
-                                    // - Applying logs through Raft (or directly to state machine)
-                                    // - Ensuring logs are applied in order
+                                    // Get target shard RaftId
+                                    let raft_id = node
+                                        .get_raft_group(&target_shard_id)
+                                        .ok_or_else(|| {
+                                            format!("Target shard {} not found", target_shard_id)
+                                        })?;
+
+                                    // Apply entry logs to target shard through Raft
+                                    for entry_log in &chunk.entry_logs {
+                                        // Convert EntryLog to Event::ClientPropose
+                                        // EntryLog contains: index, term, command (bytes)
+                                        // We use the command directly and let Raft assign new index/term
+                                        let event = Event::ClientPropose {
+                                            cmd: entry_log.command.clone(),
+                                            request_id: RequestId::new(),
+                                        };
+
+                                        // Dispatch event to Raft group
+                                        match node.driver().dispatch_event(raft_id.clone(), event) {
+                                            raft::multi_raft_driver::SendEventResult::Success => {
+                                                // Event sent successfully
+                                            }
+                                            _ => {
+                                                warn!(
+                                                    "Failed to dispatch entry log event for task {} at index {}",
+                                                    task_id, entry_log.index
+                                                );
+                                                // Continue processing other entries
+                                            }
+                                        }
+                                    }
 
                                     batch_entries += chunk.entry_logs.len() as u64;
                                     total_entries += chunk.entry_logs.len() as u64;

@@ -167,6 +167,11 @@ impl RRNode {
         &self.snapshot_transfer_manager
     }
 
+    /// Get multi-raft driver (for dispatching events to Raft groups)
+    pub fn driver(&self) -> &raft::multi_raft_driver::MultiRaftDriver {
+        &self.driver
+    }
+
     /// Get routing table
     pub fn routing_table(&self) -> &Arc<RoutingTable> {
         &self.routing_table
