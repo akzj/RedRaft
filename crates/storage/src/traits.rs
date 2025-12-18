@@ -797,7 +797,7 @@ pub trait SnapshotStore: Send + Sync {
 /// }
 /// ```
 pub trait RedisStore:
-    StringStore + ListStore + HashStore + SetStore + KeyStore + SnapshotStore + Send + Sync
+    StringStore + ListStore + HashStore + SetStore + ZSetStore + KeyStore + SnapshotStore + Send + Sync
 {
     /// Execute Redis command
     ///

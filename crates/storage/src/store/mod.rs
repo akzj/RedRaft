@@ -17,6 +17,7 @@ mod redis;
 mod set;
 mod snapshot;
 mod string;
+mod zset;
 
 use crate::memory::{self, MemStoreCow};
 use crate::rocksdb::ShardedRocksDB;

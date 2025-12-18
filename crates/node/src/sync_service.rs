@@ -19,6 +19,10 @@ use proto::sync_service::{
     GetSyncStatusResponse, PullSyncDataRequest, PullSyncDataResponse, StartSyncRequest,
     StartSyncResponse, SyncDataType, SyncPhase, SyncProgress, SyncStatus, SyncType,
 };
+use storage::store::HybridStore;
+use storage::traits::{
+    HashStore, KeyStore, ListStore, SetStore, SnapshotStoreEntry, StringStore, ZSetStore,
+};
 
 /// Sync task state
 #[derive(Debug, Clone)]
@@ -261,12 +265,137 @@ impl SyncServiceImpl {
         Ok(SyncServiceClient::new((*channel_arc).clone()))
     }
 
+    /// Process snapshot chunk data
+    /// Decompresses chunk data and applies entries to target shard store
+    /// Uses spawn_blocking for CPU-intensive operations (decompression, deserialization, and applying entries)
+    async fn process_snapshot_chunk_data(
+        store: &Arc<HybridStore>,
+        chunk_data: Vec<u8>,
+        is_last_chunk: bool,
+    ) -> anyhow::Result<u64> {
+        let store_clone = store.clone();
+
+        // Spawn blocking task for CPU-intensive operations: decompression, deserialization, and applying entries
+        tokio::task::spawn_blocking(move || {
+            // Decompress chunk data (CPU-intensive operation)
+            let decompressed = zstd::decode_all(&chunk_data[..])
+                .map_err(|e| anyhow::anyhow!("Failed to decompress chunk: {}", e))?;
+
+            // Deserialize and apply entries sequentially to maintain order and reduce memory usage
+            let mut entry_count = 0u64;
+            let mut cursor = 0;
+
+            while cursor < decompressed.len() {
+                // Deserialize entry
+                let (entry, bytes_read) =
+                    match bincode::serde::decode_from_slice::<SnapshotStoreEntry, _>(
+                        &decompressed[cursor..],
+                        bincode::config::standard(),
+                    ) {
+                        Ok((entry, bytes_read)) => (entry, bytes_read),
+                        Err(e) => {
+                            return Err(anyhow::anyhow!(
+                                "Failed to deserialize snapshot entry at offset {}: {}",
+                                cursor,
+                                e
+                            ));
+                        }
+                    };
+
+                cursor += bytes_read;
+
+                // Apply entry to store immediately
+                match Self::apply_snapshot_entry_to_store(&store_clone, entry) {
+                    Ok(should_return) => {
+                        if should_return {
+                            // Completed or error signal received
+                            return Ok(entry_count);
+                        }
+                        entry_count += 1;
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("Failed to apply snapshot entry: {}", e));
+                    }
+                }
+            }
+
+            Ok(entry_count)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Blocking task failed: {}", e))?
+    }
+
+    /// Apply a single snapshot entry to store
+    /// Returns true if we should return early (e.g., Completed or Error)
+    fn apply_snapshot_entry_to_store(
+        store: &Arc<HybridStore>,
+        entry: SnapshotStoreEntry,
+    ) -> anyhow::Result<bool> {
+        match entry {
+            SnapshotStoreEntry::Completed => {
+                info!("Received completion signal, snapshot restore finished");
+                return Ok(true);
+            }
+            SnapshotStoreEntry::Error(err) => {
+                return Err(anyhow::anyhow!("Snapshot restore error: {}", err));
+            }
+            SnapshotStoreEntry::String(key, value, apply_index) => {
+                store
+                    .set(&key, value, apply_index)
+                    .map_err(|e| anyhow::anyhow!("Failed to restore String entry: {}", e))?;
+            }
+            SnapshotStoreEntry::Hash(key, field, value, apply_index) => {
+                store
+                    .hset(&key, &field, value, apply_index)
+                    .map_err(|e| anyhow::anyhow!("Failed to restore Hash entry: {}", e))?;
+            }
+            SnapshotStoreEntry::List(key, element, apply_index) => {
+                store
+                    .rpush(&key, vec![element], apply_index)
+                    .map_err(|e| anyhow::anyhow!("Failed to restore List entry: {}", e))?;
+            }
+            SnapshotStoreEntry::Set(key, member, apply_index) => {
+                store
+                    .sadd(&key, vec![member], apply_index)
+                    .map_err(|e| anyhow::anyhow!("Failed to restore Set entry: {}", e))?;
+            }
+            SnapshotStoreEntry::ZSet(key, score, member, apply_index) => {
+                store
+                    .zadd(&key, vec![(score, member)], apply_index)
+                    .map_err(|e| anyhow::anyhow!("Failed to restore ZSet entry: {}", e))?;
+            }
+            SnapshotStoreEntry::Bitmap(key, bitmap, apply_index) => {
+                // Bitmap is stored as bytes, need to set bits
+                // For now, we'll store it as a string value
+                // TODO: Implement proper bitmap restoration
+                store
+                    .set(&key, bitmap, apply_index)
+                    .map_err(|e| anyhow::anyhow!("Failed to restore Bitmap entry: {}", e))?;
+            }
+        }
+
+        Ok(false)
+    }
+
     /// Handle snapshot transfer for sync task
     async fn handle_snapshot_transfer(
+        node: &Arc<RRNode>,
         task_manager: &Arc<SyncTaskManager>,
         sync_client: &mut SyncServiceClient<tonic::transport::Channel>,
         task_id: &str,
     ) -> Result<(), String> {
+        // Get target shard ID from task
+        let task = task_manager
+            .get_task(task_id)
+            .ok_or_else(|| format!("Sync task {} not found", task_id))?;
+
+        // Get target shard store
+        let store = node
+            .get_state_machine(&task.target_shard_id)
+            .ok_or_else(|| format!("Target shard {} not found", task.target_shard_id))?
+            .store()
+            .clone();
+
         if let Err(e) = task_manager.update_task_status(
             task_id,
             SyncStatus::InProgress,
@@ -288,21 +417,38 @@ impl SyncServiceImpl {
             Ok(response) => {
                 let mut stream = response.into_inner();
                 let mut total_bytes = 0u64;
-                let mut first_chunk = true;
+                let mut total_entries = 0u64;
 
                 while let Some(chunk_result) = stream.message().await.transpose() {
                     match chunk_result {
                         Ok(chunk) => {
-                            // Process chunk (total_size field removed)
-                            first_chunk = false;
-
                             total_bytes += chunk.chunk_size as u64;
 
-                            // TODO: Apply chunk to target shard
-                            // This would involve:
-                            // - Getting target shard state machine
-                            // - Writing chunk data to snapshot file or applying directly
-                            // - Updating progress
+                            // Process chunk_data: decompress and apply entries
+                            if !chunk.chunk_data.is_empty() {
+                                match Self::process_snapshot_chunk_data(
+                                    &store,
+                                    chunk.chunk_data,
+                                    chunk.is_last_chunk,
+                                )
+                                .await
+                                {
+                                    Ok(entry_count) => {
+                                        total_entries += entry_count;
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "Failed to process snapshot chunk for task {}: {}",
+                                            task_id, e
+                                        );
+                                        let _ = task_manager.set_task_error(
+                                            task_id,
+                                            format!("Failed to process chunk: {}", e),
+                                        );
+                                        return Err(format!("Failed to process chunk: {}", e));
+                                    }
+                                }
+                            }
 
                             // Update progress
                             let mut progress = task_manager
@@ -345,12 +491,26 @@ impl SyncServiceImpl {
 
     /// Handle entry log transfer for sync task
     async fn handle_entry_log_transfer(
+        node: &Arc<RRNode>,
         task_manager: &Arc<SyncTaskManager>,
         sync_client: &mut SyncServiceClient<tonic::transport::Channel>,
         task_id: &str,
         start_index: u64,
         end_index: u64,
     ) -> Result<(), String> {
+        // Get target shard ID from task
+        let task = task_manager
+            .get_task(task_id)
+            .ok_or_else(|| format!("Sync task {} not found", task_id))?;
+        let target_shard_id = task.target_shard_id.clone();
+
+        // Get target shard store
+        let store = node
+            .get_state_machine(&target_shard_id)
+            .ok_or_else(|| format!("Target shard {} not found", target_shard_id))?
+            .store()
+            .clone();
+
         if let Err(e) =
             task_manager.update_task_status(task_id, SyncStatus::InProgress, SyncPhase::LogReplay)
         {
@@ -378,6 +538,32 @@ impl SyncServiceImpl {
                     while let Some(chunk_result) = stream.message().await.transpose() {
                         match chunk_result {
                             Ok(chunk) => {
+                                // Process chunk_data if present (for snapshot chunks)
+                                if !chunk.chunk_data.is_empty() {
+                                    match Self::process_snapshot_chunk_data(
+                                        &store,
+                                        chunk.chunk_data,
+                                        chunk.is_last_chunk,
+                                    )
+                                    .await
+                                    {
+                                        Ok(_entry_count) => {
+                                            // Chunk processed successfully
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "Failed to process snapshot chunk for task {}: {}",
+                                                task_id, e
+                                            );
+                                            let _ = task_manager.set_task_error(
+                                                task_id,
+                                                format!("Failed to process chunk: {}", e),
+                                            );
+                                            return Err(format!("Failed to process chunk: {}", e));
+                                        }
+                                    }
+                                }
+
                                 if !chunk.entry_logs.is_empty() {
                                     // TODO: Apply entry logs to target shard
                                     // This would involve:
@@ -505,8 +691,13 @@ impl SyncServiceImpl {
 
         // 2. Pull snapshot chunks if needed (for FULL_SYNC or SNAPSHOT_ONLY)
         if sync_type == SyncType::FullSync || sync_type == SyncType::SnapshotOnly {
-            if let Err(e) =
-                Self::handle_snapshot_transfer(&task_manager, &mut sync_client, &task_id).await
+            if let Err(e) = Self::handle_snapshot_transfer(
+                &sync_service_impl.node,
+                &task_manager,
+                &mut sync_client,
+                &task_id,
+            )
+            .await
             {
                 error!("Failed to transfer snapshot for task {}: {}", task_id, e);
                 let _ = task_manager.set_task_error(&task_id, e);
@@ -517,6 +708,7 @@ impl SyncServiceImpl {
         // 3. Pull entry logs if needed (for FULL_SYNC or INCREMENTAL_SYNC)
         if sync_type == SyncType::FullSync || sync_type == SyncType::IncrementalSync {
             if let Err(e) = Self::handle_entry_log_transfer(
+                &sync_service_impl.node,
                 &task_manager,
                 &mut sync_client,
                 &task_id,

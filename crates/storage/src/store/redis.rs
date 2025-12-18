@@ -12,4 +12,3 @@ impl RedisStore for HybridStore {
         HybridStore::apply_with_index(self, read_index, apply_index, cmd)
     }
 }
-
