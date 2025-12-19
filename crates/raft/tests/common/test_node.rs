@@ -240,6 +240,17 @@ impl TestNode {
         self.state_machine.get_all_data()
     }
 
+    // Directly modify state machine (for testing purposes, bypassing Raft protocol)
+    // This simulates direct state machine modification, e.g., during split operations
+    pub fn direct_set_state(&self, key: String, value: String) {
+        self.state_machine.direct_set(key, value);
+    }
+
+    // Directly delete from state machine (for testing purposes)
+    pub fn direct_delete_state(&self, key: &str) {
+        self.state_machine.direct_delete(key);
+    }
+
     pub async fn isolate(&self) {
         info!("Isolating node {:?}", self.id);
         self.network.isolate().await;
@@ -308,6 +319,12 @@ impl TestNode {
     pub async fn get_last_applied(&self) -> u64 {
         let state = self.raft_state.lock().await;
         state.get_last_applied()
+    }
+
+    /// Get the current node's last_snapshot_index
+    pub async fn get_last_snapshot_index(&self) -> u64 {
+        let state = self.raft_state.lock().await;
+        state.last_snapshot_index
     }
 }
 

@@ -196,6 +196,26 @@ impl TestCluster {
         }
     }
 
+    // Trigger bootstrap snapshot creation
+    pub fn trigger_bootstrap_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
+        let event = raft::Event::CreateSnapshot(raft::message::CreateSnapshot { bootstrap: true });
+
+        match self.driver.dispatch_event(leader_id.clone(), event) {
+            raft::multi_raft_driver::SendEventResult::Success => {
+                return Ok(());
+            }
+            raft::multi_raft_driver::SendEventResult::NotFound => {
+                warn!("Node {:?} not found for bootstrap snapshot", leader_id);
+                return Err(format!("Node {:?} not found", leader_id));
+            }
+            raft::multi_raft_driver::SendEventResult::SendFailed
+            | raft::multi_raft_driver::SendEventResult::ChannelFull => {
+                warn!("Failed to send bootstrap snapshot event to node {:?}", leader_id);
+                return Err(format!("Failed to send event to node {:?}", leader_id));
+            }
+        }
+    }
+
     // Get current leader
     pub async fn get_current_leader(&self) -> Vec<RaftId> {
         let mut leaders = Vec::new();

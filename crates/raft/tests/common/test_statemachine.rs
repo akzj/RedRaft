@@ -169,4 +169,15 @@ impl TestStateMachine {
     pub fn get_value(&self, key: &str) -> Option<String> {
         self.store.read().unwrap().get(key)
     }
+
+    // Directly modify state machine (for testing purposes, bypassing Raft protocol)
+    // This simulates direct state machine modification, e.g., during split operations
+    pub fn direct_set(&self, key: String, value: String) {
+        self.store.write().unwrap().set(key, value);
+    }
+
+    // Directly delete from state machine (for testing purposes)
+    pub fn direct_delete(&self, key: &str) {
+        self.store.write().unwrap().delete(key);
+    }
 }
