@@ -177,7 +177,11 @@ impl RaftState {
     }
 
     /// Handle Pre-Vote request
-    pub(crate) async fn handle_pre_vote_request(&mut self, sender: RaftId, request: PreVoteRequest) {
+    pub(crate) async fn handle_pre_vote_request(
+        &mut self,
+        sender: RaftId,
+        request: PreVoteRequest,
+    ) {
         if sender != request.candidate_id {
             warn!(
                 "Node {} received pre-vote request from {}, but candidate is {}",
@@ -245,7 +249,11 @@ impl RaftState {
     }
 
     /// Handle Pre-Vote response
-    pub(crate) async fn handle_pre_vote_response(&mut self, peer: RaftId, response: PreVoteResponse) {
+    pub(crate) async fn handle_pre_vote_response(
+        &mut self,
+        peer: RaftId,
+        response: PreVoteResponse,
+    ) {
         // Check if it's the current Pre-Vote round
         if self.current_pre_vote_id != Some(response.request_id) {
             debug!(
@@ -278,7 +286,8 @@ impl RaftState {
         }
 
         // Record Pre-Vote result
-        self.pre_vote_votes.insert(peer.clone(), response.vote_granted);
+        self.pre_vote_votes
+            .insert(peer.clone(), response.vote_granted);
         info!(
             "Node {} received pre-vote response from {}: granted={}",
             self.id, peer, response.vote_granted
@@ -522,8 +531,7 @@ impl RaftState {
         {
             error!(
                 "Failed to change state to Leader for node {}: {}",
-                self.id,
-                err
+                self.id, err
             );
         }
 
@@ -575,4 +583,3 @@ impl RaftState {
         );
     }
 }
-

@@ -178,8 +178,7 @@ impl TestCluster {
 
     // Send business command
     pub fn trigger_snapshot(&self, leader_id: &RaftId) -> Result<(), String> {
-        let request_id = raft::RequestId::new();
-        let event = raft::Event::CreateSnapshot {};
+        let event = raft::Event::CreateSnapshot(raft::message::CreateSnapshot { bootstrap: false });
 
         match self.driver.dispatch_event(leader_id.clone(), event) {
             raft::multi_raft_driver::SendEventResult::Success => {

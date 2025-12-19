@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fmt::{self, Display};
 
 use crate::message::{
-    AppendEntriesRequest, AppendEntriesResponse, CompleteSnapshotInstallation,
+    AppendEntriesRequest, AppendEntriesResponse, CompleteSnapshotInstallation, CreateSnapshot,
     InstallSnapshotRequest, InstallSnapshotResponse, PreVoteRequest, PreVoteResponse,
     RequestVoteRequest, RequestVoteResponse, SnapshotCreated,
 };
@@ -41,18 +41,13 @@ pub enum Event {
 
     // ========== Client Requests ==========
     /// Client proposes a command
-    ClientPropose {
-        cmd: Command,
-        request_id: RequestId,
-    },
+    ClientPropose { cmd: Command, request_id: RequestId },
     /// ReadIndex request (for linearizable reads)
-    ReadIndex {
-        request_id: RequestId,
-    },
+    ReadIndex { request_id: RequestId },
 
     // ========== Snapshot ==========
     /// Trigger async snapshot creation
-    CreateSnapshot,
+    CreateSnapshot(CreateSnapshot),
     /// Snapshot creation completed (async notification)
     SnapshotCreated(SnapshotCreated),
     /// Install snapshot request from Leader
@@ -108,4 +103,3 @@ impl Display for Role {
         }
     }
 }
-

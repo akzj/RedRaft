@@ -530,7 +530,7 @@ impl RaftState {
             }
 
             // ========== Snapshot ==========
-            Event::CreateSnapshot => self.trigger_snapshot_creation().await,
+            Event::CreateSnapshot(request) => self.trigger_snapshot_creation(Some(request)).await,
             Event::SnapshotCreated(result) => self.handle_snapshot_created(result).await,
             Event::InstallSnapshotRequest(sender, request) => {
                 self.handle_install_snapshot(sender, request).await

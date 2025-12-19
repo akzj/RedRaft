@@ -8,7 +8,7 @@ use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::{Command, RaftId, RequestId, cluster_config::ClusterConfig};
+use crate::{cluster_config::ClusterConfig, Command, RaftId, RequestId};
 
 // === Network Interfaces ===
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,13 +18,12 @@ pub struct InstallSnapshotRequest {
     pub last_included_index: u64,
     pub last_included_term: u64,
     pub data: Vec<u8>,
-    pub config: ClusterConfig,          // Cluster config information included in snapshot
+    pub config: ClusterConfig, // Cluster config information included in snapshot
     pub snapshot_request_id: RequestId, // Snapshot request ID
-    pub request_id: RequestId,          // Request ID
+    pub request_id: RequestId, // Request ID
     // Empty message flag - used to probe installation status
     pub is_probe: bool,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompleteSnapshotInstallation {
@@ -43,6 +42,11 @@ pub struct SnapshotCreated {
     pub term: u64,
     pub success: bool,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateSnapshot {
+    pub bootstrap: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -86,7 +90,7 @@ pub struct LogEntry {
     pub term: u64,
     pub index: u64,
     pub command: Command,
-    pub is_config: bool,                      // Flag indicating if this is a config change log
+    pub is_config: bool, // Flag indicating if this is a config change log
     pub client_request_id: Option<RequestId>, // Associated client request ID for deduplication
 }
 

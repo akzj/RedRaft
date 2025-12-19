@@ -119,8 +119,8 @@ use super::RaftState;
 use crate::error::SnapshotError;
 use crate::event::Role;
 use crate::message::{
-    CompleteSnapshotInstallation, HardState, InstallSnapshotRequest, InstallSnapshotResponse,
-    InstallSnapshotState, Snapshot, SnapshotProbeSchedule,
+    CompleteSnapshotInstallation, CreateSnapshot, HardState, InstallSnapshotRequest,
+    InstallSnapshotResponse, InstallSnapshotState, Snapshot, SnapshotProbeSchedule,
 };
 use crate::types::{RaftId, RequestId};
 use crate::Event;
@@ -769,53 +769,53 @@ impl RaftState {
     ///
     /// This method spawns a background task to create the snapshot,
     /// avoiding blocking the Raft event loop during snapshot creation.
-    pub(crate) async fn trigger_snapshot_creation(&mut self) {
+    ///
+    /// # Bootstrap Mode
+    /// When `bootstrap = true` and `last_applied == commit_index` (no pending requests),
+    /// creates a snapshot at `snapshot_index = last_applied + 1` to force snapshot
+    /// distribution to all followers (useful for split operations in multi-raft).
+    pub(crate) async fn trigger_snapshot_creation(
+        &mut self,
+        request: Option<crate::message::CreateSnapshot>,
+    ) {
         // Check if snapshot creation is already in progress
         if self.snapshot_in_progress {
             info!("Snapshot creation already in progress, skipping");
             return;
         }
 
-        // Check if there are new committed logs to snapshot
-        if self.commit_index <= self.last_snapshot_index {
-            info!(
-                "No new committed logs to snapshot (commit_index: {}, last_snapshot_index: {})",
-                self.commit_index, self.last_snapshot_index
-            );
-            return;
-        }
+        // Determine snapshot index based on bootstrap mode
+        let bootstrap_snapshot_index = if let Some(create_snapshot) = &request {
+            // Bootstrap mode: check if last_applied == commit_index (no pending requests)
+            if create_snapshot.bootstrap {
+                if self.last_applied != self.commit_index {
+                    warn!(
+                        "Bootstrap snapshot creation skipped: last_applied ({}) != commit_index ({}), pending requests exist",
+                        self.last_applied, self.commit_index
+                    );
+                    return;
+                }
+                // Generate snapshot at last_applied + 1 to force snapshot distribution
+                let bootstrap_index = self.last_applied + 1;
+                info!(
+                    "Bootstrap snapshot creation: last_applied={}, commit_index={}, snapshot_index={}",
+                    self.last_applied, self.commit_index, bootstrap_index
+                );
+                Some(bootstrap_index)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // Mark snapshot creation as in progress
         self.snapshot_in_progress = true;
-
-        let snapshot_index = self.commit_index;
-        let snapshot_term = if snapshot_index == 0 {
-            0
-        } else if snapshot_index <= self.last_snapshot_index {
-            self.last_snapshot_term
-        } else {
-            match self.callbacks.get_log_term(&self.id, snapshot_index).await {
-                Ok(term) => term,
-                Err(e) => {
-                    error!(
-                        "Failed to get log term for snapshot at index {}: {}",
-                        snapshot_index, e
-                    );
-                    self.snapshot_in_progress = false;
-                    return;
-                }
-            }
-        };
 
         let config = self.config.clone();
         let id = self.id.clone();
         let callbacks = self.callbacks.clone();
         let event_sender = self.callbacks.clone();
-
-        info!(
-            "Starting async snapshot creation at index {}, term {}",
-            snapshot_index, snapshot_term
-        );
 
         // Spawn background task for snapshot creation
         tokio::spawn(async move {
@@ -826,7 +826,7 @@ impl RaftState {
                 .create_snapshot(&id, config, callbacks.clone())
                 .await;
 
-            let (success, snap_index, snap_term, error) = match result {
+            let (success, mut snap_index, snap_term, error) = match result {
                 Ok((idx, term)) => (true, idx, term, None),
                 Err(e) => {
                     error!("Failed to create snapshot: {:?}", e);
@@ -836,9 +836,25 @@ impl RaftState {
 
             let elapsed = begin.elapsed();
             info!(
-                "Snapshot creation task completed: success={}, index={}, term={}, elapsed={:?}",
-                success, snap_index, snap_term, elapsed
+                "Snapshot creation task completed: success={}, actual_index={}, term={}, elapsed={:?}",
+                success, snap_index,  snap_term, elapsed
             );
+
+            if let Some(bootstrap_snapshot_index) = bootstrap_snapshot_index {
+                if snap_index + 1 != bootstrap_snapshot_index {
+                    error!(
+                        "Bootstrap snapshot index mismatch: expected {}, got {}",
+                        bootstrap_snapshot_index,
+                        snap_index + 1
+                    );
+                } else {
+                    info!(
+                        "Bootstrap snapshot creation: index={}, term={}",
+                        snap_index, snap_term
+                    );
+                    snap_index = bootstrap_snapshot_index;
+                }
+            }
 
             // Send completion event back to Raft state
             let event = crate::Event::SnapshotCreated(crate::message::SnapshotCreated {
@@ -906,5 +922,17 @@ impl RaftState {
             "Snapshot created: index={}, term={}, last_applied={}, commit_index={}",
             self.last_snapshot_index, self.last_snapshot_term, self.last_applied, self.commit_index
         );
+
+        // If Leader, trigger broadcast to force snapshot distribution to all followers
+        // This is especially important for bootstrap mode where snapshot_index = apply_index + 1
+        // ensures next_index <= last_snapshot_index, triggering snapshot transmission
+        if self.role == crate::event::Role::Leader {
+            info!(
+                "Leader {} triggering broadcast after snapshot creation to distribute snapshot index {} to followers",
+                self.id, snap_index
+            );
+            // Call broadcast_append_entries directly (it's implemented on RaftState)
+            self.broadcast_append_entries().await;
+        }
     }
 }

@@ -40,10 +40,9 @@ pub struct SyncTask {
     pub target_node_id: String,
     /// Sync type
     pub sync_type: i32,
-    /// Starting Raft index
-    pub start_index: u64,
-    /// Ending Raft index (0 means to end)
-    pub end_index: u64,
+    /// Starting sequential index (seq_index) for incremental sync (starts from 1)
+    /// This is the sequential index from log_replay_writer, not Raft index
+    pub start_seq_index: u64,
     /// Slot range to sync
     pub slot_start: u32,
     pub slot_end: u32,
@@ -69,8 +68,7 @@ impl SyncTask {
         source_node_id: String,
         target_node_id: String,
         sync_type: SyncType,
-        start_index: u64,
-        end_index: u64,
+        start_seq_index: u64,
         slot_start: u32,
         slot_end: u32,
     ) -> Self {
@@ -86,8 +84,7 @@ impl SyncTask {
             source_node_id,
             target_node_id,
             sync_type: sync_type as i32,
-            start_index,
-            end_index,
+            start_seq_index,
             slot_start,
             slot_end,
             status: SyncStatus::Preparing as i32,
@@ -99,8 +96,8 @@ impl SyncTask {
                 bytes_transferred: 0,
                 entries_transferred: 0,
                 entries_total: 0,
-                current_index: start_index,
-                target_index: end_index,
+                current_index: start_seq_index,
+                target_index: 0, // Not applicable for real-time incremental sync
                 estimated_seconds_remaining: 0,
             },
             created_at: now,
@@ -138,8 +135,7 @@ impl SyncTaskManager {
         source_node_id: String,
         target_node_id: String,
         sync_type: SyncType,
-        start_index: u64,
-        end_index: u64,
+        start_seq_index: u64,
         slot_start: u32,
         slot_end: u32,
     ) -> Result<(), String> {
@@ -155,8 +151,7 @@ impl SyncTaskManager {
             source_node_id,
             target_node_id,
             sync_type,
-            start_index,
-            end_index,
+            start_seq_index,
             slot_start,
             slot_end,
         );
@@ -411,7 +406,7 @@ impl SyncServiceImpl {
             data_type: SyncDataType::SnapshotChunk as i32,
             chunk_index: 0,              // Start from first chunk
             max_chunk_size: 1024 * 1024, // 1MB chunks
-            start_index: 0,
+            start_seq_index: 0,
         };
 
         match sync_client.pull_sync_data(Request::new(pull_request)).await {
@@ -496,8 +491,7 @@ impl SyncServiceImpl {
         task_manager: &Arc<SyncTaskManager>,
         sync_client: &mut SyncServiceClient<tonic::transport::Channel>,
         task_id: &str,
-        start_index: u64,
-        end_index: u64,
+        start_seq_index: u64,
     ) -> Result<(), String> {
         // Get target shard ID from task
         let task = task_manager
@@ -518,8 +512,8 @@ impl SyncServiceImpl {
             error!("Failed to update sync task phase: {}", e);
         }
 
-        // Pull entry logs from source node
-        let mut current_index = start_index;
+        // Pull entry logs from source node (real-time incremental sync)
+        let mut current_seq_index = start_seq_index;
         let mut total_entries = 0u64;
 
         loop {
@@ -528,7 +522,7 @@ impl SyncServiceImpl {
                 data_type: SyncDataType::EntryLog as i32,
                 chunk_index: 0, // Not used for entry logs
                 max_chunk_size: 0,
-                start_index: current_index,
+                start_seq_index: current_seq_index,
             };
 
             match sync_client.pull_sync_data(Request::new(pull_request)).await {
@@ -567,9 +561,8 @@ impl SyncServiceImpl {
 
                                 if !chunk.entry_logs.is_empty() {
                                     // Get target shard RaftId
-                                    let raft_id = node
-                                        .get_raft_group(&target_shard_id)
-                                        .ok_or_else(|| {
+                                    let raft_id =
+                                        node.get_raft_group(&target_shard_id).ok_or_else(|| {
                                             format!("Target shard {} not found", target_shard_id)
                                         })?;
 
@@ -601,9 +594,9 @@ impl SyncServiceImpl {
                                     batch_entries += chunk.entry_logs.len() as u64;
                                     total_entries += chunk.entry_logs.len() as u64;
 
-                                    // Update current index
+                                    // Update current seq_index (for resumable transfer)
                                     if let Some(last_entry) = chunk.entry_logs.last() {
-                                        current_index = last_entry.index + 1;
+                                        current_seq_index = last_entry.seq_index + 1;
                                     }
 
                                     // Update progress
@@ -612,14 +605,9 @@ impl SyncServiceImpl {
                                         .map(|t| t.progress)
                                         .unwrap_or_default();
                                     progress.entries_transferred = total_entries;
-                                    progress.current_index = current_index;
-                                    if end_index > 0 && end_index > start_index {
-                                        progress.entries_total = end_index - start_index;
-                                        progress.log_replay_progress_percent =
-                                            (((current_index - start_index) * 100)
-                                                / (end_index - start_index))
-                                                as u32;
-                                    }
+                                    progress.current_index = current_seq_index;
+                                    // Note: entries_total and log_replay_progress_percent are not applicable
+                                    // for real-time incremental sync as we don't know the end point
                                     let _ = task_manager.update_task_progress(task_id, progress);
                                 }
 
@@ -649,15 +637,10 @@ impl SyncServiceImpl {
                         }
                     }
 
-                    // If no entries were received, we're done
+                    // If no entries were received, wait a bit and retry (real-time sync)
                     if batch_entries == 0 {
-                        break;
-                    }
-
-                    // Check if we've reached the end index
-                    if end_index > 0 && current_index >= end_index {
-                        info!("Reached end index {} for task {}", end_index, task_id);
-                        break;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        continue;
                     }
                 }
                 Err(e) => {
@@ -678,12 +661,11 @@ impl SyncServiceImpl {
         source_node_id: String,
         source_shard_id: String,
         sync_type: SyncType,
-        start_index: u64,
-        end_index: u64,
+        start_seq_index: u64,
     ) {
         info!(
-            "Background sync task started: task_id={}, will pull from source_node={}, source_shard={}",
-            task_id, source_node_id, source_shard_id
+            "Background sync task started: task_id={}, will pull from source_node={}, source_shard={}, start_seq_index={}",
+            task_id, source_node_id, source_shard_id, start_seq_index
         );
 
         // Update task status to IN_PROGRESS
@@ -738,8 +720,7 @@ impl SyncServiceImpl {
                 &task_manager,
                 &mut sync_client,
                 &task_id,
-                start_index,
-                end_index,
+                start_seq_index,
             )
             .await
             {
@@ -824,8 +805,7 @@ impl SyncService for SyncServiceImpl {
             source_node_id.clone(),
             target_node_id.clone(),
             sync_type,
-            req.start_index,
-            req.end_index,
+            req.start_seq_index,
             req.slot_start,
             req.slot_end,
         ) {
@@ -837,8 +817,7 @@ impl SyncService for SyncServiceImpl {
                 let sync_service_impl = self.clone();
                 let task_id_clone = task_id.clone();
                 let sync_type_clone = sync_type;
-                let start_index = req.start_index;
-                let end_index = req.end_index;
+                let start_seq_index = req.start_seq_index;
 
                 tokio::spawn(async move {
                     Self::execute_sync_task(
@@ -848,8 +827,7 @@ impl SyncService for SyncServiceImpl {
                         source_node_id,
                         source_shard_id,
                         sync_type_clone,
-                        start_index,
-                        end_index,
+                        start_seq_index,
                     )
                     .await;
                 });
@@ -879,8 +857,8 @@ impl SyncService for SyncServiceImpl {
         let task_id = req.task_id.clone();
 
         info!(
-            "PullSyncData request: task_id={}, data_type={:?}, chunk_index={}, start_index={}",
-            task_id, req.data_type, req.chunk_index, req.start_index
+            "PullSyncData request: task_id={}, data_type={:?}, chunk_index={}, start_seq_index={}",
+            task_id, req.data_type, req.chunk_index, req.start_seq_index
         );
 
         if task_id.is_empty() {
@@ -920,8 +898,13 @@ impl SyncService for SyncServiceImpl {
                     .await
                 }
                 SyncDataType::EntryLog => {
-                    stream_entry_logs_from_source(node_clone, task_id.clone(), req.start_index, tx)
-                        .await
+                    stream_entry_logs_from_source(
+                        node_clone,
+                        task_id.clone(),
+                        req.start_seq_index,
+                        tx,
+                    )
+                    .await
                 }
                 _ => {
                     error!("Invalid data type for sync task {}", task_id);
@@ -1132,11 +1115,14 @@ async fn send_entry_log_response(
 async fn stream_entry_logs_from_source(
     node: Arc<RRNode>,
     task_id: String,
-    start_index: u64,
+    start_seq_index: u64,
     tx: tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
 ) -> Result<()> {
-    // Create iterator starting from start_index
-    let mut iterator = match node.create_log_replay_iterator(&task_id, start_index).await {
+    // Create iterator starting from start_seq_index
+    let mut iterator = match node
+        .create_log_replay_iterator(&task_id, start_seq_index)
+        .await
+    {
         Ok(iter) => iter,
         Err(e) => {
             let error_msg = format!("Failed to create log replay iterator: {}", e);

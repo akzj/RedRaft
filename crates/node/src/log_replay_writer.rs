@@ -513,6 +513,7 @@ impl LogReplayIterator {
 
         // Create EntryLog and increment seq_index for next lookup
         let entry_log = EntryLog {
+            seq_index: entry.index, // Use the sequential index from cache
             index: entry.raft_apply_index,
             term: entry.raft_apply_term,
             command: entry.command_data.clone(),
@@ -629,7 +630,9 @@ impl LogReplayIterator {
             self.file_position += HEADER_SIZE as u64 + data_len as u64;
 
             // Create EntryLog and increment seq_index
+            let current_seq_index = self.next_seq_index;
             let entry_log = EntryLog {
+                seq_index: current_seq_index, // Use current sequential index
                 index: apply_index,
                 term,
                 command: command_data,

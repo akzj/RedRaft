@@ -65,7 +65,7 @@ impl RaftState {
 
             // Check InFlight request limit
             if !self.pipeline.can_send_to_peer(&peer) {
-                debug!("Peer {} has too many inflight requests, skipping", peer);
+                warn!("Peer {} has too many inflight requests, skipping", peer);
                 continue;
             }
 
@@ -575,10 +575,10 @@ impl RaftState {
                 }
 
                 self.update_commit_index().await;
-                
+
                 // Handle ReadIndex confirmation (successful heartbeat indicates still Leader)
                 self.handle_read_index_ack(&peer).await;
-                
+
                 // Try to extend LeaderLease
                 self.try_extend_lease_from_majority();
             } else {
@@ -739,17 +739,16 @@ impl RaftState {
                 let joint = match self.config.joint() {
                     Some(j) => j,
                     None => {
-                        error!("Node {} config.quorum() is Joint but joint() returns None", self.id);
+                        error!(
+                            "Node {} config.quorum() is Joint but joint() returns None",
+                            self.id
+                        );
                         return;
                     }
                 };
-                
-                let old_majority = self
-                    .find_majority_index(&joint.old_voters, old)
-                    .await;
-                let new_majority = self
-                    .find_majority_index(&joint.new_voters, new)
-                    .await;
+
+                let old_majority = self.find_majority_index(&joint.old_voters, old).await;
+                let new_majority = self.find_majority_index(&joint.new_voters, new).await;
 
                 match (old_majority, new_majority) {
                     (Some(old_idx), Some(new_idx)) => std::cmp::min(old_idx, new_idx),
@@ -849,4 +848,3 @@ impl RaftState {
         }
     }
 }
-
