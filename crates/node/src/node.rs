@@ -6,7 +6,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tokio::sync::oneshot;
 use tracing::{debug, info};
 
 use raft::{
@@ -25,10 +24,7 @@ use proto::node::{
 use raft::event::Role as RaftRole;
 use resp::{Command, CommandType, RespValue};
 use rr_core::routing::RoutingTable;
-use std::collections::VecDeque;
-use std::path::PathBuf;
 use storage::{traits::KeyStore, ApplyResult as StoreApplyResult, RedisStore};
-use tokio::sync::Notify;
 use tonic::{Request, Response, Status};
 
 /// RedRaft node
