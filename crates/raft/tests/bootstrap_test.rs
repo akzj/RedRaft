@@ -175,6 +175,9 @@ async fn test_bootstrap_snapshot_creation() {
 
     println!("  Snapshot index before bootstrap: {}", snapshot_index_before);
 
+    // Calculate expected snapshot index
+    let expected_snapshot_index = apply_index_before + 1;
+
     // Trigger bootstrap snapshot
     match cluster.trigger_bootstrap_snapshot(&leader_id) {
         Ok(()) => {
@@ -185,17 +188,35 @@ async fn test_bootstrap_snapshot_creation() {
         }
     }
 
-    // Wait for snapshot creation to complete
+    // Wait for snapshot creation to complete (poll instead of fixed sleep)
+    // This avoids long sleep that might cause election timeout
     println!("Waiting for bootstrap snapshot creation to complete...");
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    let mut wait_attempts = 0;
+    const MAX_SNAPSHOT_CREATION_WAIT_ATTEMPTS: u32 = 100; // 10 seconds total (100ms * 100)
+    
+    loop {
+        let current_snapshot_index = leader_node.get_last_snapshot_index().await;
+        if current_snapshot_index >= expected_snapshot_index {
+            println!("✓ Snapshot creation completed (index: {})", current_snapshot_index);
+            break;
+        }
+        
+        wait_attempts += 1;
+        if wait_attempts >= MAX_SNAPSHOT_CREATION_WAIT_ATTEMPTS {
+            println!("⚠ Snapshot creation may still be in progress (current index: {}, expected: {})", 
+                     current_snapshot_index, expected_snapshot_index);
+            break;
+        }
+        
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     // ===== 5. Verify snapshot_index == apply_index + 1 =====
     println!("\n=== Verifying bootstrap snapshot index ===");
 
+    // Re-get leader node (in case leader changed during snapshot creation)
     let leader_node_after = cluster.get_node(&leader_id).expect("Leader node not found");
     let snapshot_index_after = leader_node_after.get_last_snapshot_index().await;
-
-    let expected_snapshot_index = apply_index_before + 1;
 
     println!("  apply_index before bootstrap: {}", apply_index_before);
     println!("  expected snapshot_index: {}", expected_snapshot_index);

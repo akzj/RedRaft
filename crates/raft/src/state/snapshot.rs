@@ -180,6 +180,11 @@ impl RaftState {
                 "node {}: failed to send InstallSnapshotRequest: {}",
                 self.id, err
             );
+        } else {
+            info!(
+                "node {}: sent InstallSnapshotRequest to {} at term {}, snapshot_index {}",
+                self.id, target, self.current_term, snap.index
+            );
         }
     }
 
@@ -823,7 +828,7 @@ impl RaftState {
 
             // Create snapshot in background
             let result = callbacks
-                .create_snapshot(&id, config, callbacks.clone())
+                .create_snapshot(&id, config, callbacks.clone(), bootstrap_snapshot_index)
                 .await;
 
             let (success, mut snap_index, snap_term, error) = match result {

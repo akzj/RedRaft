@@ -470,6 +470,7 @@ impl StateMachine for KVStateMachine {
         from: &RaftId,
         config: ClusterConfig,
         saver: Arc<dyn SnapshotStorage>,
+        bootstrap_snapshot_index: Option<u64>,
     ) -> StorageResult<(u64, u64)> {
         // Flush store in blocking thread pool to avoid blocking async runtime
         let store = Arc::clone(&self.store);
@@ -493,7 +494,7 @@ impl StateMachine for KVStateMachine {
                 from,
                 raft::Snapshot {
                     config,
-                    index: apply_index,
+                    index: bootstrap_snapshot_index.unwrap_or(apply_index),
                     term: term,
                     data: Vec::new(),
                 },

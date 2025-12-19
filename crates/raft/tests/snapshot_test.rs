@@ -87,8 +87,34 @@ async fn test_cluster_snapshot_and_learner_sync() {
         println!("Triggering snapshot on leader {:?}", current_leader);
         cluster.trigger_snapshot(current_leader).unwrap();
 
-        // Wait for snapshot completion
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Wait for snapshot completion (poll instead of fixed sleep to avoid election timeout)
+        let mut wait_attempts = 0;
+        const MAX_SNAPSHOT_WAIT_ATTEMPTS: u32 = 50; // 5 seconds total (100ms * 50)
+        let snapshot_index_before = {
+            if let Some(leader_node) = cluster.get_node(current_leader) {
+                leader_node.get_last_snapshot_index().await
+            } else {
+                0
+            }
+        };
+        
+        loop {
+            if let Some(leader_node) = cluster.get_node(current_leader) {
+                let current_snapshot_index = leader_node.get_last_snapshot_index().await;
+                if current_snapshot_index > snapshot_index_before {
+                    println!("✓ Snapshot creation completed (index: {})", current_snapshot_index);
+                    break;
+                }
+            }
+            
+            wait_attempts += 1;
+            if wait_attempts >= MAX_SNAPSHOT_WAIT_ATTEMPTS {
+                println!("⚠ Snapshot creation may still be in progress");
+                break;
+            }
+            
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
 
         // Check data consistency after snapshot
         if let Err(e) = cluster.verify_data_consistency().await {

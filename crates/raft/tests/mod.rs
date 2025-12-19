@@ -274,6 +274,7 @@ pub mod tests {
             from: &RaftId,
             config: ClusterConfig,
             saver: Arc<dyn SnapshotStorage>,
+            bootstrap_snapshot_index: Option<u64>,
         ) -> StorageResult<(u64, u64)> {
             let mut commands = self.applied_commands.lock().await;
 
@@ -294,7 +295,7 @@ pub mod tests {
                 .save_snapshot(
                     from,
                     Snapshot {
-                        index: commands.last().unwrap().1,
+                        index: bootstrap_snapshot_index.unwrap_or(commands.last().unwrap().1),
                         term: commands.last().unwrap().2,
                         data,
                         config,
@@ -439,7 +440,7 @@ pub mod tests {
             leader_transfer_timeout: Duration::from_secs(5),
             schedule_snapshot_probe_interval: Duration::from_secs(1),
             schedule_snapshot_probe_retries: 3,
-            pre_vote_enabled: false,     // Disable Pre-Vote to maintain compatibility with existing tests
+            pre_vote_enabled: false, // Disable Pre-Vote to maintain compatibility with existing tests
             leader_lease_enabled: false, // Disable LeaderLease (test default)
             // Feedback control configuration
             max_inflight_requests: 10,
@@ -1452,7 +1453,7 @@ pub mod tests {
         // Schedule snapshot probe
         let probe_schedule = SnapshotProbeSchedule {
             peer: peer1.clone(),
-            next_probe_time: Instant::now(),     // executable immediately
+            next_probe_time: Instant::now(), // executable immediately
             interval: Duration::from_millis(50), // use shorter interval for easier testing
             max_attempts: 3,
             snapshot_request_id: RequestId::new(),
@@ -2181,7 +2182,7 @@ pub mod tests {
             last_included_index: 5,
             last_included_term: 1,
             data: vec![],
-            config: ClusterConfig::empty(),    // Empty config for testing
+            config: ClusterConfig::empty(), // Empty config for testing
             request_id: installing_request_id, // Use same request ID for probe
             snapshot_request_id: installing_request_id,
             is_probe: true,

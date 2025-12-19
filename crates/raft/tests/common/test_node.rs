@@ -664,6 +664,7 @@ impl StateMachine for TestNodeInner {
         from: &RaftId,
         config: ClusterConfig,
         saver: Arc<dyn SnapshotStorage>,
+        bootstrap_snapshot_index: Option<u64>,
     ) -> StorageResult<(u64, u64)> {
         // Use TestStateMachine to generate snapshot data, which returns applied index, term, and data
         let (snapshot_index, snapshot_term, snapshot_data) =
@@ -679,7 +680,7 @@ impl StateMachine for TestNodeInner {
 
         // Create snapshot object
         let snapshot = raft::message::Snapshot {
-            index: snapshot_index,
+            index: bootstrap_snapshot_index.unwrap_or(snapshot_index),
             term: snapshot_term,
             config,
             data: snapshot_data,

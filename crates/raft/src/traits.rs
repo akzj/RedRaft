@@ -209,6 +209,7 @@ pub trait StateMachine: Send + Sync {
         from: &RaftId,
         cluster_config: ClusterConfig,
         saver: Arc<dyn SnapshotStorage>,
+        bootstrap_snapshot_index: Option<u64>,
     ) -> StorageResult<(u64, u64)>;
 
     // Client response callback
