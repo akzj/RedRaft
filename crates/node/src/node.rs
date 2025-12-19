@@ -17,7 +17,7 @@ use raft::{
 use crate::config::Config;
 use crate::log_replay_writer::LogReplayWriter;
 use crate::snapshot_transfer::SnapshotTransferManager;
-use crate::state_machine::KVStateMachine;
+use crate::state_machine::ShardStateMachine;
 use parking_lot::RwLock as ParkingLotRwLock;
 use proto::node::{
     node_service_server::NodeService, GetRaftStateRequest, GetRaftStateResponse, Role as ProtoRole,
@@ -30,61 +30,6 @@ use std::path::PathBuf;
 use storage::{traits::KeyStore, ApplyResult as StoreApplyResult, RedisStore};
 use tokio::sync::Notify;
 use tonic::{Request, Response, Status};
-
-/// Pending request tracker
-#[derive(Clone)]
-pub struct PendingRequests {
-    /// request_id -> (command, result_sender)
-    requests: Arc<Mutex<HashMap<u64, (Command, oneshot::Sender<StoreApplyResult>)>>>,
-}
-
-impl PendingRequests {
-    pub fn new() -> Self {
-        Self {
-            requests: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    /// Register a pending request
-    pub fn register(
-        &self,
-        request_id: RequestId,
-        cmd: Command,
-    ) -> oneshot::Receiver<StoreApplyResult> {
-        let (tx, rx) = oneshot::channel();
-        self.requests.lock().insert(request_id.into(), (cmd, tx));
-        rx
-    }
-
-    /// Complete request and send result
-    pub fn complete(&self, request_id: RequestId, result: StoreApplyResult) -> bool {
-        if let Some((_, tx)) = self.requests.lock().remove(&request_id.into()) {
-            let _ = tx.send(result);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Get pending command (for execution during apply)
-    pub fn get_command(&self, request_id: RequestId) -> Option<Command> {
-        self.requests
-            .lock()
-            .get(&request_id.into())
-            .map(|(cmd, _)| cmd.clone())
-    }
-
-    /// Remove timed out request
-    pub fn remove(&self, request_id: RequestId) {
-        self.requests.lock().remove(&request_id.into());
-    }
-}
-
-impl Default for PendingRequests {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// RedRaft node
 pub struct RRNode {
@@ -102,11 +47,9 @@ pub struct RRNode {
     /// Managed by node, can be synced with pilot in the future
     routing_table: Arc<RoutingTable>,
     /// Raft group state machine mapping (shard_id -> state_machine)
-    pub state_machines: Arc<Mutex<HashMap<String, Arc<KVStateMachine>>>>,
+    pub state_machines: Arc<Mutex<HashMap<String, Arc<ShardStateMachine>>>>,
     /// Raft state mapping (shard_id -> raft_state)
     raft_states: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<RaftState>>>>>,
-    /// Pending request tracker
-    pending_requests: PendingRequests,
 
     /// Snapshot transfer manager
     snapshot_transfer_manager: Arc<SnapshotTransferManager>,
@@ -139,17 +82,11 @@ impl RRNode {
             routing_table,
             state_machines: Arc::new(Mutex::new(HashMap::new())),
             raft_states: Arc::new(Mutex::new(HashMap::new())),
-            pending_requests: PendingRequests::new(),
             snapshot_transfer_manager: Arc::new(SnapshotTransferManager::new()),
             grpc_client_pool: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
             log_replay_writers: Arc::new(ParkingLotRwLock::new(HashMap::new())),
             config,
         }
-    }
-
-    /// Get pending request tracker
-    pub fn pending_requests(&self) -> &PendingRequests {
-        &self.pending_requests
     }
 
     /// Get node ID
@@ -287,7 +224,7 @@ impl RRNode {
     /// # Returns
     /// - `Some(Arc<KVStateMachine>)`: State machine if shard exists
     /// - `None`: If shard does not exist
-    pub fn get_state_machine(&self, shard_id: &str) -> Option<Arc<KVStateMachine>> {
+    pub fn get_state_machine(&self, shard_id: &str) -> Option<Arc<ShardStateMachine>> {
         self.state_machines.lock().get(shard_id).cloned()
     }
 
@@ -411,15 +348,16 @@ impl RRNode {
         let timers = self.driver.get_timer_service();
 
         // Create state machine with all dependencies (implements RaftCallbacks directly)
-        let state_machine = Arc::new(KVStateMachine::with_pending_requests(
+        let state_machine = Arc::new(ShardStateMachine::new(
             self.redis_store.clone(),
             self.storage.clone(),
             self.network.clone(),
             timers,
             self.snapshot_transfer_manager.clone(),
-            self.pending_requests.clone(),
             self.routing_table.clone(),
             self.config.clone(),
+            Arc::new(self.driver.clone()),
+            raft_id.clone(),
         ));
         self.state_machines
             .lock()
@@ -538,6 +476,7 @@ impl RRNode {
     }
 
     /// Handle write command - through Raft consensus
+    /// Node-level logic: determine shard and delegate to state machine
     async fn handle_write(&self, cmd: Command) -> Result<RespValue, String> {
         // Get routing key
         let key = match cmd.get_key() {
@@ -548,7 +487,7 @@ impl RRNode {
             }
         };
 
-        // Determine shard
+        // Determine shard (node-level routing)
         let shard_id = self
             .routing_table
             .find_shard_for_key(key)
@@ -567,47 +506,13 @@ impl RRNode {
         //     return Err("TRYAGAIN Split in progress, please retry".to_string());
         // }
 
-        // Get Raft group (must exist, created by Pilot)
-        let raft_id = self
-            .get_raft_group(&shard_id)
+        // Get state machine for this shard (must exist, created by Pilot)
+        let state_machine = self
+            .get_state_machine(&shard_id)
             .ok_or_else(|| format!("CLUSTERDOWN Shard {} not ready", shard_id))?;
 
-        // Serialize command
-        let serialized = bincode::serde::encode_to_vec(&cmd.clone(), bincode::config::standard())
-            .map_err(|e| format!("Failed to serialize command: {}", e))?;
-
-        // Generate request ID and register wait
-        let request_id = RequestId::new();
-        let result_rx = self.pending_requests.register(request_id, cmd);
-
-        // Send event to Raft group
-        let event = Event::ClientPropose {
-            cmd: serialized,
-            request_id,
-        };
-
-        match self.driver.dispatch_event(raft_id.clone(), event) {
-            raft::multi_raft_driver::SendEventResult::Success => {}
-            _ => {
-                self.pending_requests.remove(request_id);
-                return Err("Failed to dispatch event".to_string());
-            }
-        }
-
-        // Wait for Raft commit and return result
-        let timeout = self.config.raft.request_timeout();
-        match tokio::time::timeout(timeout, result_rx).await {
-            Ok(Ok(result)) => Ok(apply_result_to_resp(result)),
-            Ok(Err(_)) => {
-                // Channel closed - node may be shutting down
-                Err("Request cancelled".to_string())
-            }
-            Err(_) => {
-                // Timeout
-                self.pending_requests.remove(request_id);
-                Err("Request timeout".to_string())
-            }
-        }
+        // Delegate to state machine for shard-specific Raft operations
+        state_machine.propose_command(cmd).await
     }
 
     /// Handle global write commands

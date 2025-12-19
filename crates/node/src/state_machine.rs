@@ -14,14 +14,14 @@ use raft::{
     Network, RaftId, RequestId, SnapshotStorage, StateMachine, Storage, StorageResult,
     TimerService,
 };
-use resp::Command;
+use resp::{Command, RespValue};
 use storage::{
     store::HybridStore,
     traits::{ApplyResult as StoreApplyResult, StoreError},
 };
 
 use crate::config::Config;
-use crate::node::PendingRequests;
+use crate::pending_requests::PendingRequests;
 use crate::snapshot_transfer::SnapshotTransferManager;
 use rr_core::routing::RoutingTable;
 
@@ -38,14 +38,15 @@ pub struct ReplayLogConfig {
 
 /// KV state machine
 #[derive(Clone)]
-pub struct KVStateMachine {
+pub struct ShardStateMachine {
     /// Storage backend (supports memory or persistent storage)
     store: Arc<storage::store::HybridStore>,
     /// Last applied index (monotonically increasing, tracks Raft apply_index)
-    apply_index: Arc<std::sync::atomic::AtomicU64>,
-    term: Arc<std::sync::atomic::AtomicU64>,
+    raft_apply_index: Arc<std::sync::atomic::AtomicU64>,
+    /// Last applied term (monotonically increasing, tracks Raft term)
+    raft_term: Arc<std::sync::atomic::AtomicU64>,
     /// Pending request tracker
-    pending_requests: Option<PendingRequests>,
+    pending_requests: PendingRequests,
     /// Apply result cache (queue of (index, result)), used to return actual results in client_response
     /// Uses queue because index is monotonically increasing, allowing easy cleanup of expired entries
     apply_results: Arc<parking_lot::Mutex<std::collections::VecDeque<(u64, StoreApplyResult)>>>,
@@ -64,10 +65,18 @@ pub struct KVStateMachine {
     /// Active log replay configurations for split operations
     /// Each entry contains channel, slot range, and task_id
     replay_logs: Arc<parking_lot::RwLock<Vec<ReplayLogConfig>>>,
+    /// Multi-Raft driver for dispatching events to Raft groups
+    driver: Arc<raft::multi_raft_driver::MultiRaftDriver>,
+    /// Raft ID for this shard
+    raft_id: RaftId,
+    /// Request ID counter (monotonically increasing, per shard)
+    /// Used to generate unique request IDs and avoid collisions
+    request_id_counter: Arc<std::sync::atomic::AtomicU64>,
 }
 
-impl KVStateMachine {
-    /// Create KV state machine with all dependencies
+impl ShardStateMachine {
+    /// Create KV state machine with request tracking
+    /// Each shard has its own pending_requests to avoid single hotspot
     pub fn new(
         store: Arc<HybridStore>,
         storage: Arc<dyn Storage>,
@@ -76,12 +85,14 @@ impl KVStateMachine {
         snapshot_transfer_manager: Arc<SnapshotTransferManager>,
         routing_table: Arc<rr_core::routing::RoutingTable>,
         config: Config,
+        driver: Arc<raft::multi_raft_driver::MultiRaftDriver>,
+        raft_id: RaftId,
     ) -> Self {
         Self {
             store,
-            apply_index: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            term: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            pending_requests: None,
+            raft_apply_index: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            raft_term: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pending_requests: PendingRequests::new(), // Each shard creates its own pending_requests
             apply_results: Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new())),
             storage,
             network,
@@ -90,33 +101,9 @@ impl KVStateMachine {
             config,
             routing_table,
             replay_logs: Arc::new(parking_lot::RwLock::new(Vec::new())),
-        }
-    }
-
-    /// Create KV state machine with request tracking
-    pub fn with_pending_requests(
-        store: Arc<HybridStore>,
-        storage: Arc<dyn Storage>,
-        network: Arc<dyn Network>,
-        timers: raft::multi_raft_driver::Timers,
-        snapshot_transfer_manager: Arc<SnapshotTransferManager>,
-        pending_requests: PendingRequests,
-        routing_table: Arc<rr_core::routing::RoutingTable>,
-        config: Config,
-    ) -> Self {
-        Self {
-            store,
-            apply_index: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            term: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            pending_requests: Some(pending_requests),
-            apply_results: Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new())),
-            storage,
-            network,
-            timers,
-            snapshot_transfer_manager,
-            config,
-            routing_table,
-            replay_logs: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            driver,
+            raft_id,
+            request_id_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)), // Start from 1
         }
     }
 
@@ -137,12 +124,68 @@ impl KVStateMachine {
 
     /// Get apply_index reference
     pub fn apply_index(&self) -> &Arc<std::sync::atomic::AtomicU64> {
-        &self.apply_index
+        &self.raft_apply_index
     }
 
     /// Get term reference
     pub fn term(&self) -> &Arc<std::sync::atomic::AtomicU64> {
-        &self.term
+        &self.raft_term
+    }
+
+    /// Get current raft apply index value
+    fn get_raft_apply_index(&self) -> u64 {
+        self.raft_apply_index
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Generate a new request ID (monotonically increasing, per shard)
+    /// This avoids collisions that could occur with random IDs
+    fn next_request_id(&self) -> RequestId {
+        let id = self
+            .request_id_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        RequestId::from(id)
+    }
+
+    /// Propose a write command through Raft consensus
+    /// This handles the shard-specific logic for multi-raft operations
+    pub async fn propose_command(&self, cmd: Command) -> Result<RespValue, String> {
+        // Serialize command
+        let serialized = bincode::serde::encode_to_vec(&cmd.clone(), bincode::config::standard())
+            .map_err(|e| format!("Failed to serialize command: {}", e))?;
+
+        // Generate request ID (monotonically increasing, per shard) and register wait
+        let request_id = self.next_request_id();
+        let result_rx = self.pending_requests.register(request_id, cmd);
+
+        // Send event to Raft group
+        let event = Event::ClientPropose {
+            cmd: serialized,
+            request_id,
+        };
+
+        match self.driver.dispatch_event(self.raft_id.clone(), event) {
+            raft::multi_raft_driver::SendEventResult::Success => {}
+            _ => {
+                self.pending_requests.remove(request_id);
+                return Err("Failed to dispatch event".to_string());
+            }
+        }
+
+        // Wait for Raft commit and return result
+        let timeout = self.config.raft.request_timeout();
+        match tokio::time::timeout(timeout, result_rx).await {
+            Ok(Ok(result)) => Ok(apply_result_to_resp(result)),
+            Ok(Err(_)) => {
+                // Channel closed - node may be shutting down
+                Err("Request cancelled".to_string())
+            }
+            Err(_) => {
+                // Timeout
+                self.pending_requests.remove(request_id);
+                Err("Request timeout".to_string())
+            }
+        }
     }
 
     /// Create gRPC client to snapshot service
@@ -291,7 +334,7 @@ impl KVStateMachine {
 }
 
 #[async_trait]
-impl StateMachine for KVStateMachine {
+impl StateMachine for ShardStateMachine {
     async fn apply_command(
         &self,
         _from: &RaftId,
@@ -333,9 +376,10 @@ impl StateMachine for KVStateMachine {
         self.apply_results.lock().push_back((index, result));
 
         // Update apply_index and term (this is the last applied index and term)
-        self.apply_index
+        self.raft_apply_index
             .store(index, std::sync::atomic::Ordering::SeqCst);
-        self.term.store(term, std::sync::atomic::Ordering::SeqCst);
+        self.raft_term
+            .store(term, std::sync::atomic::Ordering::SeqCst);
 
         // Check if command should be forwarded to log replay channels
         // If key's slot matches any replay log slot range, forward command
@@ -390,8 +434,8 @@ impl StateMachine for KVStateMachine {
         use crate::snapshot_transfer::SnapshotMetadata;
 
         let store = self.store.clone();
-        let apply_index = self.apply_index.clone();
-        let term_atomic = self.term.clone();
+        let apply_index = self.raft_apply_index.clone();
+        let term_atomic = self.raft_term.clone();
         let apply_results = self.apply_results.clone();
         let from = from.clone();
         let config = self.config.clone();
@@ -511,39 +555,38 @@ impl StateMachine for KVStateMachine {
         result: ClientResult<u64>,
     ) -> ClientResult<()> {
         // Notify waiting clients when Raft commit completes
-        if let Some(ref pending) = self.pending_requests {
-            let store_result = match result {
-                Ok(index) => {
-                    let current_apply_index =
-                        self.apply_index.load(std::sync::atomic::Ordering::SeqCst);
-                    let mut cache = self.apply_results.lock();
 
-                    // Process queue: clean up expired entries and find matching entry in one pass
-                    // Since index is monotonically increasing, we can process from front
-                    let mut found_result = None;
-                    while let Some((cached_index, cached_result)) = cache.front().cloned() {
-                        if cached_index < current_apply_index {
-                            // Expired entry, remove it
-                            cache.pop_front();
-                        } else if cached_index == index {
-                            // Found matching entry, remove and return it
-                            found_result = Some(cached_result);
-                            cache.pop_front();
-                            break;
-                        } else {
-                            // cached_index >= current_apply_index && cached_index != index
-                            // Since queue is ordered and index is monotonically increasing,
-                            // if we haven't found the match yet, it doesn't exist
-                            break;
-                        }
+        let store_result = match result {
+            Ok(raft_index) => {
+                let raft_apply_index = self.get_raft_apply_index();
+                let mut cache = self.apply_results.lock();
+
+                // Process queue: clean up expired entries and find matching entry in one pass
+                // Since index is monotonically increasing, we can process from front
+                let mut found_result = None;
+                while let Some((cached_index, cached_result)) = cache.front().cloned() {
+                    if cached_index < raft_apply_index {
+                        // Expired entry, remove it
+                        cache.pop_front();
+                    } else if cached_index == raft_index {
+                        // Found matching entry, remove and return it
+                        found_result = Some(cached_result);
+                        cache.pop_front();
+                        break;
+                    } else {
+                        // cached_index >= current_apply_index && cached_index != index
+                        // Since queue is ordered and index is monotonically increasing,
+                        // if we haven't found the match yet, it doesn't exist
+                        break;
                     }
-
-                    found_result.unwrap_or(StoreApplyResult::Ok)
                 }
-                Err(e) => StoreApplyResult::Error(StoreError::Internal(format!("{:?}", e))),
-            };
-            pending.complete(request_id, store_result);
-        }
+
+                found_result.unwrap_or(StoreApplyResult::Ok)
+            }
+            Err(e) => StoreApplyResult::Error(StoreError::Internal(format!("{:?}", e))),
+        };
+        self.pending_requests.complete(request_id, store_result);
+
         Ok(())
     }
 
@@ -559,7 +602,7 @@ impl StateMachine for KVStateMachine {
 
 // Implement Network trait
 #[async_trait]
-impl Network for KVStateMachine {
+impl Network for ShardStateMachine {
     async fn send_request_vote_request(
         &self,
         from: &RaftId,
@@ -649,11 +692,11 @@ impl Network for KVStateMachine {
 
 // Implement Storage trait (empty implementation, delegates to self.storage)
 #[async_trait]
-impl Storage for KVStateMachine {}
+impl Storage for ShardStateMachine {}
 
 // Implement HardStateStorage
 #[async_trait]
-impl HardStateStorage for KVStateMachine {
+impl HardStateStorage for ShardStateMachine {
     async fn save_hard_state(
         &self,
         from: &RaftId,
@@ -669,7 +712,7 @@ impl HardStateStorage for KVStateMachine {
 
 // Implement SnapshotStorage
 #[async_trait]
-impl SnapshotStorage for KVStateMachine {
+impl SnapshotStorage for ShardStateMachine {
     async fn save_snapshot(&self, from: &RaftId, snap: raft::Snapshot) -> StorageResult<()> {
         self.storage.save_snapshot(from, snap).await
     }
@@ -817,7 +860,7 @@ impl SnapshotStorage for KVStateMachine {
 
 // Implement ClusterConfigStorage
 #[async_trait]
-impl ClusterConfigStorage for KVStateMachine {
+impl ClusterConfigStorage for ShardStateMachine {
     async fn save_cluster_config(&self, from: &RaftId, conf: ClusterConfig) -> StorageResult<()> {
         self.storage.save_cluster_config(from, conf).await
     }
@@ -829,7 +872,7 @@ impl ClusterConfigStorage for KVStateMachine {
 
 // Implement LogEntryStorage
 #[async_trait]
-impl LogEntryStorage for KVStateMachine {
+impl LogEntryStorage for ShardStateMachine {
     async fn append_log_entries(
         &self,
         from: &RaftId,
@@ -874,7 +917,7 @@ impl LogEntryStorage for KVStateMachine {
 }
 
 // Implement TimerService
-impl TimerService for KVStateMachine {
+impl TimerService for ShardStateMachine {
     fn del_timer(&self, _from: &RaftId, timer_id: raft::TimerId) {
         self.timers.del_timer(timer_id);
     }
@@ -935,7 +978,7 @@ impl TimerService for KVStateMachine {
 
 // Implement EventNotify
 #[async_trait]
-impl raft::traits::EventNotify for KVStateMachine {
+impl raft::traits::EventNotify for ShardStateMachine {
     async fn on_state_changed(
         &self,
         _from: &RaftId,
@@ -954,11 +997,51 @@ impl raft::traits::EventNotify for KVStateMachine {
 
 // Implement EventSender
 #[async_trait]
-impl raft::traits::EventSender for KVStateMachine {
+impl raft::traits::EventSender for ShardStateMachine {
     async fn send(&self, _target: RaftId, _event: Event) -> anyhow::Result<()> {
         Ok(())
     }
 }
 
 // Implement RaftCallbacks (marker trait)
-impl raft::RaftCallbacks for KVStateMachine {}
+impl raft::RaftCallbacks for ShardStateMachine {}
+
+/// Convert StoreApplyResult to RespValue
+fn apply_result_to_resp(result: StoreApplyResult) -> RespValue {
+    match result {
+        StoreApplyResult::Ok => RespValue::SimpleString(bytes::Bytes::from("OK")),
+        StoreApplyResult::Pong(msg) => match msg {
+            Some(m) => RespValue::BulkString(Some(m)),
+            None => RespValue::SimpleString(bytes::Bytes::from("PONG")),
+        },
+        StoreApplyResult::Integer(n) => RespValue::Integer(n),
+        StoreApplyResult::Value(v) => match v {
+            Some(data) => RespValue::BulkString(Some(data)),
+            None => RespValue::Null,
+        },
+        StoreApplyResult::Array(items) => RespValue::Array(
+            items
+                .into_iter()
+                .map(|item| match item {
+                    Some(data) => RespValue::BulkString(Some(data)),
+                    None => RespValue::Null,
+                })
+                .collect(),
+        ),
+        StoreApplyResult::KeyValues(kvs) => {
+            let mut result = Vec::with_capacity(kvs.len() * 2);
+            for (k, v) in kvs {
+                result.push(RespValue::BulkString(Some(k)));
+                result.push(RespValue::BulkString(Some(v)));
+            }
+            RespValue::Array(result)
+        }
+        StoreApplyResult::Type(type_name) => match type_name {
+            Some(type_name) => RespValue::SimpleString(bytes::Bytes::from(type_name)),
+            None => RespValue::SimpleString(bytes::Bytes::from("none")),
+        },
+        StoreApplyResult::Error(e) => {
+            RespValue::Error(bytes::Bytes::from(format!("ERR {}", e.to_string())))
+        }
+    }
+}

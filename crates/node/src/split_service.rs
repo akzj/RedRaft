@@ -252,7 +252,7 @@ impl SplitServiceImpl {
         source_slot_start: u32,
         source_slot_end: u32,
         target_nodes: Vec<String>,
-        source_state_machine: Arc<crate::state_machine::KVStateMachine>,
+        source_state_machine: Arc<crate::state_machine::ShardStateMachine>,
     ) {
         info!(
             "Starting split task {}: source_shard={}, target_shard={}, split_slot={}, target_nodes={:?}",
