@@ -89,6 +89,11 @@ impl ShardMetadata {
 
     /// Update apply index (called during snapshot creation)
     pub fn set_apply_index(&mut self, index: u64) {
+        // 0 is a special value for  snapshot restore
+        if index == 0 {
+            return;
+        }
+
         self.apply_index = Some(index);
         self.last_updated = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

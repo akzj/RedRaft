@@ -267,7 +267,6 @@ impl SyncServiceImpl {
     async fn process_snapshot_chunk_data(
         store: &Arc<HybridStore>,
         chunk_data: Vec<u8>,
-        is_last_chunk: bool,
     ) -> anyhow::Result<u64> {
         let store_clone = store.clone();
 
@@ -301,18 +300,9 @@ impl SyncServiceImpl {
                 cursor += bytes_read;
 
                 // Apply entry to store immediately
-                match Self::apply_snapshot_entry_to_store(&store_clone, entry) {
-                    Ok(should_return) => {
-                        if should_return {
-                            // Completed or error signal received
-                            return Ok(entry_count);
-                        }
-                        entry_count += 1;
-                    }
-                    Err(e) => {
-                        return Err(anyhow::anyhow!("Failed to apply snapshot entry: {}", e));
-                    }
-                }
+                Self::apply_snapshot_entry_to_store(&store_clone, entry)
+                    .map_err(|e| anyhow::anyhow!("Failed to apply snapshot entry: {}", e))?;
+                entry_count += 1;
             }
 
             Ok(entry_count)
@@ -322,55 +312,63 @@ impl SyncServiceImpl {
     }
 
     /// Apply a single snapshot entry to store
-    /// Returns true if we should return early (e.g., Completed or Error)
+    /// Note: Completed signal is only used internally during snapshot generation,
+    /// it should not be sent to pull side. If received, it's ignored.
     fn apply_snapshot_entry_to_store(
         store: &Arc<HybridStore>,
         entry: SnapshotStoreEntry,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<()> {
         match entry {
             SnapshotStoreEntry::Completed => {
-                info!("Received completion signal, snapshot restore finished");
-                return Ok(true);
+                // Completed signal should not be sent to pull side, ignore it if received
+                warn!("Received Completed signal in pull side, ignoring (should not happen)");
+                return Ok(());
             }
             SnapshotStoreEntry::Error(err) => {
                 return Err(anyhow::anyhow!("Snapshot restore error: {}", err));
             }
-            SnapshotStoreEntry::String(key, value, apply_index) => {
+            SnapshotStoreEntry::String(key, value, _apply_index) => {
+                // Use 0 for apply_index since this is pull side, not push side's apply_index
                 store
-                    .set(&key, value, apply_index)
+                    .set(&key, value, 0)
                     .map_err(|e| anyhow::anyhow!("Failed to restore String entry: {}", e))?;
             }
-            SnapshotStoreEntry::Hash(key, field, value, apply_index) => {
+            SnapshotStoreEntry::Hash(key, field, value, _apply_index) => {
+                // Use 0 for apply_index since this is pull side, not push side's apply_index
                 store
-                    .hset(&key, &field, value, apply_index)
+                    .hset(&key, &field, value, 0)
                     .map_err(|e| anyhow::anyhow!("Failed to restore Hash entry: {}", e))?;
             }
-            SnapshotStoreEntry::List(key, element, apply_index) => {
+            SnapshotStoreEntry::List(key, element, _apply_index) => {
+                // Use 0 for apply_index since this is pull side, not push side's apply_index
                 store
-                    .rpush(&key, vec![element], apply_index)
+                    .rpush(&key, vec![element], 0)
                     .map_err(|e| anyhow::anyhow!("Failed to restore List entry: {}", e))?;
             }
-            SnapshotStoreEntry::Set(key, member, apply_index) => {
+            SnapshotStoreEntry::Set(key, member, _apply_index) => {
+                // Use 0 for apply_index since this is pull side, not push side's apply_index
                 store
-                    .sadd(&key, vec![member], apply_index)
+                    .sadd(&key, vec![member], 0)
                     .map_err(|e| anyhow::anyhow!("Failed to restore Set entry: {}", e))?;
             }
-            SnapshotStoreEntry::ZSet(key, score, member, apply_index) => {
+            SnapshotStoreEntry::ZSet(key, score, member, _apply_index) => {
+                // Use 0 for apply_index since this is pull side, not push side's apply_index
                 store
-                    .zadd(&key, vec![(score, member)], apply_index)
+                    .zadd(&key, vec![(score, member)], 0)
                     .map_err(|e| anyhow::anyhow!("Failed to restore ZSet entry: {}", e))?;
             }
-            SnapshotStoreEntry::Bitmap(key, bitmap, apply_index) => {
+            SnapshotStoreEntry::Bitmap(key, bitmap, _apply_index) => {
                 // Bitmap is stored as bytes, need to set bits
                 // For now, we'll store it as a string value
                 // TODO: Implement proper bitmap restoration
+                // Use 0 for apply_index since this is pull side, not push side's apply_index
                 store
-                    .set(&key, bitmap, apply_index)
+                    .set(&key, bitmap, 0)
                     .map_err(|e| anyhow::anyhow!("Failed to restore Bitmap entry: {}", e))?;
             }
         }
 
-        Ok(false)
+        Ok(())
     }
 
     /// Handle snapshot transfer for sync task
@@ -422,12 +420,8 @@ impl SyncServiceImpl {
 
                             // Process chunk_data: decompress and apply entries
                             if !chunk.chunk_data.is_empty() {
-                                match Self::process_snapshot_chunk_data(
-                                    &store,
-                                    chunk.chunk_data,
-                                    chunk.is_last_chunk,
-                                )
-                                .await
+                                match Self::process_snapshot_chunk_data(&store, chunk.chunk_data)
+                                    .await
                                 {
                                     Ok(entry_count) => {
                                         total_entries += entry_count;
@@ -476,6 +470,9 @@ impl SyncServiceImpl {
                         }
                     }
                 }
+
+                //
+
                 Ok(())
             }
             Err(e) => {
@@ -538,7 +535,6 @@ impl SyncServiceImpl {
                                     match Self::process_snapshot_chunk_data(
                                         &store,
                                         chunk.chunk_data,
-                                        chunk.is_last_chunk,
                                     )
                                     .await
                                     {
