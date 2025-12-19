@@ -45,11 +45,8 @@ pub struct ShardStateMachine {
     raft_apply_index: Arc<std::sync::atomic::AtomicU64>,
     /// Last applied term (monotonically increasing, tracks Raft term)
     raft_term: Arc<std::sync::atomic::AtomicU64>,
-    /// Pending request tracker
+    /// Pending request tracker (includes apply result cache)
     pending_requests: PendingRequests,
-    /// Apply result cache (queue of (index, result)), used to return actual results in client_response
-    /// Uses queue because index is monotonically increasing, allowing easy cleanup of expired entries
-    apply_results: Arc<parking_lot::Mutex<std::collections::VecDeque<(u64, StoreApplyResult)>>>,
     /// Raft storage backend
     storage: Arc<dyn Storage>,
     /// Network layer
@@ -102,7 +99,6 @@ impl ShardStateMachine {
             raft_apply_index: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             raft_term: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_requests: PendingRequests::new(), // Each shard creates its own pending_requests
-            apply_results: Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new())),
             storage,
             network,
             timers,
@@ -188,7 +184,7 @@ impl ShardStateMachine {
 
         // Generate request ID (monotonically increasing, per shard) and register wait
         let request_id = self.next_request_id();
-        let result_rx = self.pending_requests.register(request_id, cmd);
+        let result_rx = self.pending_requests.register(request_id);
 
         // Send event to Raft group
         let event = Event::ClientPropose {
@@ -405,7 +401,7 @@ impl StateMachine for ShardStateMachine {
         .map_err(|e| raft::ApplyError::Internal(format!("Failed to apply command: {}", e)))?;
 
         // Cache result for use in client_response (push to queue since index is monotonically increasing)
-        self.apply_results.lock().push_back((index, result));
+        self.pending_requests.cache_apply_result(index, result);
 
         // Update apply_index and term (this is the last applied index and term)
         self.raft_apply_index
@@ -468,7 +464,7 @@ impl StateMachine for ShardStateMachine {
         let store = self.store.clone();
         let apply_index = self.raft_apply_index.clone();
         let term_atomic = self.raft_term.clone();
-        let apply_results = self.apply_results.clone();
+        let pending_requests = self.pending_requests.clone();
         let from = from.clone();
         let config = self.config.clone();
 
@@ -532,7 +528,7 @@ impl StateMachine for ShardStateMachine {
                 restore_result,
                 apply_index,
                 term_atomic,
-                apply_results,
+                pending_requests,
                 from,
                 index,
                 term,
@@ -591,29 +587,8 @@ impl StateMachine for ShardStateMachine {
         let store_result = match result {
             Ok(raft_index) => {
                 let raft_apply_index = self.get_raft_apply_index();
-                let mut cache = self.apply_results.lock();
-
-                // Process queue: clean up expired entries and find matching entry in one pass
-                // Since index is monotonically increasing, we can process from front
-                let mut found_result = None;
-                while let Some((cached_index, cached_result)) = cache.front().cloned() {
-                    if cached_index < raft_apply_index {
-                        // Expired entry, remove it
-                        cache.pop_front();
-                    } else if cached_index == raft_index {
-                        // Found matching entry, remove and return it
-                        found_result = Some(cached_result);
-                        cache.pop_front();
-                        break;
-                    } else {
-                        // cached_index >= current_apply_index && cached_index != index
-                        // Since queue is ordered and index is monotonically increasing,
-                        // if we haven't found the match yet, it doesn't exist
-                        break;
-                    }
-                }
-
-                found_result.unwrap_or(StoreApplyResult::Ok)
+                self.pending_requests
+                    .find_apply_result(raft_index, raft_apply_index)
             }
             Err(e) => StoreApplyResult::Error(StoreError::Internal(format!("{:?}", e))),
         };

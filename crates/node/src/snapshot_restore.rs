@@ -166,7 +166,7 @@ pub fn handle_snapshot_restore_result(
     restore_result: Result<Result<u64, String>, tokio::task::JoinError>,
     apply_index: Arc<std::sync::atomic::AtomicU64>,
     term_atomic: Arc<std::sync::atomic::AtomicU64>,
-    apply_results: Arc<parking_lot::Mutex<std::collections::VecDeque<(u64, StoreApplyResult)>>>,
+    pending_requests: crate::pending_requests::PendingRequests,
     from: raft::RaftId,
     index: u64,
     term: u64,
@@ -179,7 +179,7 @@ pub fn handle_snapshot_restore_result(
             term_atomic.store(term, std::sync::atomic::Ordering::SeqCst);
 
             // Clear old apply result cache
-            apply_results.lock().clear();
+            pending_requests.clear_apply_results();
 
             info!(
                 "Snapshot installed successfully for {} at index {}, {} entries restored",
