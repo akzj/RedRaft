@@ -2,6 +2,7 @@
 //!
 //! Applies Raft logs to key-value storage, using RedisStore trait for storage
 
+use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -77,6 +78,11 @@ pub struct ShardStateMachine {
     /// This allows ShardStateMachine to be dropped when external references are removed,
     /// even though RaftState still holds a strong reference to it.
     raft_state: Arc<std::sync::OnceLock<Weak<tokio::sync::Mutex<RaftState>>>>,
+
+    /// Channel sender for forwarding request results (request_id, result)
+    /// Used for async batch reading of commit status in sync_service
+    forward_response_channel:
+        Arc<parking_lot::RwLock<Option<tokio::sync::mpsc::Sender<(RequestId, Result<u64>)>>>>,
 }
 
 impl ShardStateMachine {
@@ -110,6 +116,7 @@ impl ShardStateMachine {
             raft_id,
             request_id_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)), // Start from 1
             raft_state: Arc::new(std::sync::OnceLock::new()),
+            forward_response_channel: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
@@ -127,6 +134,26 @@ impl ShardStateMachine {
                 self.raft_id
             );
         }
+    }
+
+    /// Set forward response channel
+    pub fn set_forward_response_channel(
+        &self,
+        channel: tokio::sync::mpsc::Sender<(RequestId, Result<u64>)>,
+    ) {
+        *self.forward_response_channel.write() = Some(channel);
+    }
+
+    /// Clear forward response channel
+    pub fn clear_forward_response_channel(&self) {
+        *self.forward_response_channel.write() = None;
+    }
+
+    /// Get forward response channel
+    pub fn get_forward_response_channel(
+        &self,
+    ) -> Option<tokio::sync::mpsc::Sender<(RequestId, Result<u64>)>> {
+        self.forward_response_channel.read().clone()
     }
 
     /// Get RaftState reference (upgrade Weak to Arc)
@@ -582,8 +609,19 @@ impl StateMachine for ShardStateMachine {
         request_id: RequestId,
         result: ClientResult<u64>,
     ) -> ClientResult<()> {
-        // Notify waiting clients when Raft commit completes
+        //forward to log sync_service
+        if let Some(channel) = self.get_forward_response_channel() {
+            let result = match result.as_ref() {
+                Ok(raft_index) => Ok(raft_index.clone()),
+                Err(_e) => Err(anyhow::anyhow!("raft response error")),
+            };
 
+            if let Err(e) = channel.send((request_id, result)).await {
+                warn!("Failed to send result to forward response channel: {}", e);
+            }
+        }
+
+        // Notify waiting clients when Raft commit completes
         let store_result = match result {
             Ok(raft_index) => {
                 let raft_apply_index = self.get_raft_apply_index();
