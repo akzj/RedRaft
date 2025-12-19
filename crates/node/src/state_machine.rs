@@ -3,7 +3,7 @@
 //! Applies Raft logs to key-value storage, using RedisStore trait for storage
 
 use async_trait::async_trait;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
@@ -11,7 +11,7 @@ use raft::{
     message::{PreVoteRequest, PreVoteResponse},
     traits::ClientResult,
     ApplyResult, ClusterConfig, ClusterConfigStorage, Event, HardStateStorage, LogEntryStorage,
-    Network, RaftId, RequestId, SnapshotStorage, StateMachine, Storage, StorageResult,
+    Network, RaftId, RaftState, RequestId, SnapshotStorage, StateMachine, Storage, StorageResult,
     TimerService,
 };
 use resp::{Command, RespValue};
@@ -72,11 +72,20 @@ pub struct ShardStateMachine {
     /// Request ID counter (monotonically increasing, per shard)
     /// Used to generate unique request IDs and avoid collisions
     request_id_counter: Arc<std::sync::atomic::AtomicU64>,
+    /// Raft state (one-to-one correspondence with ShardStateMachine)
+    /// Set after RaftState is created using set_raft_state()
+    /// Uses Weak reference to break circular dependency:
+    /// - ShardStateMachine -> Weak<RaftState> (weak reference)
+    /// - RaftState.callbacks -> Arc<ShardStateMachine> (strong reference)
+    /// This allows ShardStateMachine to be dropped when external references are removed,
+    /// even though RaftState still holds a strong reference to it.
+    raft_state: Arc<std::sync::OnceLock<Weak<tokio::sync::Mutex<RaftState>>>>,
 }
 
 impl ShardStateMachine {
     /// Create KV state machine with request tracking
     /// Each shard has its own pending_requests to avoid single hotspot
+    /// Note: raft_state should be set after creation using set_raft_state()
     pub fn new(
         store: Arc<HybridStore>,
         storage: Arc<dyn Storage>,
@@ -104,7 +113,30 @@ impl ShardStateMachine {
             driver,
             raft_id,
             request_id_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)), // Start from 1
+            raft_state: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Set RaftState (called after RaftState is created)
+    /// This establishes the one-to-one correspondence between ShardStateMachine and RaftState
+    /// OnceLock ensures this is only set once (thread-safe initialization)
+    /// Uses Weak reference to break circular dependency: ShardStateMachine -> Weak<RaftState>,
+    /// while RaftState.callbacks -> Arc<ShardStateMachine> (strong reference)
+    pub fn set_raft_state(&self, raft_state: Arc<tokio::sync::Mutex<RaftState>>) {
+        // Store Weak reference to break circular dependency
+        let weak_ref = Arc::downgrade(&raft_state);
+        if self.raft_state.set(weak_ref).is_err() {
+            warn!(
+                "RaftState already set for shard {}, ignoring duplicate set",
+                self.raft_id
+            );
+        }
+    }
+
+    /// Get RaftState reference (upgrade Weak to Arc)
+    /// Returns None if RaftState has been dropped
+    pub fn raft_state(&self) -> Option<Arc<tokio::sync::Mutex<RaftState>>> {
+        self.raft_state.get().and_then(|weak| weak.upgrade())
     }
 
     /// Add a log replay configuration for split operation
@@ -1005,6 +1037,24 @@ impl raft::traits::EventSender for ShardStateMachine {
 
 // Implement RaftCallbacks (marker trait)
 impl raft::RaftCallbacks for ShardStateMachine {}
+
+// Implement HandleEventTrait for MultiRaftDriver
+#[async_trait::async_trait]
+impl raft::multi_raft_driver::HandleEventTrait for ShardStateMachine {
+    async fn handle_event(&self, event: raft::Event) {
+        // Get RaftState (upgrade Weak to Arc)
+        // If RaftState has been dropped, upgrade will return None
+        if let Some(raft_state_arc) = self.raft_state() {
+            let mut state = raft_state_arc.lock().await;
+            state.handle_event(event).await;
+        } else {
+            warn!(
+                "RaftState not available for shard {} (may have been dropped), ignoring event",
+                self.raft_id
+            );
+        }
+    }
+}
 
 /// Convert StoreApplyResult to RespValue
 fn apply_result_to_resp(result: StoreApplyResult) -> RespValue {

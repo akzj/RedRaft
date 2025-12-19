@@ -1,16 +1,16 @@
 //! Multi-Raft Driver
-//! 
+//!
 //! Responsible for managing event scheduling and timer services for multiple Raft groups.
 //! Uses lock-free design and efficient state machine transitions to handle concurrent events.
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::Deref;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, trace, warn};
 
 use crate::{Event, RaftId, TimerId};
@@ -168,7 +168,9 @@ impl Timers {
 
         trace!(
             "Added timer {} for node {} with delay {:?}",
-            timer_id, node_id, delay
+            timer_id,
+            node_id,
+            delay
         );
         timer_id
     }

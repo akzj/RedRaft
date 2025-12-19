@@ -8,10 +8,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tracing::{debug, info};
 
-use raft::{
-    ClusterConfig, Event, Network, RaftCallbacks, RaftId, RaftState, RaftStateOptions, RequestId,
-    Storage,
-};
+use raft::{ClusterConfig, Network, RaftCallbacks, RaftId, RaftState, RaftStateOptions, Storage};
 
 use crate::config::Config;
 use crate::log_replay_writer::LogReplayWriter;
@@ -44,8 +41,6 @@ pub struct RRNode {
     routing_table: Arc<RoutingTable>,
     /// Raft group state machine mapping (shard_id -> state_machine)
     pub state_machines: Arc<Mutex<HashMap<String, Arc<ShardStateMachine>>>>,
-    /// Raft state mapping (shard_id -> raft_state)
-    raft_states: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<RaftState>>>>>,
 
     /// Snapshot transfer manager
     snapshot_transfer_manager: Arc<SnapshotTransferManager>,
@@ -77,7 +72,6 @@ impl RRNode {
             redis_store,
             routing_table,
             state_machines: Arc::new(Mutex::new(HashMap::new())),
-            raft_states: Arc::new(Mutex::new(HashMap::new())),
             snapshot_transfer_manager: Arc::new(SnapshotTransferManager::new()),
             grpc_client_pool: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
             log_replay_writers: Arc::new(ParkingLotRwLock::new(HashMap::new())),
@@ -383,17 +377,21 @@ impl RRNode {
                 .map_err(|e| format!("Failed to save cluster config: {}", e))?;
         }
 
-        // Register to MultiRaftDriver
+        // Store RaftState in ShardStateMachine (one-to-one correspondence)
+        // Using Weak reference breaks the circular dependency:
+        // - ShardStateMachine stores Weak<RaftState> (weak reference)
+        // - RaftState.callbacks stores Arc<ShardStateMachine> (strong reference)
+        // This allows ShardStateMachine to be dropped when external references are removed,
+        // even though RaftState still holds a strong reference to it.
         let raft_state_arc = Arc::new(tokio::sync::Mutex::new(raft_state));
-        let handle_event = Box::new(RaftGroupHandler {
-            raft_state: raft_state_arc.clone(),
-        });
+        state_machine.set_raft_state(raft_state_arc.clone());
 
-        // Store RaftState reference for NodeService
-        self.raft_states
-            .lock()
-            .insert(shard_id.clone(), raft_state_arc.clone());
-
+        // Register to MultiRaftDriver (ShardStateMachine implements HandleEventTrait)
+        // Create a wrapper to pass Arc<ShardStateMachine> as HandleEventTrait
+        let handle_event: Box<dyn raft::multi_raft_driver::HandleEventTrait> =
+            Box::new(ShardStateMachineHandler {
+                state_machine: state_machine.clone(),
+            });
         self.driver.add_raft_group(raft_id.clone(), handle_event);
 
         // Update routing table (shard routing is managed by routing_table)
@@ -550,16 +548,15 @@ impl RRNode {
     }
 }
 
-/// Raft group event handler
-struct RaftGroupHandler {
-    raft_state: Arc<tokio::sync::Mutex<RaftState>>,
+/// Wrapper to make Arc<ShardStateMachine> implement HandleEventTrait
+struct ShardStateMachineHandler {
+    state_machine: Arc<ShardStateMachine>,
 }
 
 #[async_trait::async_trait]
-impl raft::multi_raft_driver::HandleEventTrait for RaftGroupHandler {
+impl raft::multi_raft_driver::HandleEventTrait for ShardStateMachineHandler {
     async fn handle_event(&self, event: raft::Event) {
-        let mut state = self.raft_state.lock().await;
-        state.handle_event(event).await;
+        self.state_machine.handle_event(event).await;
     }
 }
 
@@ -645,23 +642,31 @@ impl NodeService for NodeServiceImpl {
             ));
         }
 
-        // Get RaftState for the specified group
+        // Get RaftState from ShardStateMachine (one-to-one correspondence)
         let raft_state_arc = {
-            let raft_states = self.node.raft_states.lock();
-            raft_states.get(&raft_group_id).cloned()
-        };
+            let state_machines = self.node.state_machines.lock();
+            let state_machine = match state_machines.get(&raft_group_id) {
+                Some(sm) => sm,
+                None => {
+                    return Err(Status::not_found(format!(
+                        "Raft group {} not found",
+                        raft_group_id
+                    )));
+                }
+            };
 
-        let raft_state_arc = match raft_state_arc {
-            Some(state) => state,
-            None => {
-                return Err(Status::not_found(format!(
-                    "Raft group {} not found",
-                    raft_group_id
-                )));
+            match state_machine.raft_state() {
+                Some(state) => state,
+                None => {
+                    return Err(Status::internal(format!(
+                        "Raft state not initialized for group {}",
+                        raft_group_id
+                    )));
+                }
             }
         };
 
-        // Lock and read RaftState
+        // Lock and read RaftState (lock is released before await)
         let raft_state = raft_state_arc.lock().await;
 
         // Build response
