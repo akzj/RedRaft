@@ -138,10 +138,10 @@ impl SyncTaskManager {
         start_seq_index: u64,
         slot_start: u32,
         slot_end: u32,
-    ) -> Result<(), String> {
+    ) -> anyhow::Result<()> {
         let mut tasks = self.tasks.write();
         if tasks.contains_key(&task_id) {
-            return Err(format!("Sync task {} already exists", task_id));
+            return Err(anyhow::anyhow!("Sync task {} already exists", task_id));
         }
 
         let task = SyncTask::new(
@@ -169,7 +169,7 @@ impl SyncTaskManager {
         task_id: &str,
         status: SyncStatus,
         phase: SyncPhase,
-    ) -> Result<(), String> {
+    ) -> anyhow::Result<()> {
         let mut tasks = self.tasks.write();
         if let Some(task) = tasks.get_mut(task_id) {
             task.status = status as i32;
@@ -178,7 +178,7 @@ impl SyncTaskManager {
             task.update_timestamp();
             Ok(())
         } else {
-            Err(format!("Sync task {} not found", task_id))
+            Err(anyhow::anyhow!("Sync task {} not found", task_id))
         }
     }
 
@@ -186,14 +186,14 @@ impl SyncTaskManager {
         &self,
         task_id: &str,
         progress: SyncProgress,
-    ) -> Result<(), String> {
+    ) -> anyhow::Result<()> {
         let mut tasks = self.tasks.write();
         if let Some(task) = tasks.get_mut(task_id) {
             task.progress = progress;
             task.update_timestamp();
             Ok(())
         } else {
-            Err(format!("Sync task {} not found", task_id))
+            Err(anyhow::anyhow!("Sync task {} not found", task_id))
         }
     }
 
@@ -210,7 +210,7 @@ impl SyncTaskManager {
     ///
     /// # Returns
     /// `Ok(())` if task was found and updated, `Err` if task not found
-    pub fn update_task_progress_with<F>(&self, task_id: &str, f: F) -> Result<(), String>
+    pub fn update_task_progress_with<F>(&self, task_id: &str, f: F) -> anyhow::Result<()>
     where
         F: FnOnce(&mut SyncProgress),
     {
@@ -220,11 +220,11 @@ impl SyncTaskManager {
             task.update_timestamp();
             Ok(())
         } else {
-            Err(format!("Sync task {} not found", task_id))
+            Err(anyhow::anyhow!("Sync task {} not found", task_id))
         }
     }
 
-    pub fn set_task_error(&self, task_id: &str, error_message: String) -> Result<(), String> {
+    pub fn set_task_error(&self, task_id: &str, error_message: String) -> anyhow::Result<()> {
         let mut tasks = self.tasks.write();
         if let Some(task) = tasks.get_mut(task_id) {
             task.error_message = error_message;
@@ -232,7 +232,7 @@ impl SyncTaskManager {
             task.update_timestamp();
             Ok(())
         } else {
-            Err(format!("Sync task {} not found", task_id))
+            Err(anyhow::anyhow!("Sync task {} not found", task_id))
         }
     }
 
@@ -1013,7 +1013,6 @@ impl SyncServiceImpl {
 
         // Pull entry logs from source node (real-time incremental sync)
         let mut current_seq_index = start_seq_index;
-        let mut total_entries = 0u64;
 
         let pending_queue = Arc::new(Mutex::new(VecDeque::new()));
 
@@ -1044,74 +1043,10 @@ impl SyncServiceImpl {
             match sync_client.pull_sync_data(Request::new(pull_request)).await {
                 Ok(response) => {
                     let mut stream = response.into_inner();
-                    let mut batch_entries = 0u64;
-
+                    let mut total_entries = 0u64;
                     while let Some(chunk_result) = stream.message().await.transpose() {
                         match chunk_result {
                             Ok(chunk) => {
-                                if !chunk.entry_logs.is_empty() {
-                                    // Get target shard RaftId
-
-                                    // Apply entry logs to target shard through Raft
-                                    for entry_log in &chunk.entry_logs {
-                                        // Convert EntryLog to Event::ClientPropose
-                                        // EntryLog contains: index, term, command (bytes)
-                                        // We use the command directly and let Raft assign new index/term
-
-                                        let request_id = state_machine.next_request_id();
-                                        let event = Event::ClientPropose {
-                                            cmd: entry_log.command.clone(),
-                                            request_id,
-                                        };
-
-                                        pending_queue.lock().push_back((
-                                            request_id,
-                                            entry_log.seq_index,
-                                            entry_log.index,
-                                        ));
-
-                                        // Dispatch event to Raft group with retry mechanism
-                                        Self::dispatch_entry_log_event_with_retry(
-                                            node,
-                                            raft_id.clone(),
-                                            event,
-                                            task_id,
-                                            entry_log.seq_index,
-                                        )
-                                        .await?;
-                                    }
-
-                                    batch_entries += chunk.entry_logs.len() as u64;
-                                    total_entries += chunk.entry_logs.len() as u64;
-
-                                    // Update current seq_index (for resumable transfer)
-                                    if let Some(last_entry) = chunk.entry_logs.last() {
-                                        current_seq_index = last_entry.seq_index + 1;
-                                    }
-
-                                    // Update progress using callback to avoid race conditions
-                                    let pending_count = pending_queue.lock().len() as u64;
-                                    let _ = task_manager.update_task_progress_with(
-                                        task_id,
-                                        |progress| {
-                                            progress.entries_transferred = total_entries;
-                                            progress.current_index = current_seq_index;
-                                            // Update pending count (entries sent but not yet applied by Raft)
-                                            progress.entries_pending = pending_count;
-                                            // Note: entries_total is not applicable for real-time incremental sync
-                                            // as we don't know the end point (streaming sync)
-                                        },
-                                    );
-                                }
-
-                                if chunk.is_last_chunk {
-                                    info!(
-                                        "Completed entry log pull for task {}: {} entries",
-                                        task_id, total_entries
-                                    );
-                                    return Ok(());
-                                }
-
                                 if !chunk.error_message.is_empty() {
                                     error!(
                                         "Error in entry log chunk for task {}: {}",
@@ -1123,6 +1058,59 @@ impl SyncServiceImpl {
                                         chunk.error_message
                                     ));
                                 }
+
+                                if chunk.entry_logs.is_empty() {
+                                    // all sync is done
+                                    info!(
+                                        "Completed entry log pull for task {}: {} entries",
+                                        task_id, total_entries
+                                    );
+                                    return Ok(());
+                                }
+
+                                // Apply entry logs to target shard through Raft
+                                for entry_log in &chunk.entry_logs {
+                                    let request_id = state_machine.next_request_id();
+                                    let event = Event::ClientPropose {
+                                        cmd: entry_log.command.clone(),
+                                        request_id,
+                                    };
+
+                                    pending_queue.lock().push_back((
+                                        request_id,
+                                        entry_log.seq_index,
+                                        entry_log.index,
+                                    ));
+
+                                    // Dispatch event to Raft group with retry mechanism
+                                    Self::dispatch_entry_log_event_with_retry(
+                                        node,
+                                        raft_id.clone(),
+                                        event,
+                                        task_id,
+                                        entry_log.seq_index,
+                                    )
+                                    .await?;
+                                }
+
+                                total_entries += chunk.entry_logs.len() as u64;
+
+                                // Update current seq_index (for resumable transfer)
+                                if let Some(last_entry) = chunk.entry_logs.last() {
+                                    current_seq_index = last_entry.seq_index + 1;
+                                }
+
+                                // Update progress using callback to avoid race conditions
+                                let pending_count = pending_queue.lock().len() as u64;
+                                let _ =
+                                    task_manager.update_task_progress_with(task_id, |progress| {
+                                        progress.entries_transferred = total_entries;
+                                        progress.current_index = current_seq_index;
+                                        // Update pending count (entries sent but not yet applied by Raft)
+                                        progress.entries_pending = pending_count;
+                                        // Note: entries_total is not applicable for real-time incremental sync
+                                        // as we don't know the end point (streaming sync)
+                                    });
                             }
                             Err(e) => {
                                 error!(
@@ -1132,12 +1120,6 @@ impl SyncServiceImpl {
                                 return Err(anyhow::anyhow!("Stream error: {}", e));
                             }
                         }
-                    }
-
-                    // If no entries were received, wait a bit and retry (real-time sync)
-                    if batch_entries == 0 {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                        continue;
                     }
                 }
                 Err(e) => {
@@ -1343,7 +1325,7 @@ impl SyncService for SyncServiceImpl {
                 Ok(Response::new(StartSyncResponse {
                     task_id,
                     success: false,
-                    error_message: e,
+                    error_message: e.to_string(),
                 }))
             }
         }
