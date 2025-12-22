@@ -374,6 +374,7 @@ impl MultiRaftDriver {
                 return SendEventResult::ChannelFull;
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
+                warn!("Event channel closed for node {}", target);
                 return SendEventResult::SendFailed;
             }
         }

@@ -13,7 +13,7 @@ use raft::{ClusterConfig, Network, RaftCallbacks, RaftId, RaftState, RaftStateOp
 use crate::config::Config;
 use crate::log_replay_writer::LogReplayWriter;
 use crate::snapshot_transfer::SnapshotTransferManager;
-use crate::state_machine::ShardStateMachine;
+use crate::state_machine::{ShardStateMachine, StateMachineCommand};
 use parking_lot::RwLock as ParkingLotRwLock;
 use proto::node::{
     node_service_server::NodeService, GetRaftStateRequest, GetRaftStateResponse, Role as ProtoRole,
@@ -402,7 +402,7 @@ impl RRNode {
     }
 
     /// Handle client command
-    pub async fn handle_command(&self, cmd: Command) -> Result<RespValue, String> {
+    pub async fn handle_command(&self, cmd: Command) -> anyhow::Result<RespValue> {
         debug!("Handling command: {:?}", cmd.name());
 
         match cmd.command_type() {
@@ -412,7 +412,7 @@ impl RRNode {
     }
 
     /// Handle read command - read directly from state machine
-    async fn handle_read(&self, cmd: Command) -> Result<RespValue, String> {
+    async fn handle_read(&self, cmd: Command) -> anyhow::Result<RespValue> {
         // Get routing key
         let key = cmd.get_key();
 
@@ -433,7 +433,7 @@ impl RRNode {
                 // No state machines available, but PING/ECHO can still work
                 // Create a temporary store instance for these stateless commands
                 // Note: This is a fallback, ideally we should have at least one shard
-                return Err("No shards available".to_string());
+                return Err(anyhow::anyhow!("No shards available"));
             }
         }
 
@@ -443,7 +443,7 @@ impl RRNode {
         let shard_id = self
             .routing_table
             .find_shard_for_key(&key_bytes)
-            .map_err(|e| format!("CLUSTERDOWN {}", e))?;
+            .map_err(|e| anyhow::anyhow!("CLUSTERDOWN {}", e))?;
 
         // Check split status - return redirect if MOVED needed
         // TODO: Split functionality will be redesigned
@@ -455,7 +455,7 @@ impl RRNode {
         // Get Raft group (must exist, created by Pilot)
         let raft_id = self
             .get_raft_group(&shard_id)
-            .ok_or_else(|| format!("CLUSTERDOWN Shard {} not ready", shard_id))?;
+            .ok_or_else(|| anyhow::anyhow!("CLUSTERDOWN Shard {} not ready", shard_id))?;
 
         // Read from state machine
         if let Some(sm) = state_machines.get(&raft_id.group) {
@@ -465,13 +465,13 @@ impl RRNode {
             let result = sm.store().apply(read_index, 0, &cmd);
             Ok(apply_result_to_resp(result))
         } else {
-            Err("State machine not found".to_string())
+            Err(anyhow::anyhow!("State machine not found"))
         }
     }
 
     /// Handle write command - through Raft consensus
     /// Node-level logic: determine shard and delegate to state machine
-    async fn handle_write(&self, cmd: Command) -> Result<RespValue, String> {
+    async fn handle_write(&self, cmd: Command) -> anyhow::Result<RespValue> {
         // Get routing key
         let key = match cmd.get_key() {
             Some(k) => k,
@@ -485,7 +485,7 @@ impl RRNode {
         let shard_id = self
             .routing_table
             .find_shard_for_key(key)
-            .map_err(|e| format!("CLUSTERDOWN {}", e))?;
+            .map_err(|e| anyhow::anyhow!("CLUSTERDOWN {}", e))?;
 
         // Check split status - return redirect if MOVED needed
         // TODO: Split functionality will be redesigned
@@ -503,14 +503,16 @@ impl RRNode {
         // Get state machine for this shard (must exist, created by Pilot)
         let state_machine = self
             .get_state_machine(&shard_id)
-            .ok_or_else(|| format!("CLUSTERDOWN Shard {} not ready", shard_id))?;
+            .ok_or_else(|| anyhow::anyhow!("CLUSTERDOWN Shard {} not ready", shard_id))?;
 
         // Delegate to state machine for shard-specific Raft operations
-        state_machine.propose_command(cmd).await
+        state_machine
+            .propose_command(StateMachineCommand::RedisCommand(cmd))
+            .await
     }
 
     /// Handle global write commands
-    async fn handle_global_write(&self, cmd: Command) -> Result<RespValue, String> {
+    async fn handle_global_write(&self, cmd: Command) -> anyhow::Result<RespValue> {
         match cmd {
             Command::FlushDb => {
                 // Clear all shards
@@ -523,12 +525,15 @@ impl RRNode {
                 }
                 Ok(RespValue::SimpleString(bytes::Bytes::from("OK")))
             }
-            _ => Err(format!("Unsupported global write command: {}", cmd.name())),
+            _ => Err(anyhow::anyhow!(
+                "Unsupported global write command: {}",
+                cmd.name()
+            )),
         }
     }
 
     /// Start node
-    pub async fn start(&self) -> Result<(), String> {
+    pub async fn start(&self) -> anyhow::Result<()> {
         info!("Starting RedRaft node: {}", self.node_id);
 
         // Start MultiRaftDriver

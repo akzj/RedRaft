@@ -181,14 +181,13 @@ enum SyncPhase {
 message SyncProgress {
   /// Current phase
   SyncPhase current_phase = 1;
-  /// Snapshot transfer progress (0-100)
-  uint32 snapshot_progress_percent = 2;
-  /// Log replay progress (0-100)
-  uint32 log_replay_progress_percent = 3;
   /// Total bytes transferred
   uint64 bytes_transferred = 4;
   /// Number of entry logs transferred
   uint64 entries_transferred = 6;
+  /// Number of entry logs pending Raft framework synchronization
+  /// These entries have been transferred but not yet applied by Raft
+  uint64 entries_pending = 11;
   /// Total number of entry logs
   uint64 entries_total = 7;
   /// Current Raft index being synced

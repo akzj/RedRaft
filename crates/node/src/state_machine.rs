@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -37,15 +38,21 @@ pub struct ReplayLogConfig {
     pub task_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum StateMachineCommand {
+    RedisCommand(resp::Command),
+    Noop(String), // for increase index only
+}
+
 /// KV state machine
 #[derive(Clone)]
 pub struct ShardStateMachine {
     /// Storage backend (supports memory or persistent storage)
     store: Arc<storage::store::HybridStore>,
     /// Last applied index (monotonically increasing, tracks Raft apply_index)
-    raft_apply_index: Arc<std::sync::atomic::AtomicU64>,
+    raft_last_apply_index: Arc<std::sync::atomic::AtomicU64>,
     /// Last applied term (monotonically increasing, tracks Raft term)
-    raft_term: Arc<std::sync::atomic::AtomicU64>,
+    raft_last_apply_term: Arc<std::sync::atomic::AtomicU64>,
     /// Pending request tracker (includes apply result cache)
     pending_requests: PendingRequests,
     /// Raft storage backend
@@ -102,8 +109,8 @@ impl ShardStateMachine {
     ) -> Self {
         Self {
             store,
-            raft_apply_index: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            raft_term: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            raft_last_apply_index: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            raft_last_apply_term: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_requests: PendingRequests::new(), // Each shard creates its own pending_requests
             storage,
             network,
@@ -179,23 +186,23 @@ impl ShardStateMachine {
 
     /// Get apply_index reference
     pub fn apply_index(&self) -> &Arc<std::sync::atomic::AtomicU64> {
-        &self.raft_apply_index
+        &self.raft_last_apply_index
     }
 
     /// Get term reference
     pub fn term(&self) -> &Arc<std::sync::atomic::AtomicU64> {
-        &self.raft_term
+        &self.raft_last_apply_term
     }
 
     /// Get current raft apply index value
     fn get_raft_apply_index(&self) -> u64 {
-        self.raft_apply_index
+        self.raft_last_apply_index
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Generate a new request ID (monotonically increasing, per shard)
     /// This avoids collisions that could occur with random IDs
-    fn next_request_id(&self) -> RequestId {
+    pub fn next_request_id(&self) -> RequestId {
         let id = self
             .request_id_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -204,10 +211,10 @@ impl ShardStateMachine {
 
     /// Propose a write command through Raft consensus
     /// This handles the shard-specific logic for multi-raft operations
-    pub async fn propose_command(&self, cmd: Command) -> Result<RespValue, String> {
+    pub async fn propose_command(&self, cmd: StateMachineCommand) -> anyhow::Result<RespValue> {
         // Serialize command
-        let serialized = bincode::serde::encode_to_vec(&cmd.clone(), bincode::config::standard())
-            .map_err(|e| format!("Failed to serialize command: {}", e))?;
+        let serialized = bincode::serde::encode_to_vec(cmd, bincode::config::standard())
+            .map_err(|e| anyhow::anyhow!("Failed to serialize command: {}", e))?;
 
         // Generate request ID (monotonically increasing, per shard) and register wait
         let request_id = self.next_request_id();
@@ -223,7 +230,7 @@ impl ShardStateMachine {
             raft::multi_raft_driver::SendEventResult::Success => {}
             _ => {
                 self.pending_requests.remove(request_id);
-                return Err("Failed to dispatch event".to_string());
+                return Err(anyhow::anyhow!("Failed to dispatch event"));
             }
         }
 
@@ -233,12 +240,12 @@ impl ShardStateMachine {
             Ok(Ok(result)) => Ok(apply_result_to_resp(result)),
             Ok(Err(_)) => {
                 // Channel closed - node may be shutting down
-                Err("Request cancelled".to_string())
+                Err(anyhow::anyhow!("Request cancelled"))
             }
             Err(_) => {
                 // Timeout
                 self.pending_requests.remove(request_id);
-                Err("Request timeout".to_string())
+                Err(anyhow::anyhow!("Request timeout"))
             }
         }
     }
@@ -403,7 +410,7 @@ impl StateMachine for ShardStateMachine {
         // to avoid blocking async runtime since storage operations are synchronous
         let (result, command_opt) = tokio::task::spawn_blocking(move || {
             // Deserialize to Command
-            let command: Command = match bincode::serde::decode_from_slice(
+            let command: StateMachineCommand = match bincode::serde::decode_from_slice(
                 cmd.as_slice(),
                 bincode::config::standard(),
             ) {
@@ -419,10 +426,16 @@ impl StateMachine for ShardStateMachine {
                     );
                 }
             };
-            (
-                store.apply_with_index(index, index, &command),
-                Some(command),
-            )
+            match command {
+                StateMachineCommand::RedisCommand(cmd) => {
+                    let result = store.apply_with_index(index, index, &cmd);
+                    (result, Some(cmd))
+                }
+                StateMachineCommand::Noop(_noop) => {
+                    // Noop command doesn't need to be applied
+                    (StoreApplyResult::Ok, None)
+                }
+            }
         })
         .await
         .map_err(|e| raft::ApplyError::Internal(format!("Failed to apply command: {}", e)))?;
@@ -431,9 +444,9 @@ impl StateMachine for ShardStateMachine {
         self.pending_requests.cache_apply_result(index, result);
 
         // Update apply_index and term (this is the last applied index and term)
-        self.raft_apply_index
+        self.raft_last_apply_index
             .store(index, std::sync::atomic::Ordering::SeqCst);
-        self.raft_term
+        self.raft_last_apply_term
             .store(term, std::sync::atomic::Ordering::SeqCst);
 
         // Check if command should be forwarded to log replay channels
@@ -489,8 +502,8 @@ impl StateMachine for ShardStateMachine {
         use crate::snapshot_transfer::SnapshotMetadata;
 
         let store = self.store.clone();
-        let apply_index = self.raft_apply_index.clone();
-        let term_atomic = self.raft_term.clone();
+        let apply_index = self.raft_last_apply_index.clone();
+        let term_atomic = self.raft_last_apply_term.clone();
         let pending_requests = self.pending_requests.clone();
         let from = from.clone();
         let config = self.config.clone();
