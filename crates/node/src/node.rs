@@ -3,7 +3,7 @@
 //! Integrates Multi-Raft, KV state machine, routing, and storage
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use parking_lot::Mutex;
 use tracing::{debug, info};
@@ -50,7 +50,7 @@ pub struct RRNode {
         Arc<parking_lot::RwLock<std::collections::HashMap<String, Arc<tonic::transport::Channel>>>>,
     /// Log replay writers (task_id -> LogReplayWriter)
     /// Used to store log replay writer for split operations
-    log_replay_writers: Arc<ParkingLotRwLock<HashMap<String, LogReplayWriter>>>,
+    log_replay_writers: Arc<tokio::sync::RwLock<HashMap<String, LogReplayWriter>>>,
     /// Configuration
     config: Config,
 }
@@ -74,7 +74,7 @@ impl RRNode {
             state_machines: Arc::new(Mutex::new(HashMap::new())),
             snapshot_transfer_manager: Arc::new(SnapshotTransferManager::new()),
             grpc_client_pool: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
-            log_replay_writers: Arc::new(ParkingLotRwLock::new(HashMap::new())),
+            log_replay_writers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             config,
         }
     }
@@ -225,8 +225,11 @@ impl RRNode {
     /// # Arguments
     /// - `task_id`: Split task ID
     /// - `writer`: Log replay writer
-    pub fn register_log_replay_writer(&self, task_id: String, writer: LogReplayWriter) {
-        self.log_replay_writers.write().insert(task_id, writer);
+    pub async fn register_log_replay_writer(&self, task_id: String, writer: LogReplayWriter) {
+        self.log_replay_writers
+            .write()
+            .await
+            .insert(task_id, writer);
     }
 
     /// Create log replay iterator for a split task
@@ -241,30 +244,16 @@ impl RRNode {
     pub async fn create_log_replay_iterator(
         &self,
         task_id: &str,
-        start_index: u64,
+        start_seq: u64,
     ) -> anyhow::Result<crate::log_replay_writer::LogReplayIterator> {
-        use crate::log_replay_writer::LogReplayIterator;
-
-        let writer_info = self
-            .log_replay_writers
-            .read()
+        // Get writer and call create_iterator
+        // create_iterator clones all necessary data internally, so we can safely
+        // hold the lock during the call (it's a short-lived operation)
+        let guard = self.log_replay_writers.read().await;
+        let writer = guard
             .get(task_id)
-            .map(|writer| {
-                let file_path = writer.file_path().clone();
-                let mut index_file_path = file_path.clone();
-                index_file_path.set_extension("idx");
-                crate::log_replay_writer::LogReplayWriterInfo {
-                    file_path,
-                    index_file_path,
-                    metadata: writer.metadata(),
-                    notify: writer.notify(),
-                    cache: writer.cache(),
-                    snapshot_index: writer.snapshot_index(),
-                }
-            })
             .ok_or_else(|| anyhow::anyhow!("Log replay writer not found for task {}", task_id))?;
-
-        LogReplayIterator::new(writer_info, start_index).await
+        writer.create_iterator(start_seq).await
     }
 
     /// Set snapshot index for log replay writer
@@ -277,6 +266,7 @@ impl RRNode {
         let snapshot_index_arc = {
             self.log_replay_writers
                 .read()
+                .await
                 .get(task_id)
                 .map(|writer| writer.snapshot_index())
         };
@@ -290,8 +280,8 @@ impl RRNode {
     ///
     /// # Arguments
     /// - `task_id`: Split task ID
-    pub fn remove_log_replay_writer(&self, task_id: &str) {
-        self.log_replay_writers.write().remove(task_id);
+    pub async fn remove_log_replay_writer(&self, task_id: &str) {
+        self.log_replay_writers.write().await.remove(task_id);
     }
 
     /// Create Raft group (for Pilot control plane only)

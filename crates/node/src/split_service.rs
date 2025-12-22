@@ -353,7 +353,7 @@ impl SplitServiceImpl {
             );
             // Clean up: remove replay log config and wait for writer to finish
             source_state_machine.remove_replay_log(&task_id);
-            node.remove_log_replay_writer(&task_id);
+            node.remove_log_replay_writer(&task_id).await;
             drop(log_replay_handle); // Drop handle to signal writer to stop
             let _ = task_manager.set_task_error(&task_id, e.to_string());
             return;
@@ -406,7 +406,7 @@ impl SplitServiceImpl {
             error!("Failed to update routing table for task {}: {}", task_id, e);
             // Clean up: remove replay log config
             source_state_machine.remove_replay_log(&task_id);
-            node.remove_log_replay_writer(&task_id);
+            node.remove_log_replay_writer(&task_id).await;
             drop(log_replay_handle); // Drop handle to signal writer to stop
             let _ = task_manager.set_task_error(&task_id, e.to_string());
             return;
@@ -426,7 +426,7 @@ impl SplitServiceImpl {
         // Clean up: remove replay log config from state machine
         // The log_replay_writer will continue running until channel is closed
         source_state_machine.remove_replay_log(&task_id);
-        node.remove_log_replay_writer(&task_id);
+        node.remove_log_replay_writer(&task_id).await;
         info!("Removed log replay config for task {}", task_id);
         // Drop handle to signal writer to stop (channel will be closed when tx is dropped)
         drop(log_replay_handle);

@@ -57,24 +57,6 @@ pub struct CachedLogEntry {
     pub command_data: Vec<u8>,
 }
 
-/// Log replay writer information for storage in node
-/// Contains references to the writer's components that can be accessed after the writer is started
-#[derive(Debug, Clone)]
-pub struct LogReplayWriterInfo {
-    /// File path
-    pub file_path: PathBuf,
-    /// Index file path for storing (seq_index, offset) mappings
-    pub index_file_path: PathBuf,
-    /// Metadata
-    pub metadata: Arc<RwLock<LogReplayMetadata>>,
-    /// Notification for new data available
-    pub notify: Arc<Notify>,
-    /// Cache for latest entries (max 128 entries)
-    pub cache: Arc<RwLock<VecDeque<CachedLogEntry>>>,
-    /// Snapshot apply_index - entries with index <= this value are already in snapshot
-    pub snapshot_index: Arc<RwLock<Option<u64>>>,
-}
-
 /// Log replay writer
 pub struct LogReplayWriter {
     /// File path
@@ -172,17 +154,18 @@ impl LogReplayWriter {
         self.snapshot_index.clone()
     }
 
-    /// Extract writer info for storage
-    /// This allows storing the writer's components after the writer is moved into start()
-    pub fn into_info(self) -> LogReplayWriterInfo {
-        LogReplayWriterInfo {
-            file_path: self.file_path,
-            index_file_path: self.index_file_path,
-            metadata: self.metadata,
-            notify: self.notify,
-            cache: self.cache,
-            snapshot_index: self.snapshot_index,
-        }
+    /// Create an iterator starting from the specified sequential index
+    pub async fn create_iterator(&self, start_seq: u64) -> anyhow::Result<LogReplayIterator> {
+        LogReplayIterator::new(
+            self.file_path.clone(),
+            self.index_file_path.clone(),
+            self.metadata.clone(),
+            self.notify.clone(),
+            self.cache.clone(),
+            self.snapshot_index.clone(),
+            start_seq,
+        )
+        .await
     }
 
     /// Start the writer task
@@ -387,24 +370,34 @@ impl LogReplayWriter {
 
 /// Async iterator for reading log replay entries
 pub struct LogReplayIterator {
-    pub(crate) next_seq_index: u64, // Next sequential index to read (starts from 1)
+    pub(crate) next_seq: u64, // Next sequential index to read (starts from 1)
     file_position: u64,
     file_reader: tokio::io::BufReader<File>,
     index_reader: tokio::io::BufReader<File>, // Index file reader for quick offset lookup
-    pub(crate) writer_info: LogReplayWriterInfo,
+    file_path: PathBuf,
+    index_file_path: PathBuf,
+    metadata: Arc<RwLock<LogReplayMetadata>>,
+    notify: Arc<Notify>,
+    cache: Arc<RwLock<VecDeque<CachedLogEntry>>>,
+    snapshot_index: Arc<RwLock<Option<u64>>>,
 }
 
 impl LogReplayIterator {
     /// Create a new iterator starting from the specified sequential index
     /// If start_seq_index is 0, it will be initialized to 1
     pub async fn new(
-        writer_info: LogReplayWriterInfo,
-        start_seq_index: u64,
+        file_path: PathBuf,
+        index_file_path: PathBuf,
+        metadata: Arc<RwLock<LogReplayMetadata>>,
+        notify: Arc<Notify>,
+        cache: Arc<RwLock<VecDeque<CachedLogEntry>>>,
+        snapshot_index: Arc<RwLock<Option<u64>>>,
+        start_seq: u64,
     ) -> anyhow::Result<Self> {
         // Open file for reading
         let file = tokio::fs::OpenOptions::new()
             .read(true)
-            .open(&writer_info.file_path)
+            .open(&file_path)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to open log replay file: {}", e))?;
         let file_reader = tokio::io::BufReader::new(file);
@@ -412,23 +405,24 @@ impl LogReplayIterator {
         // Open index file for reading
         let index_file = tokio::fs::OpenOptions::new()
             .read(true)
-            .open(&writer_info.index_file_path)
+            .open(&index_file_path)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to open index file: {}", e))?;
         let index_reader = tokio::io::BufReader::new(index_file);
 
-        let next_seq_index = if start_seq_index == 0 {
-            1
-        } else {
-            start_seq_index
-        };
+        let next_seq = if start_seq == 0 { 1 } else { start_seq };
 
         Ok(Self {
-            next_seq_index,
+            next_seq,
             file_position: 0,
             file_reader,
             index_reader,
-            writer_info,
+            file_path,
+            index_file_path,
+            metadata,
+            notify,
+            cache,
+            snapshot_index,
         })
     }
 
@@ -479,7 +473,7 @@ impl LogReplayIterator {
     /// Try to find entry in cache using sequential index offset calculation
     /// Returns Some(EntryLog) if found, None otherwise
     async fn try_get_from_cache(&mut self) -> Option<EntryLog> {
-        let cache_guard = self.writer_info.cache.read().await;
+        let cache_guard = self.cache.read().await;
 
         // Cache is empty, nothing to find
         if cache_guard.is_empty() {
@@ -491,12 +485,12 @@ impl LogReplayIterator {
         let last_seq_index = cache_guard.back()?.index;
 
         // Check if next_seq_index is within cache range
-        if self.next_seq_index < first_seq_index || self.next_seq_index > last_seq_index {
+        if self.next_seq < first_seq_index || self.next_seq > last_seq_index {
             return None; // Not in cache range
         }
 
         // Calculate offset: next_seq_index - first_seq_index
-        let offset = self.next_seq_index - first_seq_index;
+        let offset = self.next_seq - first_seq_index;
 
         // Check if offset is within cache bounds
         if offset >= cache_guard.len() as u64 {
@@ -507,7 +501,7 @@ impl LogReplayIterator {
         let entry = &cache_guard[offset as usize];
 
         // Verify the entry matches (cache might have gaps)
-        if entry.index != self.next_seq_index {
+        if entry.index != self.next_seq {
             return None; // Entry not found at expected position
         }
 
@@ -519,7 +513,7 @@ impl LogReplayIterator {
             command: entry.command_data.clone(),
         };
 
-        self.next_seq_index += 1;
+        self.next_seq += 1;
         Some(entry_log)
     }
 
@@ -531,7 +525,7 @@ impl LogReplayIterator {
         // This must be done before reading from file
         if self.file_position == 0 {
             // Try to get initial offset from index file
-            if let Some(offset) = self.get_offset_from_index(self.next_seq_index).await {
+            if let Some(offset) = self.get_offset_from_index(self.next_seq).await {
                 if self.file_reader.seek(SeekFrom::Start(offset)).await.is_ok() {
                     self.file_position = offset;
                 }
@@ -574,9 +568,9 @@ impl LogReplayIterator {
             let data_len = u32::from_le_bytes(header_buf[24..28].try_into().unwrap()) as usize;
 
             // Skip entries before next_seq_index
-            if entry_index < self.next_seq_index {
+            if entry_index < self.next_seq {
                 // Try to get offset from index file for faster skipping
-                if let Some(offset) = self.get_offset_from_index(self.next_seq_index).await {
+                if let Some(offset) = self.get_offset_from_index(self.next_seq).await {
                     // Found offset in index file, seek directly to it
                     if self
                         .file_reader
@@ -608,7 +602,7 @@ impl LogReplayIterator {
                 continue;
             }
 
-            if entry_index > self.next_seq_index {
+            if entry_index > self.next_seq {
                 // Entry not ready yet (missing entry), return None
                 return Ok(None);
             }
@@ -630,7 +624,7 @@ impl LogReplayIterator {
             self.file_position += HEADER_SIZE as u64 + data_len as u64;
 
             // Create EntryLog and increment seq_index
-            let current_seq_index = self.next_seq_index;
+            let current_seq_index = self.next_seq;
             let entry_log = EntryLog {
                 seq_index: current_seq_index, // Use current sequential index
                 index: apply_index,
@@ -638,7 +632,7 @@ impl LogReplayIterator {
                 command: command_data,
             };
 
-            self.next_seq_index += 1;
+            self.next_seq += 1;
             return Ok(Some(entry_log));
         }
     }
@@ -648,11 +642,11 @@ impl LogReplayIterator {
     pub async fn next(&mut self) -> anyhow::Result<Option<EntryLog>> {
         loop {
             // Check if we've reached the latest sequential index
-            let last_seq_index = self.writer_info.metadata.read().await.last_seq_index;
-            if self.next_seq_index > last_seq_index {
+            let last_seq_index = self.metadata.read().await.last_seq_index;
+            if self.next_seq > last_seq_index {
                 // No more entries available, wait for new data
                 tokio::select! {
-                    _ = self.writer_info.notify.notified() => {
+                    _ = self.notify.notified() => {
                         continue;
                     }
                     _ = tokio::time::sleep(Duration::from_secs(5)) => {
@@ -675,7 +669,7 @@ impl LogReplayIterator {
             }
 
             // Step 3: Wait for new data and retry
-            let notify = self.writer_info.notify.clone();
+            let notify = self.notify.clone();
             tokio::select! {
                 _ = notify.notified() => {
                     // New data available, continue loop

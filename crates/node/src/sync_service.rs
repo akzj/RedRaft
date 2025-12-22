@@ -1293,7 +1293,6 @@ impl SyncService for SyncServiceImpl {
         ) {
             Ok(()) => {
                 info!("Created sync task on PULL side: {}", task_id);
-
                 // Spawn background task to pull data from PUSH side (source node)
                 let task_manager_clone = self.task_manager.clone();
                 let sync_service_impl = self.clone();
@@ -1419,12 +1418,10 @@ impl SyncService for SyncServiceImpl {
         // PUSH side periodically queries status to monitor sync progress
         match self.task_manager.get_task(&task_id) {
             Some(task) => {
-                // TODO: Update progress from actual sync operation state
-                // This would query:
-                // - Snapshot transfer progress
-                // - Entry log transfer progress
-                // - Current Raft indices
-                // - Bytes/entries transferred
+                info!(
+                    "GetSyncStatus request: task_id={}, status={}, phase={}",
+                    task_id, task.status, task.phase
+                );
 
                 Ok(Response::new(GetSyncStatusResponse {
                     task_id: task.task_id.clone(),
@@ -1435,13 +1432,13 @@ impl SyncService for SyncServiceImpl {
                 }))
             }
             None => {
-                let task_id_clone = task_id.clone();
+                warn!("GetSyncStatus request: task_id={} not found", task_id);
                 Ok(Response::new(GetSyncStatusResponse {
-                    task_id,
+                    task_id: task_id.clone(),
                     status: SyncStatus::NotFound as i32,
                     phase: SyncPhase::Unspecified as i32,
                     progress: None,
-                    error_message: format!("Sync task {} not found", task_id_clone),
+                    error_message: format!("Sync task {} not found", task_id),
                 }))
             }
         }
@@ -1457,7 +1454,7 @@ async fn stream_snapshot_chunks_from_source(
     chunk_index: u32,
     _max_chunk_size: u32,
     tx: tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     use crate::snapshot_transfer::{get_transfer_state_info, read_chunk_from_file, wait_for_chunk};
     use std::time::Duration;
 
@@ -1488,7 +1485,7 @@ async fn stream_snapshot_chunks_from_source(
         task_id: &str,
         error_msg: String,
         error: anyhow::Error,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         let _ = tx
             .send(Ok(PullSyncDataResponse {
                 task_id: task_id.to_string(),
@@ -1582,12 +1579,10 @@ async fn send_entry_log_response(
         .send(Ok(PullSyncDataResponse {
             task_id: task_id.to_string(),
             data_type: SyncDataType::EntryLog as i32,
-            chunk_data: vec![],
             entry_logs,
-            chunk_size: 0,
-            is_last_chunk,
-            checksum: vec![],
             error_message,
+            is_last_chunk,
+            ..Default::default()
         }))
         .await;
 }
@@ -1597,14 +1592,11 @@ async fn send_entry_log_response(
 async fn stream_entry_logs_from_source(
     node: Arc<RRNode>,
     task_id: String,
-    start_seq_index: u64,
+    start_seq: u64,
     tx: tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     // Create iterator starting from start_seq_index
-    let mut iterator = match node
-        .create_log_replay_iterator(&task_id, start_seq_index)
-        .await
-    {
+    let mut iterator = match node.create_log_replay_iterator(&task_id, start_seq).await {
         Ok(iter) => iter,
         Err(e) => {
             let error_msg = format!("Failed to create log replay iterator: {}", e);
