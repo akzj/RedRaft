@@ -1,9 +1,14 @@
 //! Hybrid Storage Manager
 //!
 //! Unified interface for multiple storage backends:
-//! - RocksDB: String, Hash (persistent)
-//! - Memory: List, Set, ZSet (volatile)
-//! - StreamStore: Stream (persistent)
+//! - RocksDB: String, Hash (persistent, don't need WAL)
+//! - Memory: List, Set, ZSet, Bitmap, and all other data structures (volatile, need WAL for recovery)
+//!
+//! ## Storage Architecture
+//!
+//! Only String and Hash are stored in RocksDB (persistent storage).
+//! All other data structures (List, Set, ZSet, Bitmap, etc.) are stored in Memory store
+//! and require WAL logging for recovery.
 //!
 //! ## Path Structure
 //!
@@ -175,8 +180,12 @@ impl ShardedStore {
 /// Hybrid Storage Manager
 ///
 /// Combines multiple storage backends with automatic routing.
+///
+/// Storage architecture:
+/// - RocksDB: Only String and Hash (persistent, don't need WAL)
+/// - Memory store: All other data structures (List, Set, ZSet, Bitmap, etc.) - need WAL for recovery
 pub struct HybridStore {
-    /// RocksDB for String, Hash (shared across all shards)
+    /// RocksDB for String and Hash only (shared across all shards)
     pub(crate) rocksdb: Arc<ShardedRocksDB>,
 
     /// Shards: RocksDB + Memory per shard
@@ -257,6 +266,86 @@ impl HybridStore {
         Ok(Arc::clone(shard))
     }
 
+    /// Check if command needs WAL logging
+    ///
+    /// Storage architecture:
+    /// - RocksDB: Only String and Hash (persistent, don't need WAL)
+    /// - Memory store: All other data structures (List, Set, ZSet, Bitmap, etc.) - need WAL for recovery
+    ///
+    /// Only memory store write commands need WAL logging.
+    /// RocksDB commands (String, Hash) are already persistent and don't need WAL.
+    ///
+    /// # Arguments
+    /// - `command`: Command to check
+    ///
+    /// # Returns
+    /// `true` if the command operates on memory store and is a write command
+    pub(crate) fn needs_wal_logging(command: &Command) -> bool {
+        if !command.is_write() {
+            return false;
+        }
+
+        // Exclude RocksDB write commands (String, Hash) - they don't need WAL
+        // All other write commands (List, Set, ZSet, Key commands, etc.) need WAL
+        !matches!(
+            command,
+            // String write commands (RocksDB)
+            Command::Set { .. }
+            | Command::SetNx { .. }
+            | Command::SetEx { .. }
+            | Command::PSetEx { .. }
+            | Command::MSet { .. }
+            | Command::MSetNx { .. }
+            | Command::Incr { .. }
+            | Command::IncrBy { .. }
+            | Command::IncrByFloat { .. }
+            | Command::Decr { .. }
+            | Command::DecrBy { .. }
+            | Command::Append { .. }
+            | Command::GetSet { .. }
+            | Command::SetRange { .. }
+            // Hash write commands (RocksDB)
+            | Command::HSet { .. }
+            | Command::HSetNx { .. }
+            | Command::HMSet { .. }
+            | Command::HDel { .. }
+            | Command::HIncrBy { .. }
+            | Command::HIncrByFloat { .. }
+        )
+    }
+
+    /// Write command to WAL if needed
+    ///
+    /// Storage architecture:
+    /// - RocksDB: Only String and Hash (don't need WAL)
+    /// - Memory store: All other data structures (List, Set, ZSet, Bitmap, etc.) - need WAL
+    ///
+    /// Only writes to WAL if the command operates on memory store.
+    /// RocksDB commands (String, Hash) don't need WAL as they are already persistent.
+    ///
+    /// # Arguments
+    /// - `apply_index`: Raft apply index for WAL logging
+    /// - `command`: Command to write
+    pub fn write_wal_if_needed(&self, apply_index: u64, command: &Command) -> Result<()> {
+        if !Self::needs_wal_logging(command) {
+            return Ok(());
+        }
+
+        if let Some(key) = command.get_key() {
+            if let Err(e) = self
+                .wal_writer
+                .write()
+                .write_entry(apply_index, command, key)
+            {
+                error!("Failed to write WAL entry at index {}: {}", apply_index, e);
+                // Don't fail the command execution if WAL write fails
+                return Err(e);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Apply command with apply_index (for WAL logging)
     ///
     /// This method executes the command and writes it to WAL for recovery.
@@ -274,18 +363,14 @@ impl HybridStore {
         // 1. Execute command using RedisStore trait's apply method
         let result = crate::traits::RedisStore::apply(self, read_index, apply_index, command);
 
-        // 2. Extract key and write to WAL (only for write commands)
-        if Self::is_write_command(command) {
-            if let Some(key) = command.get_key() {
-                if let Err(e) = self
-                    .wal_writer
-                    .write()
-                    .write_entry(apply_index, command, key)
-                {
-                    error!("Failed to write WAL entry at index {}: {}", apply_index, e);
-                    // Don't fail the command execution if WAL write fails
-                }
-            }
+        // 2. Write to WAL if needed (only for memory store write commands)
+        if let Err(e) = self.write_wal_if_needed(apply_index, command) {
+            error!("Failed to write WAL entry at index {}: {}", apply_index, e);
+            return crate::traits::ApplyResult::Error(StoreError::Internal(e.to_string()));
+        }
+
+        // 3. Update last_applied_index for write commands
+        if command.is_write() {
             self.last_applied_index
                 .store(apply_index, std::sync::atomic::Ordering::SeqCst);
         }
@@ -477,6 +562,48 @@ mod tests {
     }
 
     #[test]
+    fn test_needs_wal_logging() {
+        // Test that memory store commands need WAL logging
+        let lpush = Command::LPush {
+            key: Bytes::from(b"key" as &[u8]),
+            values: vec![Bytes::from(b"value" as &[u8])],
+        };
+        assert!(HybridStore::needs_wal_logging(&lpush));
+
+        let sadd = Command::SAdd {
+            key: Bytes::from(b"key" as &[u8]),
+            members: vec![Bytes::from(b"member" as &[u8])],
+        };
+        assert!(HybridStore::needs_wal_logging(&sadd));
+
+        // Test that RocksDB commands don't need WAL logging
+        let set = Command::Set {
+            key: Bytes::from(b"key" as &[u8]),
+            value: Bytes::from(b"value" as &[u8]),
+            ex: None,
+            px: None,
+            nx: false,
+            xx: false,
+        };
+        assert!(!HybridStore::needs_wal_logging(&set));
+
+        let hset = Command::HSet {
+            key: Bytes::from(b"key" as &[u8]),
+            fvs: vec![(
+                Bytes::from(b"field" as &[u8]),
+                Bytes::from(b"value" as &[u8]),
+            )],
+        };
+        assert!(!HybridStore::needs_wal_logging(&hset));
+
+        // Test that read commands don't need WAL logging
+        let get = Command::Get {
+            key: Bytes::from(b"key" as &[u8]),
+        };
+        assert!(!HybridStore::needs_wal_logging(&get));
+    }
+
+    #[test]
     fn test_apply_with_index_writes_to_wal() {
         let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path().to_path_buf();
@@ -500,21 +627,28 @@ mod tests {
 
         let store = HybridStore::new(config, data_dir.clone(), routing_table).unwrap();
 
-        // Apply a write command
-        let key = b"test_key".to_vec();
-        let command = Command::Set {
-            key: Bytes::from(b"test_key" as &[u8]),
-            value: Bytes::from(b"test_value" as &[u8]),
-            ex: None,
-            px: None,
-            nx: false,
-            xx: false,
+        // Create shard manually for testing
+        let shard_id = "shard_0".to_string();
+        // Note: ShardedStore needs a ShardedRocksDB, but store.rocksdb is Arc<ShardedRocksDB>
+        // We need to clone the inner value. Since ShardedRocksDB implements Clone, we can use that.
+        let shard = ShardedStore::new((*store.rocksdb).clone(), MemStoreCow::new());
+        store
+            .shards
+            .write()
+            .insert(shard_id.clone(), Arc::new(RwLock::new(shard)));
+
+        // Apply a write command that operates on memory store (needs WAL)
+        // Use LPush (List command) which is stored in memory and requires WAL logging
+        let command = Command::LPush {
+            key: Bytes::from(b"test_list" as &[u8]),
+            values: vec![Bytes::from(b"value1" as &[u8])],
         };
 
         let result = store.apply_with_index(1, 1, &command);
-        assert!(matches!(result, crate::traits::ApplyResult::Ok));
+        assert!(matches!(result, crate::traits::ApplyResult::Integer(_)));
 
         // Flush WAL and verify it was written
+        store.flush_wal().unwrap();
 
         // Verify WAL file exists
         let wal_dir = data_dir.join("wal");

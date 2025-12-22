@@ -199,6 +199,36 @@ pub enum Command {
     /// SPOP key [count]
     SPop { key: Bytes, count: Option<u64> },
 
+    // ==================== ZSet Read Commands ====================
+    /// ZSCORE key member
+    ZScore { key: Bytes, member: Bytes },
+    /// ZRANK key member
+    ZRank { key: Bytes, member: Bytes },
+    /// ZRANGE key start stop [WITHSCORES]
+    ZRange {
+        key: Bytes,
+        start: i64,
+        stop: i64,
+        with_scores: bool,
+    },
+    /// ZCARD key
+    ZCard { key: Bytes },
+
+    // ==================== ZSet Write Commands ====================
+    /// ZADD key score member [score member ...]
+    ZAdd {
+        key: Bytes,
+        members: Vec<(f64, Bytes)>,
+    },
+    /// ZREM key member [member ...]
+    ZRem { key: Bytes, members: Vec<Bytes> },
+    /// ZINCRBY key increment member
+    ZIncrBy {
+        key: Bytes,
+        increment: f64,
+        member: Bytes,
+    },
+
     // ==================== Key Commands ====================
     /// DEL key [key ...]
     Del { keys: Vec<Bytes> },
@@ -300,6 +330,15 @@ impl Command {
                 CommandType::Write
             }
 
+            // ZSet commands
+            Command::ZScore { .. }
+            | Command::ZRank { .. }
+            | Command::ZRange { .. }
+            | Command::ZCard { .. } => CommandType::Read,
+            Command::ZAdd { .. } | Command::ZRem { .. } | Command::ZIncrBy { .. } => {
+                CommandType::Write
+            }
+
             // Key commands
             Command::Exists { .. }
             | Command::Ttl { .. }
@@ -377,12 +416,19 @@ impl Command {
             | Command::HDel { key, .. }
             | Command::HIncrBy { key, .. }
             | Command::HIncrByFloat { key, .. }
-            | Command::SMembers { key }
+            |             Command::SMembers { key }
             | Command::SIsMember { key, .. }
             | Command::SCard { key }
             | Command::SAdd { key, .. }
             | Command::SRem { key, .. }
             | Command::SPop { key, .. }
+            | Command::ZScore { key, .. }
+            | Command::ZRank { key, .. }
+            | Command::ZRange { key, .. }
+            | Command::ZCard { key }
+            | Command::ZAdd { key, .. }
+            | Command::ZRem { key, .. }
+            | Command::ZIncrBy { key, .. }
             | Command::Expire { key, .. }
             | Command::PExpire { key, .. }
             | Command::Ttl { key }
@@ -467,6 +513,13 @@ impl Command {
             Command::SAdd { .. } => "SADD",
             Command::SRem { .. } => "SREM",
             Command::SPop { .. } => "SPOP",
+            Command::ZScore { .. } => "ZSCORE",
+            Command::ZRank { .. } => "ZRANK",
+            Command::ZRange { .. } => "ZRANGE",
+            Command::ZCard { .. } => "ZCARD",
+            Command::ZAdd { .. } => "ZADD",
+            Command::ZRem { .. } => "ZREM",
+            Command::ZIncrBy { .. } => "ZINCRBY",
             Command::Del { .. } => "DEL",
             Command::Exists { .. } => "EXISTS",
             Command::Expire { .. } => "EXPIRE",
@@ -1071,6 +1124,77 @@ fn parse_command(cmd: &str, args: &[Bytes]) -> Result<Command, CommandError> {
             Ok(Command::SPop {
                 key: args[0].clone(),
                 count: args.get(1).map(|a| parse_uint(a, "count")).transpose()?,
+            })
+        }
+
+        // ZSet commands
+        "ZADD" => {
+            check_arity(args, 3, None, cmd)?;
+            if args.len() % 2 != 1 {
+                return Err(CommandError::new(
+                    CommandErrorKind::WrongArity,
+                    "wrong number of arguments for 'ZADD' command",
+                ));
+            }
+            let mut members = Vec::new();
+            for i in (1..args.len()).step_by(2) {
+                let score = parse_float(&args[i], "score")?;
+                let member = args[i + 1].clone();
+                members.push((score, member));
+            }
+            Ok(Command::ZAdd {
+                key: args[0].clone(),
+                members,
+            })
+        }
+        "ZREM" => {
+            check_arity(args, 2, None, cmd)?;
+            Ok(Command::ZRem {
+                key: args[0].clone(),
+                members: args[1..].to_vec(),
+            })
+        }
+        "ZSCORE" => {
+            check_arity(args, 2, Some(2), cmd)?;
+            Ok(Command::ZScore {
+                key: args[0].clone(),
+                member: args[1].clone(),
+            })
+        }
+        "ZRANK" => {
+            check_arity(args, 2, Some(2), cmd)?;
+            Ok(Command::ZRank {
+                key: args[0].clone(),
+                member: args[1].clone(),
+            })
+        }
+        "ZRANGE" => {
+            check_arity(args, 3, Some(4), cmd)?;
+            let start = parse_int(&args[1], "start")?;
+            let stop = parse_int(&args[2], "stop")?;
+            let with_scores = args.len() == 4
+                && std::str::from_utf8(&args[3])
+                    .map(|s| s.to_uppercase() == "WITHSCORES")
+                    .unwrap_or(false);
+            Ok(Command::ZRange {
+                key: args[0].clone(),
+                start,
+                stop,
+                with_scores,
+            })
+        }
+        "ZCARD" => {
+            check_arity(args, 1, Some(1), cmd)?;
+            Ok(Command::ZCard {
+                key: args[0].clone(),
+            })
+        }
+        "ZINCRBY" => {
+            check_arity(args, 3, Some(3), cmd)?;
+            Ok(Command::ZIncrBy {
+                key: args[0].clone(),
+                increment: parse_float(&args[1], "increment")?,
+                member: args[2].clone(),
             })
         }
 

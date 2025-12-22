@@ -1206,6 +1206,91 @@ pub trait RedisStore:
                 }
             }
 
+            // ==================== ZSet Read Commands ====================
+            Command::ZScore { key, member } => match self.zscore(key, member, read_index) {
+                Ok(Some(score)) => ApplyResult::Value(Some(Bytes::from(score.to_string()))),
+                Ok(None) => ApplyResult::Value(None),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::ZRank { key, member } => match self.zrank(key, member, read_index) {
+                Ok(Some(rank)) => ApplyResult::Integer(rank as i64),
+                Ok(None) => ApplyResult::Value(None),
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::ZRange {
+                key,
+                start,
+                stop,
+                with_scores,
+            } => match self.zrange(key, *start, *stop, *with_scores, read_index) {
+                Ok(members) => {
+                    if *with_scores {
+                        // Return as array of [member, score, member, score, ...]
+                        let mut result = Vec::new();
+                        for (member, score) in members {
+                            result.push(Some(Bytes::from(member)));
+                            result.push(Some(Bytes::from(score.to_string())));
+                        }
+                        ApplyResult::Array(result)
+                    } else {
+                        // Return as array of members only
+                        ApplyResult::Array(
+                            members
+                                .into_iter()
+                                .map(|(member, _)| Some(Bytes::from(member)))
+                                .collect(),
+                        )
+                    }
+                }
+                Err(e) => ApplyResult::Error(e),
+            },
+            Command::ZCard { key } => match self.zcard(key, read_index) {
+                Ok(count) => ApplyResult::Integer(count as i64),
+                Err(e) => ApplyResult::Error(e),
+            },
+
+            // ==================== ZSet Write Commands ====================
+            Command::ZAdd { key, members } => {
+                let members_vec: Vec<(f64, Bytes)> = members
+                    .iter()
+                    .map(|(score, member)| (*score, Bytes::from(member.clone())))
+                    .collect();
+                match self.zadd(key, members_vec, apply_index) {
+                    Ok(count) => ApplyResult::Integer(count as i64),
+                    Err(e) => ApplyResult::Error(e),
+                }
+            }
+            Command::ZRem { key, members } => {
+                let members_refs: Vec<&[u8]> = members.iter().map(|m| m.as_ref()).collect();
+                match self.zrem(key, &members_refs, apply_index) {
+                    Ok(count) => ApplyResult::Integer(count as i64),
+                    Err(e) => ApplyResult::Error(e),
+                }
+            }
+            Command::ZIncrBy { key, increment, member } => {
+                // ZINCRBY is implemented as ZADD with the current score + increment
+                // First get current score, then add increment
+                match self.zscore(key, member, read_index) {
+                    Ok(Some(current_score)) => {
+                        let new_score = current_score + increment;
+                        let members_vec = vec![(new_score, Bytes::from(member.clone()))];
+                        match self.zadd(key, members_vec, apply_index) {
+                            Ok(_) => ApplyResult::Value(Some(Bytes::from(new_score.to_string()))),
+                            Err(e) => ApplyResult::Error(e),
+                        }
+                    }
+                    Ok(None) => {
+                        // Member doesn't exist, add with increment as score
+                        let members_vec = vec![(*increment, Bytes::from(member.clone()))];
+                        match self.zadd(key, members_vec, apply_index) {
+                            Ok(_) => ApplyResult::Value(Some(Bytes::from(increment.to_string()))),
+                            Err(e) => ApplyResult::Error(e),
+                        }
+                    }
+                    Err(e) => ApplyResult::Error(e),
+                }
+            }
+
             // ==================== Key Read Commands ====================
             Command::Exists { keys } => {
                 let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();

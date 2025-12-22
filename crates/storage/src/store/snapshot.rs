@@ -109,7 +109,7 @@ impl SnapshotStore for HybridStore {
                     }
                 };
 
-                // Iterate RocksDB entries (String and Hash)
+                // Iterate RocksDB entries (only String and Hash are stored in RocksDB)
                 let iter = snapshot.iterator_cf(cf_handler, rocksdb::IteratorMode::Start);
                 for item in iter {
                     let (key, value) = match item {
@@ -179,7 +179,7 @@ impl SnapshotStore for HybridStore {
                     }
                 };
 
-                // Iterate Memory store entries (List, Set, ZSet, Bitmap)
+                // Iterate Memory store entries (all other data structures: List, Set, ZSet, Bitmap, etc.)
                 // Note: memory_snapshot was already created above before signaling
                 let memory_data = memory_snapshot.read();
                 for (key, data_cow) in memory_data.iter() {

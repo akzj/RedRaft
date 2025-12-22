@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use bytes::Bytes;
 use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
 use tracing::{error, info, warn};
@@ -325,7 +326,8 @@ impl SyncServiceImpl {
                 return Ok(());
             }
             SnapshotStoreEntry::Error(err) => {
-                return Err(anyhow::anyhow!("Snapshot restore error: {}", err));
+                warn!("Received Error signal in pull side: {}", err);
+                return Ok(());
             }
             SnapshotStoreEntry::String(key, value, _apply_index) => {
                 // Use 0 for apply_index since this is pull side, not push side's apply_index
@@ -342,26 +344,54 @@ impl SyncServiceImpl {
             SnapshotStoreEntry::List(key, element, _apply_index) => {
                 // Use 0 for apply_index since this is pull side, not push side's apply_index
                 store
-                    .rpush(&key, vec![element], 0)
+                    .rpush(&key, vec![element.clone()], 0)
                     .map_err(|e| anyhow::anyhow!("Failed to restore List entry: {}", e))?;
+                store.write_wal_if_needed(
+                    0,
+                    &resp::Command::RPush {
+                        key: Bytes::from(key),
+                        values: vec![element],
+                    },
+                )?;
             }
             SnapshotStoreEntry::Set(key, member, _apply_index) => {
                 // Use 0 for apply_index since this is pull side, not push side's apply_index
                 store
-                    .sadd(&key, vec![member], 0)
+                    .sadd(&key, vec![member.clone()], 0)
                     .map_err(|e| anyhow::anyhow!("Failed to restore Set entry: {}", e))?;
+                // Write to WAL for memory store commands
+                store
+                    .write_wal_if_needed(
+                        0,
+                        &resp::Command::SAdd {
+                            key: Bytes::from(key),
+                            members: vec![member],
+                        },
+                    )
+                    .map_err(|e| anyhow::anyhow!("Failed to write WAL for Set entry: {}", e))?;
             }
             SnapshotStoreEntry::ZSet(key, score, member, _apply_index) => {
                 // Use 0 for apply_index since this is pull side, not push side's apply_index
                 store
-                    .zadd(&key, vec![(score, member)], 0)
+                    .zadd(&key, vec![(score, member.clone())], 0)
                     .map_err(|e| anyhow::anyhow!("Failed to restore ZSet entry: {}", e))?;
+                // Write to WAL for memory store commands
+                store
+                    .write_wal_if_needed(
+                        0,
+                        &resp::Command::ZAdd {
+                            key: Bytes::from(key),
+                            members: vec![(score, member)],
+                        },
+                    )
+                    .map_err(|e| anyhow::anyhow!("Failed to write WAL for ZSet entry: {}", e))?;
             }
             SnapshotStoreEntry::Bitmap(key, bitmap, _apply_index) => {
                 // Bitmap is stored as bytes, need to set bits
-                // For now, we'll store it as a string value
-                // TODO: Implement proper bitmap restoration
+                // For now, we'll store it as a string value (RocksDB)
+                // TODO: Implement proper bitmap restoration using Memory store
                 // Use 0 for apply_index since this is pull side, not push side's apply_index
+                // Note: Set command (String) is stored in RocksDB, so no WAL needed
                 store
                     .set(&key, bitmap, 0)
                     .map_err(|e| anyhow::anyhow!("Failed to restore Bitmap entry: {}", e))?;
