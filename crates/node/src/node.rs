@@ -284,6 +284,22 @@ impl RRNode {
         self.log_replay_writers.write().await.remove(task_id);
     }
 
+    /// Get log replay writer metadata for a split task
+    ///
+    /// # Arguments
+    /// - `task_id`: Split task ID
+    ///
+    /// # Returns
+    /// - `Some(Arc<RwLock<LogReplayMetadata>>)`: Metadata if writer exists
+    /// - `None`: If writer does not exist
+    pub async fn get_log_replay_metadata(
+        &self,
+        task_id: &str,
+    ) -> Option<Arc<tokio::sync::RwLock<crate::log_replay_writer::LogReplayMetadata>>> {
+        let guard = self.log_replay_writers.read().await;
+        guard.get(task_id).map(|writer| writer.metadata())
+    }
+
     /// Create Raft group (for Pilot control plane only)
     ///
     /// # Important

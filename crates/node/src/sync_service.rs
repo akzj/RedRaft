@@ -95,10 +95,11 @@ impl SyncTask {
                 bytes_transferred: 0,
                 entries_transferred: 0,
                 entries_pending: 0,
-                entries_total: 0,
                 current_index: start_seq_index,
-                target_index: 0, // Not applicable for real-time incremental sync
-                estimated_seconds_remaining: 0,
+                target_index: 0,    // Not applicable for real-time incremental sync
+                apply_seq_index: 0, // Will be updated as entries are applied
+                transfer_seq_index: 0, // Will be updated as entries are sent
+                last_seq_index: 0,  // Will be updated from log_replay_writer metadata
             },
             created_at: now,
             updated_at: now,
@@ -939,6 +940,7 @@ impl SyncServiceImpl {
                                     task_manager.update_task_progress_with(&task_id, |progress| {
                                         progress.entries_transferred = applied_entries;
                                         progress.entries_pending = pending_count;
+                                        progress.apply_seq_index = seq_index;
                                     });
                             } else {
                                 warn!(
@@ -1108,8 +1110,6 @@ impl SyncServiceImpl {
                                         progress.current_index = current_seq_index;
                                         // Update pending count (entries sent but not yet applied by Raft)
                                         progress.entries_pending = pending_count;
-                                        // Note: entries_total is not applicable for real-time incremental sync
-                                        // as we don't know the end point (streaming sync)
                                     });
                             }
                             Err(e) => {
@@ -1365,6 +1365,7 @@ impl SyncService for SyncServiceImpl {
         // Spawn task to stream data from PUSH side
         let snapshot_transfer_manager_clone = self.snapshot_transfer_manager.clone();
         let node_clone = self.node.clone();
+        let sync_service_impl_clone = self.clone();
         tokio::spawn(async move {
             let result = match data_type {
                 SyncDataType::SnapshotChunk => {
@@ -1381,6 +1382,7 @@ impl SyncService for SyncServiceImpl {
                 SyncDataType::EntryLog => {
                     stream_entry_logs_from_source(
                         node_clone,
+                        sync_service_impl_clone,
                         task_id.clone(),
                         req.start_seq_index,
                         tx,
@@ -1568,29 +1570,199 @@ async fn stream_snapshot_chunks_from_source(
 }
 
 /// Helper function to send entry log response
+/// Returns error if channel send fails (e.g., receiver dropped)
 async fn send_entry_log_response(
     tx: &tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
     task_id: &str,
     entry_logs: Vec<proto::sync_service::EntryLog>,
     is_last_chunk: bool,
     error_message: String,
+) -> Result<()> {
+    tx.send(Ok(PullSyncDataResponse {
+        task_id: task_id.to_string(),
+        data_type: SyncDataType::EntryLog as i32,
+        entry_logs,
+        error_message,
+        is_last_chunk,
+        ..Default::default()
+    }))
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to send entry log response for task {}: {}",
+            task_id,
+            e
+        )
+    })
+}
+
+/// Helper function to send entry logs batch and update progress
+/// Updates transfer_seq_index, sends entry logs, updates progress, and clears the batch
+async fn send_entry_logs_batch(
+    tx: &tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
+    sync_service_impl: &SyncServiceImpl,
+    task_id: &str,
+    entry_logs: &mut Vec<proto::sync_service::EntryLog>,
+    transfer_seq_index: &mut u64,
+    error_context: &str,
+) -> Result<()> {
+    // Update transfer_seq_index to the highest seq_index in the batch
+    *transfer_seq_index = entry_logs.last().map_or(*transfer_seq_index, |e| {
+        (*transfer_seq_index).max(e.seq_index)
+    });
+
+    // Send the batch
+    if let Err(e) =
+        send_entry_log_response(tx, task_id, entry_logs.clone(), false, String::new()).await
+    {
+        error!(
+            "[Task {}] Failed to send entry log batch ({}): {}",
+            task_id, error_context, e
+        );
+        return Err(e);
+    }
+
+    // Update progress with transfer_seq_index
+    let _ = sync_service_impl
+        .task_manager()
+        .update_task_progress_with(task_id, |progress| {
+            progress.transfer_seq_index = *transfer_seq_index;
+        });
+
+    // Clear the batch
+    entry_logs.clear();
+
+    Ok(())
+}
+
+/// Monitor sync progress and trigger blocking write when approaching threshold
+/// This function runs in a background task and periodically checks the sync progress
+/// from the target node to detect when entries_pending approaches the threshold
+async fn monitor_sync_progress(
+    sync_service_impl: SyncServiceImpl,
+    task_id: String,
+    node: Arc<RRNode>,
 ) {
-    let _ = tx
-        .send(Ok(PullSyncDataResponse {
-            task_id: task_id.to_string(),
-            data_type: SyncDataType::EntryLog as i32,
-            entry_logs,
-            error_message,
-            is_last_chunk,
-            ..Default::default()
-        }))
-        .await;
+    // Get task information to find target node
+    let task = match sync_service_impl.task_manager().get_task(&task_id) {
+        Some(task) => task,
+        None => {
+            warn!(
+                "[Task {}] Failed to get task info for progress monitoring",
+                task_id
+            );
+            return;
+        }
+    };
+
+    // Create SyncService client for target node
+    let mut sync_client = match sync_service_impl
+        .get_or_create_sync_client(&task.target_node_id)
+        .await
+    {
+        Ok(client) => client,
+        Err(e) => {
+            warn!(
+                "[Task {}] Failed to create sync client for target node {}: {}",
+                task_id, task.target_node_id, e
+            );
+            return;
+        }
+    };
+
+    const PROGRESS_CHECK_INTERVAL_MS: u64 = 500; // Check progress every 500ms
+    const PENDING_THRESHOLD: u64 = 1000; // Trigger blocking write when pending entries >= 1000
+    const PENDING_TO_TRANSFER_THRESHOLD: u64 = 1000; // Trigger blocking write when (last_seq_index - transfer_seq_index) >= threshold
+    let mut check_interval =
+        tokio::time::interval(std::time::Duration::from_millis(PROGRESS_CHECK_INTERVAL_MS));
+    check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        check_interval.tick().await;
+
+        // Get last_seq_index from log_replay_writer metadata
+        let last_seq_index = match node.get_log_replay_metadata(&task_id).await {
+            Some(metadata) => metadata.read().await.last_seq_index,
+            None => {
+                warn!("[Task {}] Log replay writer not found", task_id);
+                continue;
+            }
+        };
+
+        // Get current progress from local task manager
+        let local_progress = sync_service_impl
+            .task_manager()
+            .get_task(&task_id)
+            .map(|task| task.progress.clone());
+
+        // Call get_sync_status to get progress from target node
+        let request = GetSyncStatusRequest {
+            task_id: task_id.clone(),
+        };
+        match sync_client.get_sync_status(Request::new(request)).await {
+            Ok(response) => {
+                let status_response = response.into_inner();
+                if let Some(remote_progress) = status_response.progress {
+                    let entries_pending = remote_progress.entries_pending;
+                    let transfer_seq_index = remote_progress.transfer_seq_index;
+                    let apply_seq_index = remote_progress.apply_seq_index;
+
+                    // Calculate pending to transfer (entries not yet sent)
+                    let pending_to_transfer = if last_seq_index >= transfer_seq_index {
+                        last_seq_index - transfer_seq_index
+                    } else {
+                        0
+                    };
+
+                    info!(
+                        "[Task {}] Sync progress: last_seq={}, transfer_seq={}, apply_seq={}, pending_to_transfer={}, remote_pending={}",
+                        task_id, last_seq_index, transfer_seq_index, apply_seq_index, pending_to_transfer, entries_pending
+                    );
+
+                    // Update local progress with last_seq_index
+                    if let Some(mut local_progress) = local_progress {
+                        local_progress.last_seq_index = last_seq_index;
+                        let _ = sync_service_impl
+                            .task_manager()
+                            .update_task_progress(&task_id, local_progress);
+                    }
+
+                    // Check if approaching threshold: both conditions must be met
+                    let should_block = entries_pending >= PENDING_THRESHOLD
+                        && pending_to_transfer >= PENDING_TO_TRANSFER_THRESHOLD;
+
+                    if should_block {
+                        warn!(
+                            "[Task {}] Approaching threshold: pending_to_transfer={} >= {} AND remote_pending={} >= {}, triggering blocking write",
+                            task_id, pending_to_transfer, PENDING_TO_TRANSFER_THRESHOLD, entries_pending, PENDING_THRESHOLD
+                        );
+
+                        // TODO: Trigger blocking write
+                        // This should pause sending new entries and wait for pending entries to be applied
+                        // - Set a flag or use a channel to signal the main streaming loop to pause
+                        // - Wait until entries_pending drops below threshold
+                        // - Resume sending entries
+
+                        // TODO: Wait for both sides to reach consistency
+                        // - Wait until entries_pending drops below threshold (e.g., < 100)
+                        // - Wait until pending_to_transfer drops below threshold (e.g., < 100)
+                        // - Verify both source and target have same last_applied index
+                        // - Mark sync task as completed
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("[Task {}] Failed to get sync status: {}", task_id, e);
+            }
+        }
+    }
 }
 
 /// Stream entry logs from PUSH side (source node)
 /// Reads from log replay writer file created during split operation
 async fn stream_entry_logs_from_source(
     node: Arc<RRNode>,
+    sync_service_impl: SyncServiceImpl,
     task_id: String,
     start_seq: u64,
     tx: tokio::sync::mpsc::Sender<Result<PullSyncDataResponse, Status>>,
@@ -1601,43 +1773,97 @@ async fn stream_entry_logs_from_source(
         Err(e) => {
             let error_msg = format!("Failed to create log replay iterator: {}", e);
             warn!("{}", error_msg);
-            send_entry_log_response(&tx, &task_id, vec![], true, error_msg).await;
+            if let Err(send_err) =
+                send_entry_log_response(&tx, &task_id, vec![], true, error_msg).await
+            {
+                error!(
+                    "[Task {}] Failed to send error response: {}",
+                    task_id, send_err
+                );
+            }
             return Ok(());
         }
     };
 
+    // Spawn background task to monitor sync progress and trigger blocking write when approaching threshold
+    tokio::spawn(monitor_sync_progress(
+        sync_service_impl.clone(),
+        task_id.clone(),
+        node.clone(),
+    ));
+
     const BATCH_SIZE: usize = 100; // Number of entries to send per batch
+    const FLUSH_INTERVAL_MS: u64 = 100; // Minimum interval to send data (even if batch not full)
     let mut entry_logs = Vec::new();
+    let mut transfer_seq_index = start_seq; // Track the highest seq_index that has been sent
+    let mut flush_interval =
+        tokio::time::interval(std::time::Duration::from_millis(FLUSH_INTERVAL_MS));
+    flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Read entries using iterator
     loop {
-        // Only call next() if there might be more data
-        match iterator.next().await {
-            Ok(Some(entry_log)) => {
-                entry_logs.push(entry_log);
+        // Use select to wait for either new entry or timeout
+        tokio::select! {
+            result = iterator.next() => {
+                match result {
+                    Ok(Some(entry_log)) => {
+                        entry_logs.push(entry_log);
 
-                // Send batch when full
-                if entry_logs.len() >= BATCH_SIZE {
-                    send_entry_log_response(&tx, &task_id, entry_logs, false, String::new()).await;
-                    entry_logs = Vec::new();
+                        // Send batch when full
+                        if entry_logs.len() >= BATCH_SIZE {
+                            send_entry_logs_batch(
+                                &tx,
+                                &sync_service_impl,
+                                &task_id,
+                                &mut entry_logs,
+                                &mut transfer_seq_index,
+                                "batch full",
+                            )
+                            .await?;
+                        }
+                    }
+                    Ok(None) => {
+                        // Iterator exhausted (should not happen with current implementation)
+                        break;
+                    }
+                    Err(e) => {
+                        let error_msg = format!("Error reading log replay entry: {}", e);
+                        error!("{}", error_msg);
+                        if let Err(send_err) = send_entry_log_response(&tx, &task_id, vec![], true, error_msg).await {
+                            error!("[Task {}] Failed to send error response: {}", task_id, send_err);
+                        }
+                        return Ok(());
+                    }
                 }
             }
-            Ok(None) => {
-                // Iterator exhausted (should not happen with current implementation)
-                break;
-            }
-            Err(e) => {
-                let error_msg = format!("Error reading log replay entry: {}", e);
-                error!("{}", error_msg);
-                send_entry_log_response(&tx, &task_id, vec![], true, error_msg).await;
-                return Ok(());
+            _ = flush_interval.tick() => {
+                // Timeout: send pending entries if any (at least every 100ms)
+                if !entry_logs.is_empty() {
+                    send_entry_logs_batch(
+                        &tx,
+                        &sync_service_impl,
+                        &task_id,
+                        &mut entry_logs,
+                        &mut transfer_seq_index,
+                        "flush interval",
+                    )
+                    .await?;
+                }
             }
         }
     }
 
     // Send remaining entries
     if !entry_logs.is_empty() {
-        send_entry_log_response(&tx, &task_id, entry_logs, false, String::new()).await;
+        send_entry_logs_batch(
+            &tx,
+            &sync_service_impl,
+            &task_id,
+            &mut entry_logs,
+            &mut transfer_seq_index,
+            "remaining entries",
+        )
+        .await?;
     }
 
     Ok(())

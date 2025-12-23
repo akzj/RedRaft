@@ -379,7 +379,7 @@ pub struct LogReplayIterator {
     metadata: Arc<RwLock<LogReplayMetadata>>,
     notify: Arc<Notify>,
     cache: Arc<RwLock<VecDeque<CachedLogEntry>>>,
-    snapshot_index: Arc<RwLock<Option<u64>>>,
+    snapshot_index: u64,
 }
 
 impl LogReplayIterator {
@@ -422,7 +422,7 @@ impl LogReplayIterator {
             metadata,
             notify,
             cache,
-            snapshot_index,
+            snapshot_index: snapshot_index.read().await.unwrap_or(0),
         })
     }
 
@@ -472,49 +472,66 @@ impl LogReplayIterator {
 
     /// Try to find entry in cache using sequential index offset calculation
     /// Returns Some(EntryLog) if found, None otherwise
+    /// Skips entries with raft_apply_index <= snapshot_index (already in snapshot)
     async fn try_get_from_cache(&mut self) -> Option<EntryLog> {
-        let cache_guard = self.cache.read().await;
+        loop {
+            let entry_opt = {
+                let cache_guard = self.cache.read().await;
 
-        // Cache is empty, nothing to find
-        if cache_guard.is_empty() {
-            return None;
+                // Cache is empty, nothing to find
+                if cache_guard.is_empty() {
+                    return None;
+                }
+
+                // Get the first entry's sequential index
+                let first_seq_index = cache_guard.front()?.index;
+                let last_seq_index = cache_guard.back()?.index;
+
+                // Check if next_seq_index is within cache range
+                if self.next_seq < first_seq_index || self.next_seq > last_seq_index {
+                    return None; // Not in cache range
+                }
+
+                // Calculate offset: next_seq_index - first_seq_index
+                let offset = self.next_seq - first_seq_index;
+
+                // Check if offset is within cache bounds
+                if offset >= cache_guard.len() as u64 {
+                    return None; // Offset out of bounds
+                }
+
+                // Direct access using offset
+                let entry = &cache_guard[offset as usize];
+
+                // Verify the entry matches (cache might have gaps)
+                if entry.index != self.next_seq {
+                    return None; // Entry not found at expected position
+                }
+
+                // Clone entry data before releasing the lock
+                Some(entry.clone())
+            };
+
+            let entry = entry_opt?;
+
+            // Skip entries that are already in snapshot (raft_apply_index <= snapshot_index)
+            if entry.raft_apply_index <= self.snapshot_index {
+                // Entry is already in snapshot, skip it and try next
+                self.next_seq += 1;
+                continue;
+            }
+
+            // Create EntryLog and increment seq_index for next lookup
+            let entry_log = EntryLog {
+                seq_index: entry.index, // Use the sequential index from cache
+                index: entry.raft_apply_index,
+                term: entry.raft_apply_term,
+                command: entry.command_data.clone(),
+            };
+
+            self.next_seq += 1;
+            return Some(entry_log);
         }
-
-        // Get the first entry's sequential index
-        let first_seq_index = cache_guard.front()?.index;
-        let last_seq_index = cache_guard.back()?.index;
-
-        // Check if next_seq_index is within cache range
-        if self.next_seq < first_seq_index || self.next_seq > last_seq_index {
-            return None; // Not in cache range
-        }
-
-        // Calculate offset: next_seq_index - first_seq_index
-        let offset = self.next_seq - first_seq_index;
-
-        // Check if offset is within cache bounds
-        if offset >= cache_guard.len() as u64 {
-            return None; // Offset out of bounds
-        }
-
-        // Direct access using offset
-        let entry = &cache_guard[offset as usize];
-
-        // Verify the entry matches (cache might have gaps)
-        if entry.index != self.next_seq {
-            return None; // Entry not found at expected position
-        }
-
-        // Create EntryLog and increment seq_index for next lookup
-        let entry_log = EntryLog {
-            seq_index: entry.index, // Use the sequential index from cache
-            index: entry.raft_apply_index,
-            term: entry.raft_apply_term,
-            command: entry.command_data.clone(),
-        };
-
-        self.next_seq += 1;
-        Some(entry_log)
     }
 
     /// Try to read entry from file
@@ -622,6 +639,13 @@ impl LogReplayIterator {
 
             // Update file position
             self.file_position += HEADER_SIZE as u64 + data_len as u64;
+
+            // Skip entries that are already in snapshot (apply_index <= snapshot_index)
+            if apply_index <= self.snapshot_index {
+                // Entry is already in snapshot, skip it and try next
+                self.next_seq += 1;
+                continue;
+            }
 
             // Create EntryLog and increment seq_index
             let current_seq_index = self.next_seq;

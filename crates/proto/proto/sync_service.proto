@@ -188,13 +188,18 @@ message SyncProgress {
   /// Number of entry logs pending Raft framework synchronization
   /// These entries have been transferred but not yet applied by Raft
   uint64 entries_pending = 11;
-  /// Total number of entry logs
-  uint64 entries_total = 7;
   /// Current Raft index being synced
   uint64 current_index = 8;
   /// Target Raft index to reach
   uint64 target_index = 9;
-  /// Estimated time remaining (seconds)
-  uint64 estimated_seconds_remaining = 10;
+  /// Sequential index of the last applied entry (from log_replay_writer)
+  /// This indicates the highest seq_index that has been successfully applied by Raft
+  uint64 apply_seq_index = 12;
+  /// Sequential index of the last transferred entry (from log_replay_writer)
+  /// This indicates the highest seq_index that has been sent to target node
+  uint64 transfer_seq_index = 13;
+  /// Sequential index of the last written entry in log_replay_writer
+  /// This indicates the latest seq_index available in the source node's log replay file
+  uint64 last_seq_index = 14;
 }
 
