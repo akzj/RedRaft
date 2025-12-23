@@ -123,37 +123,37 @@ fn apply_snapshot_entry(
         SnapshotStoreEntry::Error(err) => {
             return Err(anyhow::anyhow!("Snapshot restore error: {}", err));
         }
-        SnapshotStoreEntry::String(key, value, apply_index) => {
+        SnapshotStoreEntry::String(key, value) => {
             store
-                .set(&key, value, apply_index)
+                .set(&key, value)
                 .map_err(|e| anyhow::anyhow!("Failed to restore String entry: {}", e))?;
         }
-        SnapshotStoreEntry::Hash(key, field, value, apply_index) => {
+        SnapshotStoreEntry::Hash(key, field, value) => {
             store
-                .hset(&key, &field, value, apply_index)
+                .hset(&key, &field, value)
                 .map_err(|e| anyhow::anyhow!("Failed to restore Hash entry: {}", e))?;
         }
-        SnapshotStoreEntry::List(key, element, apply_index) => {
+        SnapshotStoreEntry::List(key, element) => {
             store
-                .rpush(&key, vec![element], apply_index)
+                .rpush(&key, vec![element])
                 .map_err(|e| anyhow::anyhow!("Failed to restore List entry: {}", e))?;
         }
-        SnapshotStoreEntry::Set(key, member, apply_index) => {
+        SnapshotStoreEntry::Set(key, member) => {
             store
-                .sadd(&key, vec![member], apply_index)
+                .sadd(&key, vec![member])
                 .map_err(|e| anyhow::anyhow!("Failed to restore Set entry: {}", e))?;
         }
-        SnapshotStoreEntry::ZSet(_key, _score, _member, _apply_index) => {
+        SnapshotStoreEntry::ZSet(_key, _score, _member) => {
             // ZSetStore is not implemented for HybridStore yet
             // For now, skip ZSet restoration (TODO: implement ZSetStore trait)
             warn!("ZSet restoration not yet implemented, skipping entry");
         }
-        SnapshotStoreEntry::Bitmap(key, bitmap, apply_index) => {
+        SnapshotStoreEntry::Bitmap(key, bitmap) => {
             // Bitmap is stored as bytes, need to set bits
             // For now, we'll store it as a string value
             // TODO: Implement proper bitmap restoration
             store
-                .set(&key, bitmap, apply_index)
+                .set(&key, bitmap)
                 .map_err(|e| anyhow::anyhow!("Failed to restore Bitmap entry: {}", e))?;
         }
     }

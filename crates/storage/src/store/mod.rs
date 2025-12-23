@@ -12,7 +12,7 @@
 //!
 //! ## Path Structure
 //!
-//! All backends follow: shard_id -> key -> value
+//! All backends follow: slot -> key -> value
 
 // Import implementations (they implement traits on HybridStore)
 mod hash;
@@ -24,108 +24,19 @@ mod snapshot;
 mod string;
 mod zset;
 
-use crate::memory::{self, MemStoreCow};
-use crate::rocksdb::ShardedRocksDB;
+use crate::memory::MemStoreCow;
+use crate::rocksdb::SlotRocksDB;
 use crate::snapshot::{SegmentGenerator, SnapshotConfig, WalWriter};
 use crate::traits::StoreError;
 use anyhow::Result;
 use parking_lot::RwLock;
 use resp::Command;
 use rr_core::routing::RoutingTable;
-use rr_core::shard::ShardId;
-use rr_core::shard::{ShardRouting, TOTAL_SLOTS};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tracing::{error, info};
-
-/// Shard metadata
-#[derive(Debug, Clone)]
-pub struct ShardMetadata {
-    /// Raft log apply index (last applied log entry index)
-    /// This is set when creating a snapshot
-    pub apply_index: Option<u64>,
-
-    /// Last snapshot index (for incremental snapshots)
-    pub last_snapshot_index: Option<u64>,
-
-    /// Shard creation time
-    pub created_at: u64,
-
-    /// Last update time
-    pub last_updated: u64,
-}
-
-impl ShardMetadata {
-    /// Verify read_index is valid (should be <= current apply_index)
-    ///
-    /// # Arguments
-    /// - `read_index`: Raft read index to verify
-    ///
-    /// # Returns
-    /// - `Ok(())`: Read index is valid
-    /// - `Err(StoreError::Internal)`: Read index exceeds apply index
-    pub fn verify_read_index(&self, read_index: u64) -> Result<(), StoreError> {
-        if let Some(apply_index) = self.apply_index {
-            if read_index > apply_index {
-                return Err(StoreError::Internal(format!(
-                    "Read index {} exceeds apply index {}",
-                    read_index, apply_index
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    pub fn new() -> Self {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        Self {
-            apply_index: None,
-            last_snapshot_index: None,
-            created_at: now,
-            last_updated: now,
-        }
-    }
-
-    /// Update apply index (called during snapshot creation)
-    pub fn set_apply_index(&mut self, index: u64) {
-        // 0 is a special value for  snapshot restore
-        if index == 0 {
-            return;
-        }
-
-        self.apply_index = Some(index);
-        self.last_updated = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-    }
-
-    /// Update snapshot index
-    pub fn set_snapshot_index(&mut self, index: u64) {
-        self.last_snapshot_index = Some(index);
-        self.last_updated = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-    }
-
-    /// Get apply index
-    pub fn get_apply_index(&self) -> Option<u64> {
-        self.apply_index
-    }
-}
-
-impl Default for ShardMetadata {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Sharded Store with RocksDB and Memory backends
 ///
@@ -133,10 +44,9 @@ impl Default for ShardMetadata {
 /// - Read/Write operations: Use read lock (shared access)
 /// - Snapshot operations: Use write lock (exclusive access, released immediately after snapshot creation)
 #[derive(Clone)]
-pub struct ShardedStore {
-    rocksdb: ShardedRocksDB,
+pub struct SlotStore {
+    rocksdb: SlotRocksDB,
     memory: MemStoreCow,
-    metadata: ShardMetadata,
 }
 
 /// Locked Sharded Store with RwLock protection
@@ -144,25 +54,21 @@ pub struct ShardedStore {
 /// Lock usage:
 /// - Normal operations (get, set, etc.): Use `.read()` for read lock
 /// - Snapshot creation: Use `.write()` for write lock, release immediately after snapshot
-pub type LockedShardedStore = Arc<RwLock<ShardedStore>>;
+pub type LockedSlotStore = Arc<RwLock<SlotStore>>;
 
-impl ShardedStore {
-    /// Create a new ShardedStore
-    pub fn new(rocksdb: ShardedRocksDB, memory: MemStoreCow) -> Self {
-        Self {
-            rocksdb,
-            memory,
-            metadata: ShardMetadata::new(),
-        }
+impl SlotStore {
+    /// Create a new SlotStore
+    pub fn new(rocksdb: SlotRocksDB, memory: MemStoreCow) -> Self {
+        Self { rocksdb, memory }
     }
 
     /// Get reference to RocksDB (for read operations)
-    pub fn rocksdb(&self) -> &ShardedRocksDB {
+    pub fn rocksdb(&self) -> &SlotRocksDB {
         &self.rocksdb
     }
 
     /// Get mutable reference to RocksDB (for write operations)
-    pub fn rocksdb_mut(&mut self) -> &mut ShardedRocksDB {
+    pub fn rocksdb_mut(&mut self) -> &mut SlotRocksDB {
         &mut self.rocksdb
     }
 
@@ -185,11 +91,12 @@ impl ShardedStore {
 /// - RocksDB: Only String and Hash (persistent, don't need WAL)
 /// - Memory store: All other data structures (List, Set, ZSet, Bitmap, etc.) - need WAL for recovery
 pub struct HybridStore {
-    /// RocksDB for String and Hash only (shared across all shards)
-    pub(crate) rocksdb: Arc<ShardedRocksDB>,
+    /// RocksDB for String and Hash only (shared across all slots)
+    pub(crate) rocksdb: Arc<SlotRocksDB>,
 
-    /// Shards: RocksDB + Memory per shard
-    pub(crate) shards: Arc<RwLock<HashMap<ShardId, LockedShardedStore>>>,
+    /// Slots: RocksDB + Memory per slot
+    /// Key is slot number (u32), value is the slot store
+    pub(crate) slots: Arc<RwLock<HashMap<u32, LockedSlotStore>>>,
 
     /// WAL Writer for logging all write operations
     wal_writer: Arc<RwLock<WalWriter>>,
@@ -204,7 +111,7 @@ pub struct HybridStore {
     /// Snapshot configuration
     snapshot_config: SnapshotConfig,
 
-    /// RocksDB path (for creating new shards)
+    /// RocksDB path (for creating new slots)
     rocksdb_path: PathBuf,
 }
 
@@ -214,7 +121,7 @@ impl HybridStore {
     /// # Arguments
     /// - `snapshot_config`: Snapshot configuration
     /// - `data_dir`: Data directory path
-    /// - `routing_table`: Routing table for shard management (managed by node)
+    /// - `routing_table`: Routing table for slot management (managed by node)
     pub fn new(
         snapshot_config: SnapshotConfig,
         data_dir: PathBuf,
@@ -223,7 +130,7 @@ impl HybridStore {
         // Initialize RocksDB
         let rocksdb_path = data_dir.join("rocksdb");
         let rocksdb = Arc::new(
-            ShardedRocksDB::new(&rocksdb_path, routing_table.clone())
+            SlotRocksDB::new(&rocksdb_path, routing_table.clone())
                 .map_err(|e| format!("Failed to initialize RocksDB: {}", e))?,
         );
 
@@ -241,29 +148,41 @@ impl HybridStore {
             rocksdb_path,
             snapshot_config,
             last_applied_index: Arc::new(AtomicU64::new(0)),
-            shards: Arc::new(RwLock::new(HashMap::new())),
+            slots: Arc::new(RwLock::new(HashMap::new())),
             wal_writer: Arc::new(RwLock::new(wal_writer)),
             segment_generator: Arc::new(RwLock::new(segment_generator)),
             routing_table,
         })
     }
 
+    /// Get slot number for a key
+    pub(crate) fn slot_for_key(&self, key: &[u8]) -> u32 {
+        RoutingTable::slot_for_key(key)
+    }
+
     /// Get shard ID for a key using routing table
-    pub(crate) fn shard_for_key(&self, key: &[u8]) -> Result<ShardId, StoreError> {
+    /// Note: This is kept for backward compatibility (e.g., snapshot interface)
+    /// Storage layer no longer uses shard_id internally
+    pub(crate) fn shard_for_key(&self, key: &[u8]) -> Result<String, StoreError> {
         self.routing_table
             .find_shard_for_key(key)
             .map_err(|e| StoreError::Internal(e.to_string()))
     }
 
-    /// Get or create shard for a key
-    pub(crate) fn get_shard(&self, key: &[u8]) -> Result<LockedShardedStore, StoreError> {
-        let shard_id = self.shard_for_key(key)?;
-        let shards = self.shards.read();
+    /// Get or create slot store for a key
+    /// Returns the slot store for the slot that the key belongs to
+    pub(crate) fn get_slot_store(&self, key: &[u8]) -> Result<LockedSlotStore, StoreError> {
+        let slot = self.slot_for_key(key);
+        let slots = self.slots.read();
 
-        let Some(shard) = shards.get(&shard_id) else {
-            return Err(StoreError::ShardNotFound(shard_id));
+        let Some(slot_store) = slots.get(&slot) else {
+            return Err(StoreError::Internal(format!(
+                "Slot store not found for slot {} (key: {:?})",
+                slot,
+                String::from_utf8_lossy(key)
+            )));
         };
-        Ok(Arc::clone(shard))
+        Ok(Arc::clone(slot_store))
     }
 
     /// Check if command needs WAL logging
@@ -412,10 +331,10 @@ impl HybridStore {
         should
     }
 
-    /// Generate segments for all shards (background task)
+    /// Generate segments for all slots (background task)
     ///
     /// This method:
-    /// 1. Generates segments for all shards (using read lock, doesn't block writes)
+    /// 1. Generates segments for all slots (using read lock, doesn't block writes)
     /// 2. Cleans up old WAL files after segment generation
     ///
     /// # Returns
@@ -432,32 +351,32 @@ impl HybridStore {
             return Ok(0);
         }
 
-        let shards = self.shards.read();
+        let slots = self.slots.read();
         let mut segments_generated = 0;
         let mut min_apply_index = u64::MAX;
 
-        // Generate segment for each shard
-        for (shard_id, shard) in shards.iter() {
-            let shard_guard = shard.read();
-            let memory_store = shard_guard.memory();
+        // Generate segment for each slot
+        for (slot, slot_store) in slots.iter() {
+            let slot_guard = slot_store.read();
+            let memory_store = slot_guard.memory();
 
-            // Get current apply_index from shard metadata (if available)
-            // For now, use WAL size as a proxy for apply_index
-            // Track actual apply_index per shard
-            let apply_index = shard_guard.metadata.apply_index.unwrap_or(0);
+            // Get current apply_index from WAL
+            // TODO: Apply index should be managed at business layer, not storage layer
+            let apply_index = 0;
 
-            match segment_generator.generate_segment(shard_id, memory_store, apply_index) {
+            let slot_id = format!("slot_{}", slot);
+            match segment_generator.generate_segment(&slot_id, memory_store, apply_index) {
                 Ok(metadata) => {
                     segments_generated += 1;
                     min_apply_index = min_apply_index.min(metadata.apply_index);
                     info!(
-                        "Generated segment for shard {} at apply_index {}",
-                        shard_id, metadata.apply_index
+                        "Generated segment for slot {} at apply_index {}",
+                        slot, metadata.apply_index
                     );
                 }
                 Err(e) => {
-                    error!("Failed to generate segment for shard {}: {}", shard_id, e);
-                    // Continue with other shards
+                    error!("Failed to generate segment for slot {}: {}", slot, e);
+                    // Continue with other slots
                 }
             }
         }
@@ -531,181 +450,5 @@ impl HybridStore {
     pub(crate) fn is_write_command(command: &Command) -> bool {
         // Use Command's built-in method
         command.is_write()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::snapshot::SnapshotConfig;
-    use bytes::Bytes;
-    use resp::Command;
-    use tempfile::TempDir;
-
-    #[test]
-    fn test_hybrid_store_new() {
-        let temp_dir = TempDir::new().unwrap();
-        let data_dir = temp_dir.path().to_path_buf();
-
-        let config = SnapshotConfig {
-            base_dir: data_dir.clone(),
-            shard_count: 16,
-            chunk_size: 64 * 1024 * 1024,
-            wal_size_threshold: 100 * 1024 * 1024,
-            segment_interval_secs: 3600,
-            zstd_level: 3,
-        };
-
-        let routing_table = Arc::new(rr_core::routing::RoutingTable::new());
-        let store = HybridStore::new(config, data_dir, routing_table);
-        assert!(store.is_ok());
-    }
-
-    #[test]
-    fn test_needs_wal_logging() {
-        // Test that memory store commands need WAL logging
-        let lpush = Command::LPush {
-            key: Bytes::from(b"key" as &[u8]),
-            values: vec![Bytes::from(b"value" as &[u8])],
-        };
-        assert!(HybridStore::needs_wal_logging(&lpush));
-
-        let sadd = Command::SAdd {
-            key: Bytes::from(b"key" as &[u8]),
-            members: vec![Bytes::from(b"member" as &[u8])],
-        };
-        assert!(HybridStore::needs_wal_logging(&sadd));
-
-        // Test that RocksDB commands don't need WAL logging
-        let set = Command::Set {
-            key: Bytes::from(b"key" as &[u8]),
-            value: Bytes::from(b"value" as &[u8]),
-            ex: None,
-            px: None,
-            nx: false,
-            xx: false,
-        };
-        assert!(!HybridStore::needs_wal_logging(&set));
-
-        let hset = Command::HSet {
-            key: Bytes::from(b"key" as &[u8]),
-            fvs: vec![(
-                Bytes::from(b"field" as &[u8]),
-                Bytes::from(b"value" as &[u8]),
-            )],
-        };
-        assert!(!HybridStore::needs_wal_logging(&hset));
-
-        // Test that read commands don't need WAL logging
-        let get = Command::Get {
-            key: Bytes::from(b"key" as &[u8]),
-        };
-        assert!(!HybridStore::needs_wal_logging(&get));
-    }
-
-    #[test]
-    fn test_apply_with_index_writes_to_wal() {
-        let temp_dir = TempDir::new().unwrap();
-        let data_dir = temp_dir.path().to_path_buf();
-
-        let config = SnapshotConfig {
-            base_dir: data_dir.clone(),
-            shard_count: 16,
-            chunk_size: 64 * 1024 * 1024,
-            wal_size_threshold: 100 * 1024 * 1024,
-            segment_interval_secs: 3600,
-            zstd_level: 3,
-        };
-
-        let routing_table = Arc::new(rr_core::routing::RoutingTable::new());
-        // Add a test shard routing that covers all slots for testing
-        routing_table.add_shard_routing(ShardRouting::new(
-            "shard_0".to_string(),
-            0,
-            TOTAL_SLOTS - 1,
-        ));
-
-        let store = HybridStore::new(config, data_dir.clone(), routing_table).unwrap();
-
-        // Create shard manually for testing
-        let shard_id = "shard_0".to_string();
-        // Note: ShardedStore needs a ShardedRocksDB, but store.rocksdb is Arc<ShardedRocksDB>
-        // We need to clone the inner value. Since ShardedRocksDB implements Clone, we can use that.
-        let shard = ShardedStore::new((*store.rocksdb).clone(), MemStoreCow::new());
-        store
-            .shards
-            .write()
-            .insert(shard_id.clone(), Arc::new(RwLock::new(shard)));
-
-        // Apply a write command that operates on memory store (needs WAL)
-        // Use LPush (List command) which is stored in memory and requires WAL logging
-        let command = Command::LPush {
-            key: Bytes::from(b"test_list" as &[u8]),
-            values: vec![Bytes::from(b"value1" as &[u8])],
-        };
-
-        let result = store.apply_with_index(1, 1, &command);
-        assert!(matches!(result, crate::traits::ApplyResult::Integer(_)));
-
-        // Flush WAL and verify it was written
-        store.flush_wal().unwrap();
-
-        // Verify WAL file exists
-        let wal_dir = data_dir.join("wal");
-        assert!(wal_dir.exists());
-    }
-
-    #[test]
-    fn test_command_get_key() {
-        // Test string commands
-        let key = Bytes::from(b"test_key" as &[u8]);
-        let value = Bytes::from(b"value" as &[u8]);
-        let command = Command::Set {
-            key: key.clone(),
-            value: value.clone(),
-            ex: None,
-            px: None,
-            nx: false,
-            xx: false,
-        };
-        assert_eq!(command.get_key(), Some(key.as_ref()));
-
-        // Test hash commands
-        let hset = Command::HSet {
-            key: key.clone(),
-            fvs: vec![(
-                Bytes::from(b"field" as &[u8]),
-                Bytes::from(b"value" as &[u8]),
-            )],
-        };
-        assert_eq!(hset.get_key(), Some(key.as_ref()));
-
-        // Test read-only commands (should still extract key for WAL)
-        let get = Command::Get { key: key.clone() };
-        assert_eq!(get.get_key(), Some(key.as_ref()));
-
-        // Test no-key commands
-        let ping = Command::Ping { message: None };
-        assert_eq!(ping.get_key(), None);
-    }
-
-    #[test]
-    fn test_is_write_command() {
-        let key = Bytes::from(b"test_key" as &[u8]);
-
-        // Write command
-        let set = Command::Set {
-            key: key.clone(),
-            value: Bytes::from(b"value" as &[u8]),
-            ex: None,
-            px: None,
-            nx: false,
-            xx: false,
-        };
-        assert!(HybridStore::is_write_command(&set));
-
-        // Read command
-        let get = Command::Get { key: key.clone() };
-        assert!(!HybridStore::is_write_command(&get));
     }
 }

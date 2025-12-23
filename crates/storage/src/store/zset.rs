@@ -6,22 +6,20 @@ use crate::traits::{StoreError, StoreResult, ZSetStore};
 use bytes::Bytes;
 
 impl ZSetStore for HybridStore {
-    fn zadd(&self, key: &[u8], members: Vec<(f64, Bytes)>, apply_index: u64) -> StoreResult<usize> {
-        let shard = self.get_shard(key)?;
-        let mut shard_guard = shard.write();
-        // Update apply_index in metadata
-        shard_guard.metadata.set_apply_index(apply_index);
+    fn zadd(&self, key: &[u8], members: Vec<(f64, Bytes)>) -> StoreResult<usize> {
+        let slot_store = self.get_slot_store(key)?;
+        let mut store_guard = slot_store.write();
         
         // Get or create ZSet
-        let zset = match shard_guard.memory_mut().get_mut(key) {
+        let zset = match store_guard.memory_mut().get_mut(key) {
             Some(DataCow::ZSet(zset)) => zset,
             Some(_) => return Err(StoreError::WrongType),
             None => {
                 // Create new ZSet
                 let new_zset = crate::memory::ZSetDataCow::new();
-                shard_guard.memory_mut().insert(key.to_vec(), DataCow::ZSet(new_zset));
+                store_guard.memory_mut().insert(key.to_vec(), DataCow::ZSet(new_zset));
                 // Get the newly inserted ZSet
-                match shard_guard.memory_mut().get_mut(key) {
+                match store_guard.memory_mut().get_mut(key) {
                     Some(DataCow::ZSet(zset)) => zset,
                     _ => return Err(StoreError::Internal("Failed to create ZSet".to_string())),
                 }
@@ -39,13 +37,11 @@ impl ZSetStore for HybridStore {
         Ok(count)
     }
 
-    fn zrem(&self, key: &[u8], members: &[&[u8]], apply_index: u64) -> StoreResult<usize> {
-        let shard = self.get_shard(key)?;
-        let mut shard_guard = shard.write();
-        // Update apply_index in metadata
-        shard_guard.metadata.set_apply_index(apply_index);
+    fn zrem(&self, key: &[u8], members: &[&[u8]]) -> StoreResult<usize> {
+        let slot_store = self.get_slot_store(key)?;
+        let mut store_guard = slot_store.write();
         
-        let zset = match shard_guard.memory_mut().get_mut(key) {
+        let zset = match store_guard.memory_mut().get_mut(key) {
             Some(DataCow::ZSet(zset)) => zset,
             Some(_) => return Err(StoreError::WrongType),
             None => return Ok(0),
@@ -60,39 +56,33 @@ impl ZSetStore for HybridStore {
         Ok(count)
     }
 
-    fn zscore(&self, key: &[u8], member: &[u8], read_index: u64) -> StoreResult<Option<f64>> {
-        let shard = self.get_shard(key)?;
-        let shard_guard = shard.read();
-        // Verify read_index is valid (should be <= current apply_index)
-        shard_guard.metadata.verify_read_index(read_index)?;
+    fn zscore(&self, key: &[u8], member: &[u8]) -> StoreResult<Option<f64>> {
+        let slot_store = self.get_slot_store(key)?;
+        let store_guard = slot_store.read();
         
-        match shard_guard.memory().get(key) {
+        match store_guard.memory().get(key) {
             Some(DataCow::ZSet(zset)) => Ok(zset.get_score(member)),
             Some(_) => Err(StoreError::WrongType),
             None => Ok(None),
         }
     }
 
-    fn zrank(&self, key: &[u8], member: &[u8], read_index: u64) -> StoreResult<Option<usize>> {
-        let shard = self.get_shard(key)?;
-        let shard_guard = shard.read();
-        // Verify read_index is valid (should be <= current apply_index)
-        shard_guard.metadata.verify_read_index(read_index)?;
+    fn zrank(&self, key: &[u8], member: &[u8]) -> StoreResult<Option<usize>> {
+        let slot_store = self.get_slot_store(key)?;
+        let store_guard = slot_store.read();
         
-        match shard_guard.memory().get(key) {
+        match store_guard.memory().get(key) {
             Some(DataCow::ZSet(zset)) => Ok(zset.rank(member)),
             Some(_) => Err(StoreError::WrongType),
             None => Ok(None),
         }
     }
 
-    fn zrevrank(&self, key: &[u8], member: &[u8], read_index: u64) -> StoreResult<Option<usize>> {
-        let shard = self.get_shard(key)?;
-        let shard_guard = shard.read();
-        // Verify read_index is valid (should be <= current apply_index)
-        shard_guard.metadata.verify_read_index(read_index)?;
+    fn zrevrank(&self, key: &[u8], member: &[u8]) -> StoreResult<Option<usize>> {
+        let slot_store = self.get_slot_store(key)?;
+        let store_guard = slot_store.read();
         
-        match shard_guard.memory().get(key) {
+        match store_guard.memory().get(key) {
             Some(DataCow::ZSet(zset)) => Ok(zset.rev_rank(member)),
             Some(_) => Err(StoreError::WrongType),
             None => Ok(None),
@@ -105,14 +95,11 @@ impl ZSetStore for HybridStore {
         start: i64,
         stop: i64,
         with_scores: bool,
-        read_index: u64,
     ) -> StoreResult<Vec<(Bytes, f64)>> {
-        let shard = self.get_shard(key)?;
-        let shard_guard = shard.read();
-        // Verify read_index is valid (should be <= current apply_index)
-        shard_guard.metadata.verify_read_index(read_index)?;
+        let slot_store = self.get_slot_store(key)?;
+        let store_guard = slot_store.read();
         
-        let zset = match shard_guard.memory().get(key) {
+        let zset = match store_guard.memory().get(key) {
             Some(DataCow::ZSet(zset)) => zset,
             Some(_) => return Err(StoreError::WrongType),
             None => return Ok(Vec::new()),
@@ -156,14 +143,11 @@ impl ZSetStore for HybridStore {
         start: i64,
         stop: i64,
         with_scores: bool,
-        read_index: u64,
     ) -> StoreResult<Vec<(Bytes, f64)>> {
-        let shard = self.get_shard(key)?;
-        let shard_guard = shard.read();
-        // Verify read_index is valid (should be <= current apply_index)
-        shard_guard.metadata.verify_read_index(read_index)?;
+        let slot_store = self.get_slot_store(key)?;
+        let store_guard = slot_store.read();
         
-        let zset = match shard_guard.memory().get(key) {
+        let zset = match store_guard.memory().get(key) {
             Some(DataCow::ZSet(zset)) => zset,
             Some(_) => return Err(StoreError::WrongType),
             None => return Ok(Vec::new()),
@@ -218,14 +202,11 @@ impl ZSetStore for HybridStore {
         with_scores: bool,
         offset: Option<usize>,
         count: Option<usize>,
-        read_index: u64,
     ) -> StoreResult<Vec<(Bytes, f64)>> {
-        let shard = self.get_shard(key)?;
-        let shard_guard = shard.read();
-        // Verify read_index is valid (should be <= current apply_index)
-        shard_guard.metadata.verify_read_index(read_index)?;
+        let slot_store = self.get_slot_store(key)?;
+        let store_guard = slot_store.read();
         
-        let zset = match shard_guard.memory().get(key) {
+        let zset = match store_guard.memory().get(key) {
             Some(DataCow::ZSet(zset)) => zset,
             Some(_) => return Err(StoreError::WrongType),
             None => return Ok(Vec::new()),
@@ -255,26 +236,22 @@ impl ZSetStore for HybridStore {
         }
     }
 
-    fn zcard(&self, key: &[u8], read_index: u64) -> StoreResult<usize> {
-        let shard = self.get_shard(key)?;
-        let shard_guard = shard.read();
-        // Verify read_index is valid (should be <= current apply_index)
-        shard_guard.metadata.verify_read_index(read_index)?;
+    fn zcard(&self, key: &[u8]) -> StoreResult<usize> {
+        let slot_store = self.get_slot_store(key)?;
+        let store_guard = slot_store.read();
         
-        match shard_guard.memory().get(key) {
+        match store_guard.memory().get(key) {
             Some(DataCow::ZSet(zset)) => Ok(zset.len()),
             Some(_) => Err(StoreError::WrongType),
             None => Ok(0),
         }
     }
 
-    fn zcount(&self, key: &[u8], min: f64, max: f64, read_index: u64) -> StoreResult<usize> {
-        let shard = self.get_shard(key)?;
-        let shard_guard = shard.read();
-        // Verify read_index is valid (should be <= current apply_index)
-        shard_guard.metadata.verify_read_index(read_index)?;
+    fn zcount(&self, key: &[u8], min: f64, max: f64) -> StoreResult<usize> {
+        let slot_store = self.get_slot_store(key)?;
+        let store_guard = slot_store.read();
         
-        let zset = match shard_guard.memory().get(key) {
+        let zset = match store_guard.memory().get(key) {
             Some(DataCow::ZSet(zset)) => zset,
             Some(_) => return Err(StoreError::WrongType),
             None => return Ok(0),
@@ -284,22 +261,20 @@ impl ZSetStore for HybridStore {
         Ok(result.len())
     }
 
-    fn zincrby(&self, key: &[u8], delta: f64, member: &[u8], apply_index: u64) -> StoreResult<f64> {
-        let shard = self.get_shard(key)?;
-        let mut shard_guard = shard.write();
-        // Update apply_index in metadata
-        shard_guard.metadata.set_apply_index(apply_index);
+    fn zincrby(&self, key: &[u8], delta: f64, member: &[u8]) -> StoreResult<f64> {
+        let slot_store = self.get_slot_store(key)?;
+        let mut store_guard = slot_store.write();
         
         // Get or create ZSet
-        let zset = match shard_guard.memory_mut().get_mut(key) {
+        let zset = match store_guard.memory_mut().get_mut(key) {
             Some(DataCow::ZSet(zset)) => zset,
             Some(_) => return Err(StoreError::WrongType),
             None => {
                 // Create new ZSet
                 let new_zset = crate::memory::ZSetDataCow::new();
-                shard_guard.memory_mut().insert(key.to_vec(), DataCow::ZSet(new_zset));
+                store_guard.memory_mut().insert(key.to_vec(), DataCow::ZSet(new_zset));
                 // Get the newly inserted ZSet
-                match shard_guard.memory_mut().get_mut(key) {
+                match store_guard.memory_mut().get_mut(key) {
                     Some(DataCow::ZSet(zset)) => zset,
                     _ => return Err(StoreError::Internal("Failed to create ZSet".to_string())),
                 }
@@ -317,10 +292,9 @@ impl ZSetStore for HybridStore {
         destination: &[u8],
         keys: &[&[u8]],
         weights: Option<&[f64]>,
-        apply_index: u64,
     ) -> StoreResult<usize> {
         // Default implementation: not supported
-        let _ = (destination, keys, weights, apply_index);
+        let _ = (destination, keys, weights);
         Ok(0)
     }
 
@@ -329,10 +303,9 @@ impl ZSetStore for HybridStore {
         destination: &[u8],
         keys: &[&[u8]],
         weights: Option<&[f64]>,
-        apply_index: u64,
     ) -> StoreResult<usize> {
         // Default implementation: not supported
-        let _ = (destination, keys, weights, apply_index);
+        let _ = (destination, keys, weights);
         Ok(0)
     }
 }

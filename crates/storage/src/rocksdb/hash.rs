@@ -11,205 +11,197 @@
 use crate::rocksdb::key_encoding::{
     extract_hash_field, hash_field_key, hash_field_prefix, hash_meta_key,
 };
-use crate::rocksdb::ShardedRocksDB;
+use crate::rocksdb::SlotRocksDB;
 use crate::traits::{StoreError, StoreResult};
 use bytes::Bytes;
-use rocksdb::{ColumnFamily, WriteBatch};
-use rr_core::shard::ShardId;
+use rocksdb::WriteBatch;
+use rr_core::routing::RoutingTable;
 
-impl ShardedRocksDB {
+impl SlotRocksDB {
     /// HGET
-    pub fn hget(&self, shard_id: &ShardId, key: &[u8], field: &[u8]) -> Option<Vec<u8>> {
-        let cf = self.get_cf(shard_id)?;
-        let db_key = hash_field_key(key, field);
+    pub fn hget(&self, key: &[u8], field: &[u8]) -> Option<Vec<u8>> {
+        let cf = self.get_cf()?;
+        let slot = RoutingTable::slot_for_key(key);
+        let db_key = hash_field_key(slot, key, field);
         self.db.get_cf(cf, &db_key).ok().flatten()
     }
 
     /// HSET
-    pub fn hset(&self, shard_id: &ShardId, key: &[u8], field: &[u8], value: Bytes) -> bool {
-        self.hset_with_index(shard_id, key, field.as_ref(), value, None)
+    pub fn hset(&self, key: &[u8], field: &[u8], value: Bytes) -> bool {
+        self.hset_with_index(key, field.as_ref(), value, None)
     }
 
     /// HSET with apply_index: Atomically set hash field and update apply_index
     pub fn hset_with_index(
         &self,
-        shard_id: &ShardId,
         key: &[u8],
         field: &[u8],
         value: Bytes,
         apply_index: Option<u64>,
     ) -> bool {
-        if let Some(cf) = self.get_cf(shard_id) {
-            let db_key = hash_field_key(key, &field);
-            let is_new = self.db.get_cf(cf, &db_key).ok().flatten().is_none();
+        let Some(cf) = self.get_cf() else {
+            return false;
+        };
+        let slot = RoutingTable::slot_for_key(key);
+        let db_key = hash_field_key(slot, key, &field);
+        let is_new = self.db.get_cf(cf, &db_key).ok().flatten().is_none();
 
-            if let Some(new_index) = apply_index {
-                if self
-                    .should_skip_apply_index(shard_id, new_index)
-                    .unwrap_or(false)
-                {
-                    return is_new; // Already applied, skip
-                }
+        if let Some(new_index) = apply_index {
+            if self.should_skip_apply_index(new_index).unwrap_or(false) {
+                return is_new; // Already applied, skip
+            }
 
-                // Atomic write: data + apply_index + field_count in single batch
-                let mut batch = WriteBatch::default();
-                batch.put_cf(cf, &db_key, &value);
-                self.add_apply_index_to_batch(&mut batch, cf, new_index);
-                if is_new {
-                    self.add_hash_field_count_to_batch(&mut batch, cf, key, 1);
-                }
+            // Atomic write: data + apply_index + field_count in single batch
+            let mut batch = WriteBatch::default();
+            batch.put_cf(cf, &db_key, &value);
+            self.add_apply_index_to_batch(&mut batch, new_index);
+            if is_new {
+                self.add_hash_field_count_to_batch(&mut batch, key, 1);
+            }
 
-                if self.db.write_opt(batch, &self.write_opts).is_ok() {
-                    return is_new;
-                }
-            } else {
-                // Normal write without apply_index - use batch for atomicity
-                let mut batch = WriteBatch::default();
-                batch.put_cf(cf, &db_key, &value);
-                if is_new {
-                    self.add_hash_field_count_to_batch(&mut batch, cf, key, 1);
-                }
-                if self.db.write_opt(batch, &self.write_opts).is_ok() {
-                    return is_new;
-                }
+            if self.db.write_opt(batch, &self.write_opts).is_ok() {
+                return is_new;
+            }
+        } else {
+            // Normal write without apply_index - use batch for atomicity
+            let mut batch = WriteBatch::default();
+            batch.put_cf(cf, &db_key, &value);
+            if is_new {
+                self.add_hash_field_count_to_batch(&mut batch, key, 1);
+            }
+            if self.db.write_opt(batch, &self.write_opts).is_ok() {
+                return is_new;
             }
         }
         false
     }
 
     /// HMSET
-    pub fn hmset(&self, shard_id: &ShardId, key: &[u8], fvs: Vec<(&[u8], Bytes)>) {
-        self.hmset_with_index(shard_id, key, fvs, None)
+    pub fn hmset(&self, key: &[u8], fvs: Vec<(&[u8], Bytes)>) {
+        self.hmset_with_index(key, fvs, None)
     }
 
     /// HMSET with apply_index: Atomically set multiple hash fields and update apply_index
-    pub fn hmset_with_index(
-        &self,
-        shard_id: &ShardId,
-        key: &[u8],
-        fvs: Vec<(&[u8], Bytes)>,
-        apply_index: Option<u64>,
-    ) {
-        if let Some(cf) = self.get_cf(shard_id) {
-            // Check apply_index first (idempotent)
-            let should_skip = if let Some(new_index) = apply_index {
-                self.should_skip_apply_index(shard_id, new_index)
-                    .unwrap_or(false)
-            } else {
-                false
-            };
+    pub fn hmset_with_index(&self, key: &[u8], fvs: Vec<(&[u8], Bytes)>, apply_index: Option<u64>) {
+        let Some(cf) = self.get_cf() else {
+            return;
+        };
+        // Check apply_index first (idempotent)
+        let should_skip = if let Some(new_index) = apply_index {
+            self.should_skip_apply_index(new_index).unwrap_or(false)
+        } else {
+            false
+        };
 
-            if should_skip {
-                return; // Already applied, skip
-            }
+        if should_skip {
+            return; // Already applied, skip
+        }
 
-            let mut batch = WriteBatch::default();
-            let mut new_fields = 0;
+        let slot = RoutingTable::slot_for_key(key);
+        let mut batch = WriteBatch::default();
+        let mut new_fields = 0;
 
-            for (field, value) in fvs {
-                let db_key = hash_field_key(key, &field);
-                if self.db.get_cf(cf, &db_key).ok().flatten().is_none() {
-                    new_fields += 1;
-                }
-                batch.put_cf(cf, &db_key, &value);
+        for (field, value) in fvs {
+            let db_key = hash_field_key(slot, key, &field);
+            if self.db.get_cf(cf, &db_key).ok().flatten().is_none() {
+                new_fields += 1;
             }
+            batch.put_cf(cf, &db_key, &value);
+        }
 
-            if let Some(new_index) = apply_index {
-                self.add_apply_index_to_batch(&mut batch, cf, new_index);
-            }
-            if new_fields > 0 {
-                self.add_hash_field_count_to_batch(&mut batch, cf, key, new_fields);
-            }
+        if let Some(new_index) = apply_index {
+            self.add_apply_index_to_batch(&mut batch, new_index);
+        }
+        if new_fields > 0 {
+            self.add_hash_field_count_to_batch(&mut batch, key, new_fields);
+        }
 
-            if self.db.write_opt(batch, &self.write_opts).is_ok() {
-                // Write successful
-            }
+        if self.db.write_opt(batch, &self.write_opts).is_ok() {
+            // Write successful
         }
     }
 
     /// HDEL
-    pub fn hdel(&self, shard_id: &ShardId, key: &[u8], fields: &[&[u8]]) -> usize {
-        self.hdel_with_index(shard_id, key, fields, None)
+    pub fn hdel(&self, key: &[u8], fields: &[&[u8]]) -> usize {
+        self.hdel_with_index(key, fields, None)
     }
 
     /// HDEL with apply_index: Atomically delete hash fields and update apply_index
-    pub fn hdel_with_index(
-        &self,
-        shard_id: &ShardId,
-        key: &[u8],
-        fields: &[&[u8]],
-        apply_index: Option<u64>,
-    ) -> usize {
-        if let Some(cf) = self.get_cf(shard_id) {
-            // Check apply_index first (idempotent)
-            let should_skip = if let Some(new_index) = apply_index {
-                self.should_skip_apply_index(shard_id, new_index)
-                    .unwrap_or(false)
-            } else {
-                false
-            };
+    pub fn hdel_with_index(&self, key: &[u8], fields: &[&[u8]], apply_index: Option<u64>) -> usize {
+        let Some(cf) = self.get_cf() else {
+            return 0;
+        };
+        // Check apply_index first (idempotent)
+        let should_skip = if let Some(new_index) = apply_index {
+            self.should_skip_apply_index(new_index).unwrap_or(false)
+        } else {
+            false
+        };
 
-            if should_skip {
-                // Count existing fields to return correct count
-                let mut count = 0;
-                for field in fields {
-                    let db_key = hash_field_key(key, field);
-                    if self.db.get_cf(cf, &db_key).ok().flatten().is_some() {
-                        count += 1;
-                    }
-                }
-                return count;
-            }
+        let slot = RoutingTable::slot_for_key(key);
 
-            let mut batch = WriteBatch::default();
-            let mut deleted = 0;
-
+        if should_skip {
+            // Count existing fields to return correct count
+            let mut count = 0;
             for field in fields {
-                let db_key = hash_field_key(key, field);
+                let db_key = hash_field_key(slot, key, field);
                 if self.db.get_cf(cf, &db_key).ok().flatten().is_some() {
-                    batch.delete_cf(cf, &db_key);
-                    deleted += 1;
+                    count += 1;
                 }
             }
+            return count;
+        }
+        let mut batch = WriteBatch::default();
+        let mut deleted = 0;
 
-            if deleted > 0 {
-                if let Some(new_index) = apply_index {
-                    self.add_apply_index_to_batch(&mut batch, cf, new_index);
-                }
-                self.add_hash_field_count_to_batch(&mut batch, cf, key, -(deleted as i64));
+        for field in fields {
+            let db_key = hash_field_key(slot, key, field);
+            if self.db.get_cf(cf, &db_key).ok().flatten().is_some() {
+                batch.delete_cf(cf, &db_key);
+                deleted += 1;
+            }
+        }
 
-                if self.db.write_opt(batch, &self.write_opts).is_ok() {
-                    return deleted;
-                }
+        if deleted > 0 {
+            if let Some(new_index) = apply_index {
+                self.add_apply_index_to_batch(&mut batch, new_index);
+            }
+            self.add_hash_field_count_to_batch(&mut batch, key, -(deleted as i64));
+
+            if self.db.write_opt(batch, &self.write_opts).is_ok() {
+                return deleted;
             }
         }
         0
     }
 
     /// HEXISTS
-    pub fn hexists(&self, shard_id: &ShardId, key: &[u8], field: &[u8]) -> bool {
-        if let Some(cf) = self.get_cf(shard_id) {
-            let db_key = hash_field_key(key, field);
-            return self.db.get_cf(cf, &db_key).ok().flatten().is_some();
-        }
-        false
+    pub fn hexists(&self, key: &[u8], field: &[u8]) -> bool {
+        let Some(cf) = self.get_cf() else {
+            return false;
+        };
+        let slot = RoutingTable::slot_for_key(key);
+        let db_key = hash_field_key(slot, key, field);
+        self.db.get_cf(cf, &db_key).ok().flatten().is_some()
     }
 
     /// HGETALL
-    pub fn hgetall(&self, shard_id: &ShardId, key: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    pub fn hgetall(&self, key: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
         let mut result = Vec::new();
-        if let Some(cf) = self.get_cf(shard_id) {
-            let prefix = hash_field_prefix(key);
-            let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        let Some(cf) = self.get_cf() else {
+            return result;
+        };
+        let slot = RoutingTable::slot_for_key(key);
+        let prefix = hash_field_prefix(slot, key);
+        let iter = self.db.prefix_iterator_cf(cf, &prefix);
 
-            for item in iter {
-                if let Ok((k, v)) = item {
-                    if !k.starts_with(&prefix) {
-                        break;
-                    }
-                    if let Some(field) = extract_hash_field(&k, key) {
-                        result.push((field.to_vec(), v.to_vec()));
-                    }
+        for item in iter {
+            if let Ok((k, v)) = item {
+                if !k.starts_with(&prefix) {
+                    break;
+                }
+                if let Some(field) = extract_hash_field(&k, slot, key) {
+                    result.push((field.to_vec(), v.to_vec()));
                 }
             }
         }
@@ -217,20 +209,22 @@ impl ShardedRocksDB {
     }
 
     /// HKEYS
-    pub fn hkeys(&self, shard_id: &ShardId, key: &[u8]) -> Vec<Vec<u8>> {
+    pub fn hkeys(&self, key: &[u8]) -> Vec<Vec<u8>> {
         let mut result = Vec::new();
-        if let Some(cf) = self.get_cf(shard_id) {
-            let prefix = hash_field_prefix(key);
-            let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        let Some(cf) = self.get_cf() else {
+            return result;
+        };
+        let slot = RoutingTable::slot_for_key(key);
+        let prefix = hash_field_prefix(slot, key);
+        let iter = self.db.prefix_iterator_cf(cf, &prefix);
 
-            for item in iter {
-                if let Ok((k, _)) = item {
-                    if !k.starts_with(&prefix) {
-                        break;
-                    }
-                    if let Some(field) = extract_hash_field(&k, key) {
-                        result.push(field.to_vec());
-                    }
+        for item in iter {
+            if let Ok((k, _)) = item {
+                if !k.starts_with(&prefix) {
+                    break;
+                }
+                if let Some(field) = extract_hash_field(&k, slot, key) {
+                    result.push(field.to_vec());
                 }
             }
         }
@@ -238,60 +232,57 @@ impl ShardedRocksDB {
     }
 
     /// HVALS
-    pub fn hvals(&self, shard_id: &ShardId, key: &[u8]) -> Vec<Vec<u8>> {
+    pub fn hvals(&self, key: &[u8]) -> Vec<Vec<u8>> {
         let mut result = Vec::new();
-        if let Some(cf) = self.get_cf(shard_id) {
-            let prefix = hash_field_prefix(key);
-            let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        let Some(cf) = self.get_cf() else {
+            return result;
+        };
+        let slot = RoutingTable::slot_for_key(key);
+        let prefix = hash_field_prefix(slot, key);
+        let iter = self.db.prefix_iterator_cf(cf, &prefix);
 
-            for item in iter {
-                if let Ok((k, v)) = item {
-                    if !k.starts_with(&prefix) {
-                        break;
-                    }
-                    result.push(v.to_vec());
+        for item in iter {
+            if let Ok((k, v)) = item {
+                if !k.starts_with(&prefix) {
+                    break;
                 }
+                result.push(v.to_vec());
             }
         }
         result
     }
 
     /// HLEN
-    pub fn hlen(&self, shard_id: &ShardId, key: &[u8]) -> usize {
-        if let Some(cf) = self.get_cf(shard_id) {
-            let meta_key = hash_meta_key(key);
-            if let Ok(Some(value)) = self.db.get_cf(cf, &meta_key) {
-                let s = String::from_utf8_lossy(&value);
-                return s.parse::<usize>().unwrap_or(0);
-            }
+    pub fn hlen(&self, key: &[u8]) -> usize {
+        let Some(cf) = self.get_cf() else {
+            return 0;
+        };
+        let slot = RoutingTable::slot_for_key(key);
+        let meta_key = hash_meta_key(slot, key);
+        if let Ok(Some(value)) = self.db.get_cf(cf, &meta_key) {
+            let s = String::from_utf8_lossy(&value);
+            return s.parse::<usize>().unwrap_or(0);
         }
         0
     }
 
     /// HINCRBY
-    pub fn hincrby(
-        &self,
-        shard_id: &ShardId,
-        key: &[u8],
-        field: &[u8],
-        delta: i64,
-    ) -> StoreResult<i64> {
-        self.hincrby_with_index(shard_id, key, field, delta, None)
+    pub fn hincrby(&self, key: &[u8], field: &[u8], delta: i64) -> StoreResult<i64> {
+        self.hincrby_with_index(key, field, delta, None)
     }
 
     /// HINCRBY with apply_index: Atomically increment hash field and update apply_index
     pub fn hincrby_with_index(
         &self,
-        shard_id: &ShardId,
         key: &[u8],
         field: &[u8],
         delta: i64,
         apply_index: Option<u64>,
     ) -> StoreResult<i64> {
-        let cf = self.get_cf(shard_id).ok_or_else(|| {
-            StoreError::Internal(format!("Column Family not found for shard {}", shard_id))
-        })?;
-        let db_key = hash_field_key(key, field);
+        let cf = self.get_cf()
+            .ok_or_else(|| StoreError::Internal("Default column family not found".to_string()))?;
+        let slot = RoutingTable::slot_for_key(key);
+        let db_key = hash_field_key(slot, key, field);
 
         let (current, is_new) = match self.db.get_cf(cf, &db_key) {
             Ok(Some(value)) => {
@@ -311,7 +302,7 @@ impl ShardedRocksDB {
 
         if let Some(new_index) = apply_index {
             if self
-                .should_skip_apply_index(shard_id, new_index)
+                .should_skip_apply_index(new_index)
                 .map_err(|e| StoreError::Internal(e.to_string()))?
             {
                 return Ok(new_value); // Already applied, skip
@@ -320,9 +311,9 @@ impl ShardedRocksDB {
             // Atomic write: data + apply_index + field_count in single batch
             let mut batch = WriteBatch::default();
             batch.put_cf(cf, &db_key, new_value.to_string().as_bytes());
-            self.add_apply_index_to_batch(&mut batch, cf, new_index);
+            self.add_apply_index_to_batch(&mut batch, new_index);
             if is_new {
-                self.add_hash_field_count_to_batch(&mut batch, cf, key, 1);
+                self.add_hash_field_count_to_batch(&mut batch, key, 1);
             }
 
             self.db
@@ -333,7 +324,7 @@ impl ShardedRocksDB {
             let mut batch = WriteBatch::default();
             batch.put_cf(cf, &db_key, new_value.to_string().as_bytes());
             if is_new {
-                self.add_hash_field_count_to_batch(&mut batch, cf, key, 1);
+                self.add_hash_field_count_to_batch(&mut batch, key, 1);
             }
             self.db
                 .write_opt(batch, &self.write_opts)
@@ -345,14 +336,12 @@ impl ShardedRocksDB {
 
     /// Helper: Add hash field count update to batch (atomic)
     /// This reads the current count before adding to batch, ensuring atomicity
-    fn add_hash_field_count_to_batch(
-        &self,
-        batch: &mut WriteBatch,
-        cf: &ColumnFamily,
-        key: &[u8],
-        delta: i64,
-    ) {
-        let meta_key = hash_meta_key(key);
+    fn add_hash_field_count_to_batch(&self, batch: &mut WriteBatch, key: &[u8], delta: i64) {
+        let Some(cf) = self.get_cf() else {
+            return;
+        };
+        let slot = RoutingTable::slot_for_key(key);
+        let meta_key = hash_meta_key(slot, key);
 
         // Read current count before batch commit
         let current = self

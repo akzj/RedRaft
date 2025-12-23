@@ -525,9 +525,9 @@ impl RRNode {
                 let state_machines = self.state_machines.lock();
                 for sm in state_machines.values() {
                     // HybridStore implements RedisStore, so we can call flushdb directly
-                    // Use current apply_index for flushdb operation
-                    let apply_index = sm.apply_index().load(std::sync::atomic::Ordering::SeqCst);
-                    let _ = sm.store().flushdb(apply_index);
+                    sm.store()
+                        .flushdb()
+                        .map_err(|e| anyhow::anyhow!("Failed to flushdb: {}", e))?;
                 }
                 Ok(RespValue::SimpleString(bytes::Bytes::from("OK")))
             }

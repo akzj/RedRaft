@@ -5,141 +5,94 @@ use crate::traits::{HashStore, StoreError, StoreResult};
 use bytes::Bytes;
 
 impl HashStore for HybridStore {
-    fn hget(&self, key: &[u8], field: &[u8], read_index: u64) -> StoreResult<Option<Bytes>> {
-        let shard_id = self.shard_for_key(key)?;
-        let shard = self.get_shard(key)?;
-        let shard_guard = shard.read();
-        // Verify read_index is valid (should be <= current apply_index)
-        shard_guard.metadata.verify_read_index(read_index)?;
-        Ok(shard_guard
+    fn hget(&self, key: &[u8], field: &[u8]) -> StoreResult<Option<Bytes>> {
+        let slot_store = self.get_slot_store(key)?;
+        let store_guard = slot_store.read();
+        Ok(store_guard
             .rocksdb()
-            .hget(&shard_id, key, field)
+            .hget(key, field)
             .map(|v| Bytes::from(v)))
     }
 
-    fn hset(&self, key: &[u8], field: &[u8], value: Bytes, apply_index: u64) -> StoreResult<bool> {
-        let shard_id = self.shard_for_key(key)?;
-        let shard = self.get_shard(key)?;
-        let mut shard_guard = shard.write();
-        // Update apply_index in metadata
-        shard_guard.metadata.set_apply_index(apply_index);
-        Ok(shard_guard
+    fn hset(&self, key: &[u8], field: &[u8], value: Bytes) -> StoreResult<bool> {
+        let slot_store = self.get_slot_store(key)?;
+        let mut store_guard = slot_store.write();
+        Ok(store_guard
             .rocksdb_mut()
-            .hset(&shard_id, key, field.as_ref(), value))
+            .hset(key, field.as_ref(), value))
     }
 
-    fn hmget(
-        &self,
-        key: &[u8],
-        fields: &[&[u8]],
-        read_index: u64,
-    ) -> StoreResult<Vec<Option<Bytes>>> {
-        let shard_id = self.shard_for_key(key)?;
-        let shard = self.get_shard(key)?;
-        let shard_guard = shard.read();
-        // Verify read_index is valid (should be <= current apply_index)
-        shard_guard.metadata.verify_read_index(read_index)?;
+    fn hmget(&self, key: &[u8], fields: &[&[u8]]) -> StoreResult<Vec<Option<Bytes>>> {
+        let slot_store = self.get_slot_store(key)?;
+        let store_guard = slot_store.read();
         Ok(fields
             .iter()
             .map(|f| {
-                shard_guard
+                store_guard
                     .rocksdb()
-                    .hget(&shard_id, key, f)
+                    .hget(key, f)
                     .map(|v| Bytes::from(v))
             })
             .collect())
     }
 
-    fn hmset(&self, key: &[u8], fvs: Vec<(&[u8], Bytes)>, apply_index: u64) -> StoreResult<()> {
-        let shard_id = self.shard_for_key(key)?;
-        let shard = self.get_shard(key)?;
-        let mut shard_guard = shard.write();
-        // Update apply_index in metadata
-        shard_guard.metadata.set_apply_index(apply_index);
-        shard_guard.rocksdb_mut().hmset(&shard_id, key, fvs);
+    fn hmset(&self, key: &[u8], fvs: Vec<(&[u8], Bytes)>) -> StoreResult<()> {
+        let slot_store = self.get_slot_store(key)?;
+        let mut store_guard = slot_store.write();
+        store_guard.rocksdb_mut().hmset(key, fvs);
         Ok(())
     }
 
-    fn hgetall(&self, key: &[u8], read_index: u64) -> StoreResult<Vec<(Bytes, Bytes)>> {
-        let shard_id = self.shard_for_key(key)?;
-        let shard = self.get_shard(key)?;
-        let shard_guard = shard.read();
-        // Verify read_index is valid (should be <= current apply_index)
-        shard_guard.metadata.verify_read_index(read_index)?;
-        let v = shard_guard.rocksdb().hgetall(&shard_id, key);
+    fn hgetall(&self, key: &[u8]) -> StoreResult<Vec<(Bytes, Bytes)>> {
+        let slot_store = self.get_slot_store(key)?;
+        let store_guard = slot_store.read();
+        let v = store_guard.rocksdb().hgetall(key);
         Ok(v.into_iter()
             .map(|(f, v)| (Bytes::from(f), Bytes::from(v)))
             .collect())
     }
 
-    fn hkeys(&self, key: &[u8], read_index: u64) -> StoreResult<Vec<Bytes>> {
-        let shard_id = self.shard_for_key(key)?;
-        let shard = self.get_shard(key)?;
-        let shard_guard = shard.read();
-        // Verify read_index is valid (should be <= current apply_index)
-        shard_guard.metadata.verify_read_index(read_index)?;
-        let v = shard_guard.rocksdb().hkeys(&shard_id, key);
+    fn hkeys(&self, key: &[u8]) -> StoreResult<Vec<Bytes>> {
+        let slot_store = self.get_slot_store(key)?;
+        let store_guard = slot_store.read();
+        let v = store_guard.rocksdb().hkeys(key);
         Ok(v.into_iter().map(Bytes::from).collect())
     }
 
-    fn hvals(&self, key: &[u8], read_index: u64) -> StoreResult<Vec<Bytes>> {
-        let shard_id = self.shard_for_key(key)?;
-        let shard = self.get_shard(key)?;
-        let shard_guard = shard.read();
-        // Verify read_index is valid (should be <= current apply_index)
-        shard_guard.metadata.verify_read_index(read_index)?;
-        let v = shard_guard.rocksdb().hvals(&shard_id, key);
+    fn hvals(&self, key: &[u8]) -> StoreResult<Vec<Bytes>> {
+        let slot_store = self.get_slot_store(key)?;
+        let store_guard = slot_store.read();
+        let v = store_guard.rocksdb().hvals(key);
         Ok(v.into_iter().map(Bytes::from).collect())
     }
 
-    fn hsetnx(
-        &self,
-        key: &[u8],
-        field: &[u8],
-        value: Bytes,
-        read_index: u64,
-        apply_index: u64,
-    ) -> StoreResult<bool> {
-        let shard_id = self.shard_for_key(key)?;
-        let shard = self.get_shard(key)?;
-        let mut shard_guard = shard.write();
-        // Verify read_index is valid (should be <= current apply_index) for the existence check
-        shard_guard.metadata.verify_read_index(read_index)?;
+    fn hsetnx(&self, key: &[u8], field: &[u8], value: Bytes) -> StoreResult<bool> {
+        let slot_store = self.get_slot_store(key)?;
+        let mut store_guard = slot_store.write();
         // Check if field exists
-        if shard_guard.rocksdb().hget(&shard_id, key, field).is_some() {
+        if store_guard.rocksdb().hget(key, field).is_some() {
             return Ok(false);
         }
-        // Update apply_index in metadata
-        shard_guard.metadata.set_apply_index(apply_index);
-        Ok(shard_guard.rocksdb_mut().hset(&shard_id, key, field, value))
+        Ok(store_guard.rocksdb_mut().hset(key, field, value))
     }
 
-    fn hdel(&self, key: &[u8], fields: &[&[u8]], apply_index: u64) -> StoreResult<usize> {
-        let shard_id = self.shard_for_key(key)?;
-        let shard = self.get_shard(key)?;
-        let mut shard_guard = shard.write();
-        // Update apply_index in metadata
-        shard_guard.metadata.set_apply_index(apply_index);
-        Ok(shard_guard.rocksdb_mut().hdel(&shard_id, key, fields))
+    fn hdel(&self, key: &[u8], fields: &[&[u8]]) -> StoreResult<usize> {
+        let slot_store = self.get_slot_store(key)?;
+        let mut store_guard = slot_store.write();
+        Ok(store_guard.rocksdb_mut().hdel(key, fields))
     }
 
-    fn hlen(&self, key: &[u8], read_index: u64) -> StoreResult<usize> {
-        let shard_id = self.shard_for_key(key)?;
-        let shard = self.get_shard(key)?;
-        let shard_guard = shard.read();
-        // Verify read_index is valid (should be <= current apply_index)
-        shard_guard.metadata.verify_read_index(read_index)?;
-        Ok(shard_guard.rocksdb().hlen(&shard_id, key))
+    fn hlen(&self, key: &[u8]) -> StoreResult<usize> {
+        let slot_store = self.get_slot_store(key)?;
+        let store_guard = slot_store.read();
+        Ok(store_guard.rocksdb().hlen(key))
     }
 
-    fn hincrby(&self, key: &[u8], field: &[u8], delta: i64, apply_index: u64) -> StoreResult<i64> {
-        let shard_id = self.shard_for_key(key)?;
-        let shard = self.get_shard(key)?;
-        let mut shard_guard = shard.write();
-        // Update apply_index in metadata
-        shard_guard.metadata.set_apply_index(apply_index);
-        shard_guard
+    fn hincrby(&self, key: &[u8], field: &[u8], delta: i64) -> StoreResult<i64> {
+        let slot_store = self.get_slot_store(key)?;
+        let mut store_guard = slot_store.write();
+        store_guard
             .rocksdb_mut()
-            .hincrby(&shard_id, key, field, delta)
+            .hincrby(key, field, delta)
     }
 }
