@@ -12,6 +12,37 @@ service NodeService {
   /// Get Raft state information
   /// Returns current Raft state including role, term, log indices, etc.
   rpc GetRaftState(GetRaftStateRequest) returns (GetRaftStateResponse);
+  
+  /// Create a new Raft group
+  /// 
+  /// Leader submits CreateRaftGroup command to Raft, which will be applied on all nodes.
+  /// The new Raft group will be created WITHOUT slot range assignment.
+  /// The new Raft group will be in "PREPARE" state (blocking reads/writes)
+  /// until routing table is updated. Pilot should NOT update routing table yet.
+  /// 
+  /// This should be called on the SOURCE shard's leader.
+  /// After the command is applied, all nodes in the source shard will have created the new Raft group.
+  rpc CreateRaftGroup(CreateRaftGroupRequest) returns (CreateRaftGroupResponse);
+  
+  /// Prepare split by blocking writes and ensuring all logs are applied
+  /// 
+  /// Process:
+  /// 1. Leader immediately blocks writes to target slot range in memory (local operation)
+  /// 2. Leader submits noop command to Raft and waits for apply
+  /// 3. When noop is applied, all previous logs are guaranteed to be applied
+  /// 4. Return response - Pilot can now update routing table
+  /// 
+  /// After routing table is updated, the new region B will automatically become READY
+  /// when it receives requests (it will check routing table and enable itself).
+  /// All blocked requests in group A will return MOVED error, clients will retry to group B.
+  /// 
+  /// If leader fails during this operation, the operation fails and Pilot should retry.
+  /// This should be called on the SOURCE shard's leader.
+  rpc PrepareSplit(PrepareSplitRequest) returns (PrepareSplitResponse);
+  
+  /// Get split status
+  /// Query the status of an ongoing split operation
+  rpc GetSplitStatus(GetSplitStatusRequest) returns (GetSplitStatusResponse);
 }
 
 /// Get Raft state request
@@ -37,6 +68,113 @@ message GetRaftStateResponse {
   uint64 last_applied = 6;
 }
 
+/// Create Raft group request
+message CreateRaftGroupRequest {
+  /// Split task ID (unique identifier for this split operation)
+  string split_task_id = 1;
+  
+  /// Target shard ID (the new shard to be created)
+  string target_shard_id = 2;
+  
+  /// Target nodes for new Raft group
+  /// List of node IDs that will form the new Raft group
+  /// These nodes should be the same as the source shard's nodes (for simplicity)
+  repeated string target_nodes = 3;
+  
+  /// Note: Slot range is NOT assigned at creation time.
+  /// After PrepareSplit completes and Pilot updates routing table,
+  /// the new Raft group will automatically become READY when it receives requests.
+  /// 
+  /// This command will be applied via Raft, ensuring all nodes in the source shard
+  /// create the new Raft group consistently.
+}
+
+/// Create Raft group response
+message CreateRaftGroupResponse {
+  /// Split task ID
+  string split_task_id = 1;
+  
+  /// Success flag
+  bool success = 2;
+  
+  /// Error message (if failed)
+  string error_message = 3;
+  
+  /// Target shard ID
+  string target_shard_id = 4;
+  
+  /// Target Raft group leader ID (after election)
+  string target_leader_id = 5;
+}
+
+/// Prepare split request
+message PrepareSplitRequest {
+  /// Split task ID (must match the CreateRaftGroup task ID)
+  string split_task_id = 1;
+  
+  /// Source shard ID (the shard to be split)
+  string source_shard_id = 2;
+  
+  /// Target shard ID (the new shard created by CreateRaftGroup)
+  string target_shard_id = 3;
+  
+  /// Slot range to block [slot_start, slot_end)
+  /// This is the range that will be moved to target shard
+  uint32 slot_start = 4;
+  uint32 slot_end = 5;
+}
+
+/// Prepare split response
+message PrepareSplitResponse {
+  /// Split task ID
+  string split_task_id = 1;
+  
+  /// Success flag
+  bool success = 2;
+  
+  /// Error message (if failed)
+  string error_message = 3;
+  
+  /// The index of the noop command that was applied
+  /// All logs before this index are guaranteed to be applied
+  /// Pilot can now safely update routing table
+  uint64 noop_apply_index = 4;
+}
+
+/// Get split status request
+message GetSplitStatusRequest {
+  /// Split task ID
+  string split_task_id = 1;
+}
+
+/// Get split status response
+message GetSplitStatusResponse {
+  /// Split task ID
+  string split_task_id = 1;
+  
+  /// Split status
+  SplitStatus status = 2;
+  
+  /// Error message (if failed)
+  string error_message = 3;
+  
+  /// Current phase
+  SplitPhase phase = 4;
+  
+  /// Source shard ID
+  string source_shard_id = 5;
+  
+  /// Target shard ID
+  string target_shard_id = 6;
+  
+  /// Slot range being split [slot_start, slot_end)
+  uint32 slot_start = 7;
+  uint32 slot_end = 8;
+  
+  /// Last applied index (for consistency check)
+  uint64 last_applied_index = 9;
+}
+
 /// Node role
 enum Role {
   ROLE_UNSPECIFIED = 0;
@@ -44,4 +182,66 @@ enum Role {
   CANDIDATE = 2;
   LEADER = 3;
   LEARNER = 4;
+}
+
+/// Split status
+enum SplitStatus {
+  SPLIT_STATUS_UNSPECIFIED = 0;
+  
+  /// Raft group is being created
+  /// CreateRaftGroup is in progress
+  SPLIT_STATUS_CREATING_RAFT_GROUP = 1;
+  
+  /// Raft group created, waiting for leader election
+  SPLIT_STATUS_WAITING_LEADER = 2;
+  
+  /// Split preparation is in progress
+  /// PrepareSplit is executing (blocking writes, waiting for noop apply)
+  SPLIT_STATUS_PREPARING = 3;
+  
+  /// Split operation is in progress
+  /// Routing table is being updated, target group is being enabled
+  SPLIT_STATUS_SPLITTING = 4;
+  
+  /// Split operation completed successfully
+  /// Target Raft group is READY and can accept reads/writes
+  SPLIT_STATUS_COMPLETED = 5;
+  
+  /// Split operation failed
+  SPLIT_STATUS_FAILED = 6;
+  
+  /// Split operation was cancelled
+  SPLIT_STATUS_CANCELLED = 7;
+  
+  /// Split operation not found
+  SPLIT_STATUS_NOT_FOUND = 8;
+}
+
+/// Split phase
+enum SplitPhase {
+  SPLIT_PHASE_UNSPECIFIED = 0;
+  
+  /// Phase 1: Creating Raft group
+  /// CreateRaftGroup command is being submitted to Raft and applied on all nodes
+  SPLIT_PHASE_CREATING_RAFT_GROUP = 1;
+  
+  /// Phase 2: Waiting for leader election
+  /// New Raft group is created but leader election is in progress
+  SPLIT_PHASE_WAITING_LEADER = 2;
+  
+  /// Phase 3: Blocking writes and waiting for apply
+  /// Leader blocks writes in memory, submits noop command to Raft
+  /// Waiting for noop command to be applied (ensures all previous logs are applied)
+  /// If leader fails, operation fails and Pilot retries
+  SPLIT_PHASE_PREPARING = 3;
+  
+  /// Phase 4: Routing table updated
+  /// Pilot has updated routing table, slot range is assigned to target group
+  /// Target group automatically becomes READY when it receives requests
+  /// Blocked requests in group A will return MOVED error
+  SPLIT_PHASE_ROUTING_UPDATED = 4;
+  
+  /// Phase 5: Completing split
+  /// Target group is READY and accepting requests, split operation is completing
+  SPLIT_PHASE_COMPLETING = 5;
 }

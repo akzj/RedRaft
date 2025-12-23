@@ -9,8 +9,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[
                 "proto/node.proto",
                 "proto/snapshot_service.proto",
-                "proto/split_service.proto",
-                "proto/sync_service.proto",
             ],
             &["proto/"],
         )?;

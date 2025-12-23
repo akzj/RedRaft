@@ -42,6 +42,18 @@ pub struct ReplayLogConfig {
 pub enum StateMachineCommand {
     RedisCommand(resp::Command),
     Noop(String), // for increase index only
+    CreateRaftGroup {
+        split_task_id: String,
+        target_shard_id: String,
+        target_nodes: Vec<String>,
+    },
+    PrepareSplit {
+        split_task_id: String,
+        source_shard_id: String,
+        target_shard_id: String,
+        slot_start: u32,
+        slot_end: u32,
+    },
 }
 
 /// KV state machine
@@ -167,6 +179,11 @@ impl ShardStateMachine {
     /// Returns None if RaftState has been dropped
     pub fn raft_state(&self) -> Option<Arc<tokio::sync::Mutex<RaftState>>> {
         self.raft_state.get().and_then(|weak| weak.upgrade())
+    }
+
+    /// Get last applied index
+    pub fn last_apply_index(&self) -> u64 {
+        self.raft_last_apply_index.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Add a log replay configuration for split operation
@@ -433,6 +450,16 @@ impl StateMachine for ShardStateMachine {
                 }
                 StateMachineCommand::Noop(_noop) => {
                     // Noop command doesn't need to be applied
+                    (StoreApplyResult::Ok, None)
+                }
+                StateMachineCommand::CreateRaftGroup { .. } => {
+                    // CreateRaftGroup command is handled in apply_command callback
+                    // This is just a placeholder - actual creation happens in the async callback
+                    (StoreApplyResult::Ok, None)
+                }
+                StateMachineCommand::PrepareSplit { .. } => {
+                    // PrepareSplit command is handled in apply_command callback
+                    // This is just a placeholder - actual blocking happens in the async callback
                     (StoreApplyResult::Ok, None)
                 }
             }

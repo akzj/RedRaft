@@ -11,12 +11,12 @@ use tracing::{debug, info};
 use raft::{ClusterConfig, Network, RaftCallbacks, RaftId, RaftState, RaftStateOptions, Storage};
 
 use crate::config::Config;
-use crate::log_replay_writer::LogReplayWriter;
 use crate::snapshot_transfer::SnapshotTransferManager;
 use crate::state_machine::{ShardStateMachine, StateMachineCommand};
-use parking_lot::RwLock as ParkingLotRwLock;
 use proto::node::{
-    node_service_server::NodeService, GetRaftStateRequest, GetRaftStateResponse, Role as ProtoRole,
+    node_service_server::NodeService, CreateRaftGroupRequest, CreateRaftGroupResponse,
+    GetRaftStateRequest, GetRaftStateResponse, GetSplitStatusRequest, GetSplitStatusResponse,
+    PrepareSplitRequest, PrepareSplitResponse, Role as ProtoRole, SplitPhase, SplitStatus,
 };
 use raft::event::Role as RaftRole;
 use resp::{Command, CommandType, RespValue};
@@ -48,11 +48,24 @@ pub struct RRNode {
     /// Used to reuse connections across different services (SyncService, SplitService, etc.)
     grpc_client_pool:
         Arc<parking_lot::RwLock<std::collections::HashMap<String, Arc<tonic::transport::Channel>>>>,
-    /// Log replay writers (task_id -> LogReplayWriter)
-    /// Used to store log replay writer for split operations
-    log_replay_writers: Arc<tokio::sync::RwLock<HashMap<String, LogReplayWriter>>>,
+    /// Split status tracking (task_id -> SplitStatus)
+    split_statuses: Arc<tokio::sync::RwLock<HashMap<String, SplitStatusInfo>>>,
+    /// Blocked slot ranges for writes (slot_start -> (slot_end, task_id))
+    blocked_slot_ranges: Arc<tokio::sync::RwLock<HashMap<u32, (u32, String)>>>,
     /// Configuration
     config: Config,
+}
+
+/// Split status information
+#[derive(Debug, Clone)]
+pub struct SplitStatusInfo {
+    pub split_task_id: String,
+    pub source_shard_id: String,
+    pub target_shard_id: String,
+    pub slot_start: u32,
+    pub slot_end: u32,
+    pub phase: proto::node::SplitPhase,
+    pub noop_apply_index: Option<u64>,
 }
 
 impl RRNode {
@@ -74,7 +87,8 @@ impl RRNode {
             state_machines: Arc::new(Mutex::new(HashMap::new())),
             snapshot_transfer_manager: Arc::new(SnapshotTransferManager::new()),
             grpc_client_pool: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
-            log_replay_writers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            split_statuses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            blocked_slot_ranges: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             config,
         }
     }
@@ -216,88 +230,6 @@ impl RRNode {
     /// - `None`: If shard does not exist
     pub fn get_state_machine(&self, shard_id: &str) -> Option<Arc<ShardStateMachine>> {
         self.state_machines.lock().get(shard_id).cloned()
-    }
-
-    /// Register log replay writer for a split task
-    ///
-    /// Stores the log replay writer.
-    ///
-    /// # Arguments
-    /// - `task_id`: Split task ID
-    /// - `writer`: Log replay writer
-    pub async fn register_log_replay_writer(&self, task_id: String, writer: LogReplayWriter) {
-        self.log_replay_writers
-            .write()
-            .await
-            .insert(task_id, writer);
-    }
-
-    /// Create log replay iterator for a split task
-    ///
-    /// # Arguments
-    /// - `task_id`: Split task ID
-    /// - `start_index`: Starting apply_index to read from
-    ///
-    /// # Returns
-    /// - `Ok(LogReplayIterator)`: Iterator if task exists
-    /// - `Err`: If task does not exist or iterator creation fails
-    pub async fn create_log_replay_iterator(
-        &self,
-        task_id: &str,
-        start_seq: u64,
-    ) -> anyhow::Result<crate::log_replay_writer::LogReplayIterator> {
-        // Get writer and call create_iterator
-        // create_iterator clones all necessary data internally, so we can safely
-        // hold the lock during the call (it's a short-lived operation)
-        let guard = self.log_replay_writers.read().await;
-        let writer = guard
-            .get(task_id)
-            .ok_or_else(|| anyhow::anyhow!("Log replay writer not found for task {}", task_id))?;
-        writer.create_iterator(start_seq).await
-    }
-
-    /// Set snapshot index for log replay writer
-    ///
-    /// # Arguments
-    /// - `task_id`: Split task ID
-    /// - `snapshot_index`: Snapshot apply_index - entries with index <= this value are already in snapshot
-    pub async fn set_log_replay_snapshot_index(&self, task_id: &str, snapshot_index: u64) {
-        // Get snapshot_index Arc reference to avoid holding the lock across await
-        let snapshot_index_arc = {
-            self.log_replay_writers
-                .read()
-                .await
-                .get(task_id)
-                .map(|writer| writer.snapshot_index())
-        };
-
-        if let Some(snapshot_index_arc) = snapshot_index_arc {
-            *snapshot_index_arc.write().await = Some(snapshot_index);
-        }
-    }
-
-    /// Remove log replay writer for a split task
-    ///
-    /// # Arguments
-    /// - `task_id`: Split task ID
-    pub async fn remove_log_replay_writer(&self, task_id: &str) {
-        self.log_replay_writers.write().await.remove(task_id);
-    }
-
-    /// Get log replay writer metadata for a split task
-    ///
-    /// # Arguments
-    /// - `task_id`: Split task ID
-    ///
-    /// # Returns
-    /// - `Some(Arc<RwLock<LogReplayMetadata>>)`: Metadata if writer exists
-    /// - `None`: If writer does not exist
-    pub async fn get_log_replay_metadata(
-        &self,
-        task_id: &str,
-    ) -> Option<Arc<tokio::sync::RwLock<crate::log_replay_writer::LogReplayMetadata>>> {
-        let guard = self.log_replay_writers.read().await;
-        guard.get(task_id).map(|writer| writer.metadata())
     }
 
     /// Create Raft group (for Pilot control plane only)
@@ -695,5 +627,299 @@ impl NodeService for NodeServiceImpl {
         };
 
         Ok(Response::new(response))
+    }
+
+    async fn create_raft_group(
+        &self,
+        request: Request<CreateRaftGroupRequest>,
+    ) -> Result<Response<CreateRaftGroupResponse>, Status> {
+        let req = request.into_inner();
+        let split_task_id = req.split_task_id;
+        let target_shard_id = req.target_shard_id;
+        let target_nodes = req.target_nodes;
+
+        // Validate request
+        if split_task_id.is_empty() {
+            return Err(Status::invalid_argument("split_task_id is required"));
+        }
+        if target_shard_id.is_empty() {
+            return Err(Status::invalid_argument("target_shard_id is required"));
+        }
+        if target_nodes.is_empty() {
+            return Err(Status::invalid_argument("target_nodes is required"));
+        }
+
+        // Find the source shard (the shard that contains this node as leader)
+        // Collect candidates first, then check leadership
+        let candidates: Vec<(String, Arc<ShardStateMachine>)> = {
+            let state_machines = self.node.state_machines.lock();
+            state_machines
+                .iter()
+                .map(|(shard_id, sm)| (shard_id.clone(), sm.clone()))
+                .collect()
+        };
+
+        // Find leader shard
+        let (source_shard_id, source_state_machine) = {
+            let mut found = None;
+            for (shard_id, sm) in candidates {
+                if let Some(raft_state_arc) = sm.raft_state() {
+                    let raft_state = raft_state_arc.lock().await;
+                    if raft_state.role == RaftRole::Leader {
+                        found = Some((shard_id, sm));
+                        break;
+                    }
+                }
+            }
+            match found {
+                Some((id, sm)) => (id, sm),
+                None => {
+                    return Err(Status::failed_precondition(
+                        "No leader found in source shard",
+                    ));
+                }
+            }
+        };
+
+        // Submit CreateRaftGroup command to Raft
+        let cmd = StateMachineCommand::CreateRaftGroup {
+            split_task_id: split_task_id.clone(),
+            target_shard_id: target_shard_id.clone(),
+            target_nodes: target_nodes.clone(),
+        };
+
+        // Update split status
+        {
+            let mut statuses = self.node.split_statuses.write().await;
+            statuses.insert(
+                split_task_id.clone(),
+                SplitStatusInfo {
+                    split_task_id: split_task_id.clone(),
+                    source_shard_id: source_shard_id.clone(),
+                    target_shard_id: target_shard_id.clone(),
+                    slot_start: 0,
+                    slot_end: 0,
+                    phase: proto::node::SplitPhase::CreatingRaftGroup,
+                    noop_apply_index: None,
+                },
+            );
+        }
+
+        // Propose command (this will be applied on all nodes via Raft)
+        match source_state_machine.propose_command(cmd).await {
+            Ok(_) => {
+                // Wait a bit for the command to be applied and leader election
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+                // Get target leader (after election)
+                let target_leader_id = {
+                    let target_sm_opt = {
+                        let state_machines = self.node.state_machines.lock();
+                        state_machines.get(&target_shard_id).cloned()
+                    };
+                    if let Some(target_sm) = target_sm_opt {
+                        if let Some(raft_state_arc) = target_sm.raft_state() {
+                            let raft_state = raft_state_arc.lock().await;
+                            raft_state
+                                .leader_id
+                                .as_ref()
+                                .map(|id| id.node.clone())
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    }
+                };
+
+                let response = CreateRaftGroupResponse {
+                    split_task_id: split_task_id.clone(),
+                    success: true,
+                    error_message: String::new(),
+                    target_shard_id: target_shard_id.clone(),
+                    target_leader_id,
+                };
+                Ok(Response::new(response))
+            }
+            Err(e) => {
+                let response = CreateRaftGroupResponse {
+                    split_task_id: split_task_id.clone(),
+                    success: false,
+                    error_message: e.to_string(),
+                    target_shard_id: target_shard_id.clone(),
+                    target_leader_id: String::new(),
+                };
+                Ok(Response::new(response))
+            }
+        }
+    }
+
+    async fn prepare_split(
+        &self,
+        request: Request<PrepareSplitRequest>,
+    ) -> Result<Response<PrepareSplitResponse>, Status> {
+        let req = request.into_inner();
+        let split_task_id = req.split_task_id;
+        let source_shard_id = req.source_shard_id;
+        let target_shard_id = req.target_shard_id;
+        let slot_start = req.slot_start;
+        let slot_end = req.slot_end;
+
+        // Validate request
+        if split_task_id.is_empty() {
+            return Err(Status::invalid_argument("split_task_id is required"));
+        }
+        if source_shard_id.is_empty() {
+            return Err(Status::invalid_argument("source_shard_id is required"));
+        }
+        if target_shard_id.is_empty() {
+            return Err(Status::invalid_argument("target_shard_id is required"));
+        }
+        if slot_start >= slot_end {
+            return Err(Status::invalid_argument("slot_start must be less than slot_end"));
+        }
+
+        // Get source state machine
+        let source_state_machine = {
+            let state_machines = self.node.state_machines.lock();
+            match state_machines.get(&source_shard_id) {
+                Some(sm) => sm.clone(),
+                None => {
+                    return Err(Status::not_found(format!(
+                        "Source shard {} not found",
+                        source_shard_id
+                    )));
+                }
+            }
+        };
+
+        // Check if we're the leader
+        {
+            if let Some(raft_state) = source_state_machine.raft_state() {
+                let raft_state = raft_state.lock().await;
+                if raft_state.role != RaftRole::Leader {
+                    return Err(Status::failed_precondition(
+                        "This node is not the leader of the source shard",
+                    ));
+                }
+            } else {
+                return Err(Status::internal("Raft state not initialized"));
+            }
+        }
+
+        // Block writes to target slot range in memory
+        {
+            let mut blocked_ranges = self.node.blocked_slot_ranges.write().await;
+            blocked_ranges.insert(slot_start, (slot_end, split_task_id.clone()));
+        }
+
+        // Update split status
+        {
+            let mut statuses = self.node.split_statuses.write().await;
+            if let Some(status) = statuses.get_mut(&split_task_id) {
+                status.slot_start = slot_start;
+                status.slot_end = slot_end;
+                status.phase = proto::node::SplitPhase::Preparing;
+            }
+        }
+
+        // Submit noop command to Raft and wait for apply
+        let noop_cmd = StateMachineCommand::Noop(format!("prepare_split_{}", split_task_id));
+        match source_state_machine.propose_command(noop_cmd).await {
+            Ok(_) => {
+                // Get the apply index from the state machine
+                let noop_apply_index = source_state_machine.last_apply_index();
+
+                // Update split status
+                {
+                    let mut statuses = self.node.split_statuses.write().await;
+                    if let Some(status) = statuses.get_mut(&split_task_id) {
+                        status.noop_apply_index = Some(noop_apply_index);
+                        status.phase = proto::node::SplitPhase::RoutingUpdated;
+                    }
+                }
+
+                let response = PrepareSplitResponse {
+                    split_task_id: split_task_id.clone(),
+                    success: true,
+                    error_message: String::new(),
+                    noop_apply_index,
+                };
+                Ok(Response::new(response))
+            }
+            Err(e) => {
+                // Unblock writes on error
+                {
+                    let mut blocked_ranges = self.node.blocked_slot_ranges.write().await;
+                    blocked_ranges.remove(&slot_start);
+                }
+
+                let response = PrepareSplitResponse {
+                    split_task_id: split_task_id.clone(),
+                    success: false,
+                    error_message: e.to_string(),
+                    noop_apply_index: 0,
+                };
+                Ok(Response::new(response))
+            }
+        }
+    }
+
+    async fn get_split_status(
+        &self,
+        request: Request<GetSplitStatusRequest>,
+    ) -> Result<Response<GetSplitStatusResponse>, Status> {
+        let req = request.into_inner();
+        let split_task_id = req.split_task_id;
+
+        if split_task_id.is_empty() {
+            return Err(Status::invalid_argument("split_task_id is required"));
+        }
+
+        let status_info = {
+            let statuses = self.node.split_statuses.read().await;
+            statuses.get(&split_task_id).cloned()
+        };
+
+        match status_info {
+            Some(info) => {
+                // Get last applied index from source shard
+                let last_applied_index = {
+                    let state_machines = self.node.state_machines.lock();
+                    if let Some(sm) = state_machines.get(&info.source_shard_id) {
+                        sm.last_apply_index()
+                    } else {
+                        0
+                    }
+                };
+
+                let status = match info.phase {
+                    SplitPhase::CreatingRaftGroup => SplitStatus::CreatingRaftGroup,
+                    SplitPhase::WaitingLeader => SplitStatus::WaitingLeader,
+                    SplitPhase::Preparing => SplitStatus::Preparing,
+                    SplitPhase::RoutingUpdated => SplitStatus::Preparing, // Use Preparing as closest match
+                    SplitPhase::Completing => SplitStatus::Preparing, // Use Preparing as closest match
+                    _ => SplitStatus::Unspecified,
+                };
+
+                let response = GetSplitStatusResponse {
+                    split_task_id: info.split_task_id.clone(),
+                    status: status as i32,
+                    error_message: String::new(),
+                    phase: info.phase as i32,
+                    source_shard_id: info.source_shard_id,
+                    target_shard_id: info.target_shard_id,
+                    slot_start: info.slot_start,
+                    slot_end: info.slot_end,
+                    last_applied_index,
+                };
+                Ok(Response::new(response))
+            }
+            None => Err(Status::not_found(format!(
+                "Split task {} not found",
+                split_task_id
+            ))),
+        }
     }
 }
