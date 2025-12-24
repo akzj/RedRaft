@@ -1,9 +1,9 @@
+pub mod cow;
 pub mod memory;
 pub mod rocksdb;
 pub mod snapshot;
 pub mod store;
 pub mod traits;
-
 // Re-export rr-core types for convenience
 pub use rr_core::routing::{RaftGroup, RoutingTable};
 pub use rr_core::shard::{ShardId, ShardRouting, TOTAL_SLOTS};
