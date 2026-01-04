@@ -17,8 +17,8 @@ mod zset;
 
 // Re-export data structures
 pub use list::ListData;
-pub use set::{SetData, SetDataCow};
-pub use zset::{OrderedFloat, ZSetData, ZSetDataCow};
+pub use set::SetData;
+pub use zset::{OrderedFloat, ZSetData};
 
 pub use pubsub::PubSubStore;
-pub use store::{DataCow, MemStoreCow};
+pub use store::{Data, DataCow, MemStore, MemStoreCow};

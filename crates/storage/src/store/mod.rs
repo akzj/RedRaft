@@ -38,6 +38,27 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tracing::{error, info};
 
+/// Slot metadata (stored in memory)
+#[derive(Debug, Clone)]
+pub struct SlotMetadata {
+    /// Slot number
+    pub slot: u32,
+    /// Last applied log index for this slot
+    pub last_applied_index: u64,
+    /// Last segment index (used to determine if segment generation is needed)
+    pub last_segment_index: Option<u64>,
+}
+
+impl SlotMetadata {
+    pub fn new(slot: u32) -> Self {
+        Self {
+            slot,
+            last_applied_index: 0,
+            last_segment_index: None,
+        }
+    }
+}
+
 /// Sharded Store with RocksDB and Memory backends
 ///
 /// Lock Strategy:
@@ -47,6 +68,7 @@ use tracing::{error, info};
 pub struct SlotStore {
     rocksdb: SlotRocksDB,
     memory: MemStoreCow,
+    metadata: SlotMetadata,
 }
 
 /// Locked Sharded Store with RwLock protection
@@ -58,8 +80,12 @@ pub type LockedSlotStore = Arc<RwLock<SlotStore>>;
 
 impl SlotStore {
     /// Create a new SlotStore
-    pub fn new(rocksdb: SlotRocksDB, memory: MemStoreCow) -> Self {
-        Self { rocksdb, memory }
+    pub fn new(rocksdb: SlotRocksDB, memory: MemStoreCow, slot: u32) -> Self {
+        Self {
+            rocksdb,
+            memory,
+            metadata: SlotMetadata::new(slot),
+        }
     }
 
     /// Get reference to RocksDB (for read operations)
@@ -80,6 +106,16 @@ impl SlotStore {
     /// Get mutable reference to Memory store (for write operations)
     pub fn memory_mut(&mut self) -> &mut MemStoreCow {
         &mut self.memory
+    }
+
+    /// Get reference to metadata
+    pub fn metadata(&self) -> &SlotMetadata {
+        &self.metadata
+    }
+
+    /// Get mutable reference to metadata
+    pub fn metadata_mut(&mut self) -> &mut SlotMetadata {
+        &mut self.metadata
     }
 }
 
@@ -171,18 +207,35 @@ impl HybridStore {
 
     /// Get or create slot store for a key
     /// Returns the slot store for the slot that the key belongs to
+    /// Creates a new slot store if it doesn't exist
     pub(crate) fn get_slot_store(&self, key: &[u8]) -> Result<LockedSlotStore, StoreError> {
         let slot = self.slot_for_key(key);
-        let slots = self.slots.read();
-
-        let Some(slot_store) = slots.get(&slot) else {
-            return Err(StoreError::Internal(format!(
-                "Slot store not found for slot {} (key: {:?})",
-                slot,
-                String::from_utf8_lossy(key)
-            )));
-        };
-        Ok(Arc::clone(slot_store))
+        
+        // Try to get existing slot store
+        {
+            let slots = self.slots.read();
+            if let Some(slot_store) = slots.get(&slot) {
+                return Ok(Arc::clone(slot_store));
+            }
+        }
+        
+        // Create new slot store if it doesn't exist
+        let mut slots = self.slots.write();
+        // Double-check after acquiring write lock (another thread might have created it)
+        if let Some(slot_store) = slots.get(&slot) {
+            return Ok(Arc::clone(slot_store));
+        }
+        
+        // Create new slot store
+        // RocksDB is shared across all slots, so we clone it
+        use crate::memory::MemStore;
+        let memory = MemStore::new();
+        // Clone SlotRocksDB (which clones Arc<DB>, sharing the same DB instance)
+        let rocksdb = self.rocksdb.as_ref().clone();
+        let slot_store = SlotStore::new(rocksdb, memory, slot);
+        let locked_store = Arc::new(RwLock::new(slot_store));
+        slots.insert(slot, Arc::clone(&locked_store));
+        Ok(locked_store)
     }
 
     /// Check if command needs WAL logging
@@ -280,7 +333,8 @@ impl HybridStore {
         command: &Command,
     ) -> crate::traits::ApplyResult {
         // 1. Execute command using RedisStore trait's apply method
-        let result = crate::traits::RedisStore::apply(self, read_index, apply_index, command);
+        let _read_index = read_index; // Currently not used, but kept for future use
+        let result = crate::traits::RedisStore::apply(self, _read_index, apply_index, command);
 
         // 2. Write to WAL if needed (only for memory store write commands)
         if let Err(e) = self.write_wal_if_needed(apply_index, command) {
@@ -355,29 +409,26 @@ impl HybridStore {
         let mut segments_generated = 0;
         let mut min_apply_index = u64::MAX;
 
-        // Generate segment for each slot
-        for (slot, slot_store) in slots.iter() {
-            let slot_guard = slot_store.read();
-            let memory_store = slot_guard.memory();
-
-            // Get current apply_index from WAL
-            // TODO: Apply index should be managed at business layer, not storage layer
-            let apply_index = 0;
-
-            let slot_id = format!("slot_{}", slot);
-            match segment_generator.generate_segment(&slot_id, memory_store, apply_index) {
-                Ok(metadata) => {
-                    segments_generated += 1;
-                    min_apply_index = min_apply_index.min(metadata.apply_index);
-                    info!(
-                        "Generated segment for slot {} at apply_index {}",
-                        slot, metadata.apply_index
-                    );
+        // Generate segments for all slots (new implementation)
+        // Convert HashMap to format expected by new SegmentGenerator
+        let slots_map: HashMap<u32, LockedSlotStore> = slots.iter()
+            .map(|(k, v)| (*k, Arc::clone(v)))
+            .collect();
+        
+        match segment_generator.generate_segments(&slots_map) {
+            Ok(segments) => {
+                segments_generated = segments.len();
+                if let Some(min_idx) = segments.iter().map(|s| s.apply_index).min() {
+                    min_apply_index = min_idx;
                 }
-                Err(e) => {
-                    error!("Failed to generate segment for slot {}: {}", slot, e);
-                    // Continue with other slots
-                }
+                info!(
+                    "Generated {} segments for {} slots",
+                    segments_generated, slots_map.len()
+                );
+            }
+            Err(e) => {
+                error!("Failed to generate segments: {}", e);
+                return Err(e);
             }
         }
 

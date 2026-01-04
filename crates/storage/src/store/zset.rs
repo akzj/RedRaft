@@ -16,7 +16,7 @@ impl ZSetStore for HybridStore {
             Some(_) => return Err(StoreError::WrongType),
             None => {
                 // Create new ZSet
-                let new_zset = crate::memory::ZSetDataCow::new();
+                let new_zset = crate::memory::ZSetData::new();
                 store_guard.memory_mut().insert(key.to_vec(), DataCow::ZSet(new_zset));
                 // Get the newly inserted ZSet
                 match store_guard.memory_mut().get_mut(key) {
@@ -271,7 +271,7 @@ impl ZSetStore for HybridStore {
             Some(_) => return Err(StoreError::WrongType),
             None => {
                 // Create new ZSet
-                let new_zset = crate::memory::ZSetDataCow::new();
+                let new_zset = crate::memory::ZSetData::new();
                 store_guard.memory_mut().insert(key.to_vec(), DataCow::ZSet(new_zset));
                 // Get the newly inserted ZSet
                 match store_guard.memory_mut().get_mut(key) {

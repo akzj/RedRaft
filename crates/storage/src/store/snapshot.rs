@@ -9,32 +9,7 @@ use rr_core::routing::RoutingTable;
 use rr_core::shard::ShardId;
 use tracing::error;
 
-/// Wrapper that ensures merge_cow is called on drop for multiple slot stores
-///
-/// This wrapper stores references to slot_stores and will acquire write locks
-/// in its Drop implementation to call merge_cow() for each. This ensures COW changes
-/// are merged back to the base stores even if the function returns early or panics.
-struct MergeCowGuard {
-    slot_stores: Vec<LockedSlotStore>,
-}
-
-impl MergeCowGuard {
-    /// Create a new guard that will call merge_cow on drop for all provided slot stores
-    fn new(slot_stores: Vec<LockedSlotStore>) -> Self {
-        Self { slot_stores }
-    }
-}
-
-impl Drop for MergeCowGuard {
-    fn drop(&mut self) {
-        // Acquire write lock and call merge_cow for each slot store
-        // This will be called even if the function returns early or panics
-        for slot_store in &self.slot_stores {
-            let mut store_guard = slot_store.write();
-            store_guard.memory_mut().merge_cow();
-        }
-    }
-}
+// MergeCowGuard removed - no longer needed without COW
 
 #[async_trait]
 impl SnapshotStore for HybridStore {
@@ -137,25 +112,25 @@ impl SnapshotStore for HybridStore {
                 };
 
                 // Signal that snapshot object is created (RocksDB snapshot + Memory COW will be created next)
-                // This allows load_snapshot to wait synchronously for snapshot object creation
-                // Create Memory COW snapshots for all slot stores BEFORE signaling snapshot object is ready
-                // This ensures state consistency - snapshot object is fully created before signaling
-                //
-                // IMPORTANT: Hold write lock only for creating snapshot, then release immediately
-                // to avoid blocking other operations. merge_cow will be called automatically on drop
-                // of merge_cow_guard, even if there's an early return or panic.
-                let merge_cow_guard = MergeCowGuard::new(slot_stores_clone.clone());
+                // Create memory snapshots for all slot stores (simple clone, no COW)
+                // Hold write lock for the slot range to ensure consistency
+                let memory_snapshots: Vec<_> = {
+                    // Acquire write locks for all slots in range (for consistency)
+                    let mut guards = Vec::new();
+                    for slot_store in &slot_stores_clone {
+                        guards.push(slot_store.write());
+                    }
+                    
+                    // Clone memory stores while holding locks
+                    let snapshots: Vec<_> = guards.iter()
+                        .map(|guard| guard.memory().clone())
+                        .collect();
+                    
+                    // Locks released here
+                    snapshots
+                };
 
-                // Create memory snapshots for all slot stores
-                let memory_snapshots: Vec<_> = slot_stores_clone
-                    .iter()
-                    .map(|slot_store| {
-                        let mut store_guard = slot_store.write();
-                        store_guard.memory_mut().make_snapshot()
-                    })
-                    .collect(); // Write locks are released here
-
-                // Signal that snapshot object is fully created (RocksDB snapshot + Memory COW)
+                // Signal that snapshot object is fully created (RocksDB snapshot + Memory clone)
                 // This allows load_snapshot to wait synchronously for snapshot object creation
                 // Note: apply_index is no longer used, return 0 for compatibility
                 let _ = tx.send(Ok(0));
@@ -270,16 +245,15 @@ impl SnapshotStore for HybridStore {
 
                 // Iterate Memory store entries for all slot stores
                 // Note: memory_snapshots were already created above before signaling
-                // Each slot store has its own memory snapshot
+                // Each slot store has its own memory snapshot (cloned MemStore)
                 for memory_snapshot in &memory_snapshots {
-                    let memory_data = memory_snapshot.read();
-                    for (key, data_cow) in memory_data.iter() {
+                    for (key, data) in memory_snapshot.iter() {
                         // Filter by slot range if specified
                         if !key_in_range(key) {
                             continue;
                         }
-                        match data_cow {
-                            crate::memory::DataCow::List(list) => {
+                        match data {
+                            crate::memory::Data::List(list) => {
                                 // Send all list elements
                                 for element in list.iter() {
                                     if let Err(e) = channel.send(SnapshotStoreEntry::List(
@@ -295,7 +269,7 @@ impl SnapshotStore for HybridStore {
                                     }
                                 }
                             }
-                            crate::memory::DataCow::Set(set) => {
+                            crate::memory::Data::Set(set) => {
                                 // Send all set members
                                 for member in set.members() {
                                     if let Err(e) = channel.send(SnapshotStoreEntry::Set(
@@ -311,7 +285,7 @@ impl SnapshotStore for HybridStore {
                                     }
                                 }
                             }
-                            crate::memory::DataCow::ZSet(zset) => {
+                            crate::memory::Data::ZSet(zset) => {
                                 // Send all zset elements with scores
                                 // Use range_by_score to get all (member, score) pairs
                                 let members_with_scores =
@@ -331,7 +305,7 @@ impl SnapshotStore for HybridStore {
                                     }
                                 }
                             }
-                            crate::memory::DataCow::Bitmap(bitmap) => {
+                            crate::memory::Data::Bitmap(bitmap) => {
                                 // Send bitmap data (BitmapData is Vec<u8>)
                                 if let Err(e) = channel.send(SnapshotStoreEntry::Bitmap(
                                     bytes::Bytes::copy_from_slice(key),
@@ -347,12 +321,9 @@ impl SnapshotStore for HybridStore {
                             }
                         }
                     }
-                    drop(memory_data);
                 }
 
-                // merge_cow_guard will be dropped here automatically, which will call merge_cow()
-                // This ensures merge_cow is called even if there was an early return above
-                drop(merge_cow_guard);
+                // No merge_cow needed - snapshots are simple clones
 
                 // Send completion signal
                 let _ = channel.send(SnapshotStoreEntry::Completed);

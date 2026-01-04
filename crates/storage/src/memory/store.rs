@@ -4,404 +4,355 @@
 //!
 //! ShardData contains all data structures (List, Set, ZSet) in a unified HashMap
 
-use parking_lot::RwLock;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::HashMap;
+use bytes::Bytes;
 
 use crate::{
     memory::bitmap::BitmapData,
-    memory::{ListData, SetDataCow, ZSetDataCow},
+    memory::{ListData, SetData, ZSetData},
 };
 
-/// Unified data type enum with COW support
+/// Unified data type enum (no COW, simple clone)
 ///
 /// Wraps all Redis data types (List, Set, ZSet, Bitmap) in a single enum.
-/// Supports type detection and COW mechanism.
 #[derive(Debug, Clone)]
-pub enum DataCow {
-    /// List data (direct storage, cloned when modified)
+pub enum Data {
+    /// List data
     List(ListData),
-    /// Set data (with COW support)
-    Set(SetDataCow),
-    /// ZSet data (with COW support)
-    ZSet(ZSetDataCow),
-    /// Bitmap data (direct storage, cloned when modified)
+    /// Set data
+    Set(SetData),
+    /// ZSet data
+    ZSet(ZSetData),
+    /// Bitmap data
     Bitmap(BitmapData),
 }
 
-impl DataCow {
+// Keep DataCow as alias for backward compatibility during migration
+pub type DataCow = Data;
+
+impl Data {
     /// Get the type name of the data
     pub fn type_name(&self) -> &'static str {
         match self {
-            DataCow::List(_) => "list",
-            DataCow::Set(_) => "set",
-            DataCow::ZSet(_) => "zset",
-            DataCow::Bitmap(_) => "bitmap",
+            Data::List(_) => "list",
+            Data::Set(_) => "set",
+            Data::ZSet(_) => "zset",
+            Data::Bitmap(_) => "bitmap",
         }
     }
 
     /// Check if the data is empty
     pub fn is_empty(&self) -> bool {
         match self {
-            DataCow::List(l) => l.is_empty(),
-            DataCow::Set(s) => s.is_empty(),
-            DataCow::ZSet(z) => z.is_empty(),
-            DataCow::Bitmap(b) => b.is_empty(),
+            Data::List(l) => l.is_empty(),
+            Data::Set(s) => s.is_empty(),
+            Data::ZSet(z) => z.is_empty(),
+            Data::Bitmap(b) => b.is_empty(),
         }
     }
 
     /// Get length/size of the data
     pub fn len(&self) -> usize {
         match self {
-            DataCow::List(l) => l.len(),
-            DataCow::Set(s) => s.len(),
-            DataCow::ZSet(z) => z.len(),
-            DataCow::Bitmap(b) => b.len(),
+            Data::List(l) => l.len(),
+            Data::Set(s) => s.len(),
+            Data::ZSet(z) => z.len(),
+            Data::Bitmap(b) => b.len(),
         }
     }
 
-    /// Create a COW instance (for types that support COW)
-    pub fn make_cow(&mut self) -> DataCow {
-        match self {
-            DataCow::Set(s) => DataCow::Set(s.make_cow()),
-            DataCow::ZSet(z) => DataCow::ZSet(z.make_cow()),
-            // List and Bitmap don't have COW, just clone
-            DataCow::List(l) => DataCow::List(l.clone()),
-            DataCow::Bitmap(b) => DataCow::Bitmap(b.clone()),
-        }
-    }
-
-    /// Merge COW changes (for types that support COW)
-    pub fn merge_cow(&mut self) {
-        match self {
-            DataCow::Set(s) => {
-                if s.is_in_cow_mode() {
-                    s.merge_cow();
-                }
-            }
-            DataCow::ZSet(z) => {
-                if z.is_in_cow_mode() {
-                    z.merge_cow();
-                }
-            }
-            // List and Bitmap don't have COW, no-op
-            DataCow::List(_) | DataCow::Bitmap(_) => {}
-        }
-    }
-
-    /// Serialize base data for snapshot
-    ///
-    /// Extracts base data from COW structure and serializes it
-    pub fn serialize_base(&self) -> Result<Vec<u8>, String> {
+    /// Serialize data for snapshot
+    pub fn serialize(&self) -> Result<Vec<u8>, String> {
         use bincode::config::standard;
         use bincode::serde::encode_to_vec;
 
         match self {
-            DataCow::List(list) => encode_to_vec(list, standard())
+            Data::List(list) => encode_to_vec(list, standard())
                 .map_err(|e| format!("Failed to serialize ListData: {}", e)),
-            DataCow::Set(set_cow) => {
-                let base = set_cow.get_base_for_serialization();
-                encode_to_vec(&*base, standard())
-                    .map_err(|e| format!("Failed to serialize SetData: {}", e))
-            }
-            DataCow::ZSet(zset_cow) => {
-                let base = zset_cow.get_base_for_serialization();
-                encode_to_vec(&*base, standard())
-                    .map_err(|e| format!("Failed to serialize ZSetData: {}", e))
-            }
-            DataCow::Bitmap(bitmap) => encode_to_vec(bitmap, standard())
+            Data::Set(set) => encode_to_vec(set, standard())
+                .map_err(|e| format!("Failed to serialize SetData: {}", e)),
+            Data::ZSet(zset) => encode_to_vec(zset, standard())
+                .map_err(|e| format!("Failed to serialize ZSetData: {}", e)),
+            Data::Bitmap(bitmap) => encode_to_vec(bitmap, standard())
                 .map_err(|e| format!("Failed to serialize BitmapData: {}", e)),
         }
     }
 }
 
-/// Unified Store with Incremental Copy-on-Write (COW) support
+/// Unified Memory Store (simple HashMap, no COW)
 ///
-/// Combines all data types (List, Set, ZSet, Bitmap) in a single store with:
-/// - Type detection: O(1) lookup via unified HashMap
-/// - COW mechanism: Only changed items are recorded, NOT full data copy
-/// - `make_snapshot()`: Only clones Arc (increases ref count), NO data copy
-/// - Write operations: Records changes in COW cache (only changed items), NO full copy
-/// - Read operations: Merges COW cache + base data (O(1) lookup)
-/// - `merge_cow()`: Applies only changed items to base (O(M) where M = changes, not total data)
-///
-/// This avoids full HashMap copy even for 1000 billion keys when only 3 keys change.
+/// Combines all data types (List, Set, ZSet, Bitmap) in a single store.
+/// Simple clone-based approach for snapshots.
 #[derive(Debug, Clone)]
-pub struct MemStoreCow {
-    /// Base data (shared via Arc<RwLock<>>, can be directly modified without clone)
-    /// Unified storage for all data types: key -> DataCow
-    pub(crate) base: Arc<RwLock<HashMap<Vec<u8>, DataCow>>>,
-
-    /// COW cache: Updated/added items (only changed items)
-    /// DataCow is created via make_cow() here (required for consistency)
-    pub(crate) updated: Option<HashMap<Vec<u8>, DataCow>>,
-
-    /// COW cache: Removed keys
-    pub(crate) removed: Option<HashSet<Vec<u8>>>,
+pub struct MemStore {
+    /// Unified storage for all data types: key -> Data
+    pub(crate) data: HashMap<Vec<u8>, Data>,
 }
 
-impl MemStoreCow {
-    /// Create a new empty unified store with COW support
+// Keep MemStoreCow as alias for backward compatibility during migration
+pub type MemStoreCow = MemStore;
+
+impl MemStore {
+    /// Create a new empty unified store
     pub fn new() -> Self {
         Self {
-            base: Arc::new(RwLock::new(HashMap::new())),
-            updated: None,
-            removed: None,
-        }
-    }
-
-    /// Check if in COW mode (has snapshot)
-    pub fn is_cow_mode(&self) -> bool {
-        self.updated.is_some()
-    }
-
-    /// Create a snapshot (only increases reference count, NO data copy)
-    ///
-    /// Returns a cloned Arc that shares the same base data.
-    /// Write operations will use `make_cow()` to create COW instances instead of copying data.
-    pub fn make_snapshot(&mut self) -> Arc<RwLock<HashMap<Vec<u8>, DataCow>>> {
-        if self.is_cow_mode() {
-            // Already in COW mode, just return existing base
-            return Arc::clone(&self.base);
-        }
-
-        // Enter COW mode: initialize caches
-        self.updated = Some(HashMap::new());
-        self.removed = Some(HashSet::new());
-
-        // ✅ Only clone Arc (O(1)), NO data copy
-        Arc::clone(&self.base)
-    }
-
-    /// Merge COW changes back to base (applies only changed items)
-    ///
-    /// This is called when snapshot is no longer needed.
-    /// Only changed items are applied via RwLock, not full data copy.
-    pub fn merge_cow(&mut self) {
-        if !self.is_cow_mode() {
-            return;
-        }
-
-        let updated = self.updated.take();
-        let removed = self.removed.take();
-
-        // Collect updated keys before processing (for removal check)
-        let updated_keys: HashSet<Vec<u8>> = updated
-            .as_ref()
-            .map(|u| u.keys().cloned().collect())
-            .unwrap_or_default();
-
-        // ✅ Get write lock and directly modify base (NO clone!)
-        let mut base = self.base.write();
-
-        // Apply updates/additions first (updated takes precedence over removed)
-        if let Some(mut updated) = updated {
-            for (key, mut data_cow) in updated.drain() {
-                // Merge the DataCow's changes to its base first (for types that support COW)
-                data_cow.merge_cow();
-
-                // Replace or insert the merged DataCow
-                base.insert(key, data_cow);
-            }
-        }
-
-        // Apply removals (only if not in updated - updated takes precedence)
-        if let Some(ref removed) = removed {
-            for key in removed {
-                // Only remove if not being updated (updated already applied above)
-                if !updated_keys.contains(key) {
-                    base.remove(key);
-                }
-            }
+            data: HashMap::new(),
         }
     }
 
     /// Get key type (O(1) lookup)
     pub fn key_type(&self, key: &[u8]) -> Option<&'static str> {
-        if self.is_cow_mode() {
-            // Check COW cache first
-            if let Some(ref updated) = self.updated {
-                if let Some(data) = updated.get(key) {
-                    return Some(data.type_name());
-                }
-            }
-            // Check if removed
-            if let Some(ref removed) = self.removed {
-                if removed.contains(key) {
-                    return None;
-                }
-            }
-        }
-        // Check base
-        let base = self.base.read();
-        base.get(key).map(|data| data.type_name())
+        self.data.get(key).map(|data| data.type_name())
     }
 
     /// Check if key exists (O(1) lookup)
     pub fn contains_key(&self, key: &[u8]) -> bool {
-        if self.is_cow_mode() {
-            // Check COW cache first (updated takes precedence over removed)
-            if let Some(ref updated) = self.updated {
-                if updated.contains_key(key) {
-                    return true;
-                }
-            }
-
-            // Check if removed (only if not in updated)
-            if let Some(ref removed) = self.removed {
-                if removed.contains(key) {
-                    return false;
-                }
-            }
-        }
-        // Check base
-        let base = self.base.read();
-        base.contains_key(key)
+        self.data.contains_key(key)
     }
 
     /// Delete key from any data type
     pub fn del(&mut self, key: &[u8]) -> bool {
-        if self.is_cow_mode() {
-            let updated = self.updated.as_mut().unwrap();
-            let removed = self.removed.as_mut().unwrap();
-
-            // Remove from updated cache if present
-            if updated.remove(key).is_some() {
-                removed.insert(key.to_vec());
-                return true;
-            }
-
-            // Check if already in removed cache
-            if removed.contains(key) {
-                return false;
-            }
-
-            // Check base
-            let base = self.base.read();
-            if base.contains_key(key) {
-                removed.insert(key.to_vec());
-                return true;
-            }
-            false
-        } else {
-            // No COW mode: directly remove from base
-            let mut base = self.base.write();
-            base.remove(key).is_some()
-        }
+        self.data.remove(key).is_some()
     }
 
-    /// Get DataCow for key (returns reference - for read operations)
-    ///
-    /// Note: This method can only return references from COW cache, not from base
-    /// (due to lock lifetime constraints). For base lookups, use other methods.
-    pub fn get(&self, key: &[u8]) -> Option<&DataCow> {
-        if self.is_cow_mode() {
-            // Check COW cache first
-            if let Some(ref updated) = self.updated {
-                if let Some(data) = updated.get(key) {
-                    return Some(data);
-                }
-            }
-
-            // Check if removed
-            if let Some(ref removed) = self.removed {
-                if removed.contains(key) {
-                    return None;
-                }
-            }
-            // If not in updated and not removed, we can't return a reference from base
-            // (due to lock lifetime), so return None
-            return None;
-        }
-
-        // No COW mode: can't return reference from base (lock lifetime)
-        None
+    /// Get Data for key (returns cloned value)
+    pub fn get(&self, key: &[u8]) -> Option<Data> {
+        self.data.get(key).cloned()
     }
 
-    /// Get mutable DataCow for key (creates COW instance if needed)
-    ///
-    /// This method:
-    /// 1. Checks if data is already in COW cache
-    /// 2. If yes, returns mutable reference (no additional copy!)
-    /// 3. If no, uses `make_cow()` to create COW instance (no full copy!)
-    pub fn get_mut(&mut self, key: &[u8]) -> Option<&mut DataCow> {
-        if self.is_cow_mode() {
-            let updated = self.updated.as_mut().unwrap();
-            let removed = self.removed.as_mut().unwrap();
-
-            // Check if already in COW cache
-            if updated.contains_key(key) {
-                // Already has COW instance: return mutable reference (no additional copy!)
-                return updated.get_mut(key);
-            }
-
-            // Not in COW cache: create COW instance via make_cow() (no full copy!)
-            let data_cow = {
-                // Check if removed
-                if removed.contains(key) {
-                    // For removed key, we can't determine type, so return None
-                    // Caller should specify type when creating new
-                    return None;
-                } else {
-                    // Get from base and create COW instance
-                    let base = self.base.read();
-                    if let Some(base_data) = base.get(key) {
-                        // Clone the DataCow struct (only clones Arc for COW types, NO data copy!)
-                        // Then call make_cow() to create COW instance (NO full copy!)
-                        let mut base_data_clone = base_data.clone();
-                        base_data_clone.make_cow()
-                    } else {
-                        // Key doesn't exist, can't determine type
-                        return None;
-                    }
-                }
-            };
-            updated.insert(key.to_vec(), data_cow);
-
-            // Remove from removed cache if present
-            removed.remove(key);
-
-            // Return mutable reference to the newly inserted DataCow
-            updated.get_mut(key)
-        } else {
-            // No snapshot: cannot return mutable reference from lock
-            // Callers should create a snapshot first to enable COW mode
-            None
-        }
+    /// Get mutable Data for key
+    pub fn get_mut(&mut self, key: &[u8]) -> Option<&mut Data> {
+        self.data.get_mut(key)
     }
 
-    /// Insert or update DataCow for key
+    /// Insert or update Data for key
     ///
     /// If key exists with different type, it will be replaced.
-    pub fn insert(&mut self, key: Vec<u8>, data: DataCow) {
-        if self.is_cow_mode() {
-            let updated = self.updated.as_mut().unwrap();
-            let removed = self.removed.as_mut().unwrap();
-
-            // Remove from removed cache if present
-            removed.remove(&key);
-
-            // Insert into updated cache
-            updated.insert(key, data);
-        } else {
-            // No COW mode: directly insert into base
-            let mut base = self.base.write();
-            base.insert(key, data);
-        }
+    pub fn insert(&mut self, key: Vec<u8>, data: Data) {
+        self.data.insert(key, data);
     }
 
     /// Get total key count across all data types
     pub fn key_count(&self) -> usize {
-        if self.is_cow_mode() {
-            let base = self.base.read();
-            let base_count = base.len();
-            let updated_count = self.updated.as_ref().map(|u| u.len()).unwrap_or(0);
-            let removed_count = self.removed.as_ref().map(|r| r.len()).unwrap_or(0);
-            // Count = base + new in updated - removed
-            base_count + updated_count - removed_count
-        } else {
-            let base = self.base.read();
-            base.len()
+        self.data.len()
+    }
+
+    /// Check if store is empty
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Iterate over all key-value pairs
+    pub fn iter(&self) -> impl Iterator<Item = (&Vec<u8>, &Data)> {
+        self.data.iter()
+    }
+
+    // Set operations (simplified, no COW)
+    /// Add a member to a Set
+    pub fn add(&mut self, key: Vec<u8>, member: Bytes) -> crate::traits::StoreResult<bool> {
+        use crate::traits::{StoreError, StoreResult};
+        
+        // Get or create Set
+        let set = match self.data.get_mut(&key) {
+            Some(Data::Set(set)) => set,
+            Some(_) => return Err(StoreError::WrongType),
+            None => {
+                let new_set = SetData::new();
+                self.data.insert(key.clone(), Data::Set(new_set));
+                match self.data.get_mut(&key) {
+                    Some(Data::Set(set)) => set,
+                    _ => return Err(StoreError::Internal("Internal error".to_string())),
+                }
+            }
+        };
+        
+        Ok(set.add(member))
+    }
+
+    /// Remove a member from a Set
+    pub fn remove(&mut self, key: &[u8], member: &[u8]) -> crate::traits::StoreResult<bool> {
+        use crate::traits::{StoreError, StoreResult};
+        
+        match self.data.get_mut(key) {
+            Some(Data::Set(set)) => Ok(set.remove(member)),
+            Some(_) => Err(StoreError::WrongType),
+            None => Ok(false),
+        }
+    }
+
+    /// Check if member exists in a Set
+    pub fn contains(&self, key: &[u8], member: &[u8]) -> bool {
+        match self.data.get(key) {
+            Some(Data::Set(set)) => set.contains(member),
+            _ => false,
+        }
+    }
+
+    /// Get member count for a Set
+    pub fn len(&self, key: &[u8]) -> Option<usize> {
+        match self.data.get(key) {
+            Some(Data::Set(set)) => Some(set.len()),
+            _ => None,
+        }
+    }
+
+    /// Clear Set for key
+    pub fn clear(&mut self, key: &[u8]) -> bool {
+        match self.data.get(key) {
+            Some(Data::Set(_)) => {
+                self.data.remove(key).is_some()
+            }
+            _ => false,
+        }
+    }
+
+    // List operations (simplified, no COW)
+    /// Push elements to the left of a List
+    pub fn lpush(&mut self, key: &[u8], values: Vec<Bytes>) -> crate::traits::StoreResult<usize> {
+        use crate::traits::{StoreError, StoreResult};
+        use crate::memory::ListData;
+        
+        // Get or create List
+        let list = match self.data.get_mut(key) {
+            Some(Data::List(list)) => list,
+            Some(_) => return Err(StoreError::WrongType),
+            None => {
+                let new_list = ListData::new();
+                self.data.insert(key.to_vec(), Data::List(new_list));
+                match self.data.get_mut(key) {
+                    Some(Data::List(list)) => list,
+                    _ => return Err(StoreError::Internal("Internal error".to_string())),
+                }
+            }
+        };
+        
+        let len_before = list.len();
+        for value in values {
+            list.push_front(value);
+        }
+        Ok(list.len() - len_before)
+    }
+
+    /// Push elements to the right of a List
+    pub fn rpush(&mut self, key: &[u8], values: Vec<Bytes>) -> crate::traits::StoreResult<usize> {
+        use crate::traits::{StoreError, StoreResult};
+        use crate::memory::ListData;
+        
+        // Get or create List
+        let list = match self.data.get_mut(key) {
+            Some(Data::List(list)) => list,
+            Some(_) => return Err(StoreError::WrongType),
+            None => {
+                let new_list = ListData::new();
+                self.data.insert(key.to_vec(), Data::List(new_list));
+                match self.data.get_mut(key) {
+                    Some(Data::List(list)) => list,
+                    _ => return Err(StoreError::Internal("Internal error".to_string())),
+                }
+            }
+        };
+        
+        let len_before = list.len();
+        for value in values {
+            list.push_back(value);
+        }
+        Ok(list.len() - len_before)
+    }
+
+    /// Pop element from the left of a List
+    pub fn lpop(&mut self, key: &[u8]) -> crate::traits::StoreResult<Option<Bytes>> {
+        use crate::traits::{StoreError, StoreResult};
+        
+        match self.data.get_mut(key) {
+            Some(Data::List(list)) => Ok(list.pop_front()),
+            Some(_) => Err(StoreError::WrongType),
+            None => Ok(None),
+        }
+    }
+
+    /// Pop element from the right of a List
+    pub fn rpop(&mut self, key: &[u8]) -> crate::traits::StoreResult<Option<Bytes>> {
+        use crate::traits::{StoreError, StoreResult};
+        
+        match self.data.get_mut(key) {
+            Some(Data::List(list)) => Ok(list.pop_back()),
+            Some(_) => Err(StoreError::WrongType),
+            None => Ok(None),
+        }
+    }
+
+    /// Get a range of elements from a List
+    pub fn lrange(&self, key: &[u8], start: i64, stop: i64) -> crate::traits::StoreResult<Vec<Bytes>> {
+        use crate::traits::{StoreError, StoreResult};
+        
+        match self.data.get(key) {
+            Some(Data::List(list)) => {
+                let len = list.len() as i64;
+                let start_idx = if start < 0 { len + start } else { start }.max(0) as usize;
+                let stop_idx = if stop < 0 { len + stop + 1 } else { stop + 1 }.min(len) as usize;
+                
+                if start_idx >= stop_idx || start_idx >= list.len() {
+                    return Ok(Vec::new());
+                }
+                
+                Ok(list.iter().skip(start_idx).take(stop_idx - start_idx).cloned().collect())
+            }
+            Some(_) => Err(StoreError::WrongType),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Get the length of a List
+    pub fn llen(&self, key: &[u8]) -> crate::traits::StoreResult<usize> {
+        use crate::traits::{StoreError, StoreResult};
+        
+        match self.data.get(key) {
+            Some(Data::List(list)) => Ok(list.len()),
+            Some(_) => Err(StoreError::WrongType),
+            None => Ok(0),
+        }
+    }
+
+    /// Get element at index in a List
+    pub fn lindex(&self, key: &[u8], index: i64) -> crate::traits::StoreResult<Option<Bytes>> {
+        use crate::traits::{StoreError, StoreResult};
+        
+        match self.data.get(key) {
+            Some(Data::List(list)) => {
+                let len = list.len() as i64;
+                let idx = if index < 0 { len + index } else { index };
+                if idx < 0 || idx >= len {
+                    Ok(None)
+                } else {
+                    Ok(list.get(idx as usize).cloned())
+                }
+            }
+            Some(_) => Err(StoreError::WrongType),
+            None => Ok(None),
+        }
+    }
+
+    /// Set element at index in a List
+    pub fn lset(&mut self, key: &[u8], index: i64, value: Bytes) -> crate::traits::StoreResult<()> {
+        use crate::traits::{StoreError, StoreResult};
+        
+        match self.data.get_mut(key) {
+            Some(Data::List(list)) => {
+                let len = list.len() as i64;
+                let idx = if index < 0 { len + index } else { index };
+                if idx < 0 || idx >= len {
+                    Err(StoreError::Internal("Index out of range".to_string()))
+                } else {
+                    if let Some(elem) = list.get_mut(idx as usize) {
+                        *elem = value;
+                        Ok(())
+                    } else {
+                        Err(StoreError::Internal("Index out of range".to_string()))
+                    }
+                }
+            }
+            Some(_) => Err(StoreError::WrongType),
+            None => Err(StoreError::Internal("Key not found".to_string())),
         }
     }
 }

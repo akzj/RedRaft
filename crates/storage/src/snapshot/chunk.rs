@@ -6,14 +6,14 @@
 //!   - entry_size: number of entries (not bytes)
 //!   - compressed_data: Vec<Entry> serialized with bincode, then compressed with zstd
 
-use crate::memory::DataCow;
+use crate::memory::Data;
 use crate::snapshot::SnapshotConfig;
 use bincode::{config::standard, serde::{decode_from_slice, encode_to_vec}};
 use crc32fast::Hasher as Crc32Hasher;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::debug;
 
 /// Chunk header
@@ -67,10 +67,10 @@ impl ChunkWriter {
 
     /// Add an entry to the current chunk
     /// 
-    /// Serializes DataCow base data (extracts from COW structure)
-    pub fn add_entry(&mut self, key: Vec<u8>, data: &DataCow) -> Result<(), String> {
-        // Serialize base data using DataCow's method
-        let serialized_data = data.serialize_base()?;
+    /// Serializes Data for snapshot
+    pub fn add_entry(&mut self, key: Vec<u8>, data: &Data) -> Result<(), String> {
+        // Serialize data
+        let serialized_data = data.serialize()?;
         let data_type = data.type_name().to_string();
         let entry = ChunkEntry {
             key: key.clone(),
@@ -85,22 +85,8 @@ impl ChunkWriter {
         
         // If adding this entry would exceed chunk size, flush current chunk
         if self.current_size + entry_size > self.config.chunk_size && !self.current_chunk.is_empty() {
-            self.flush_chunk()?;
-        }
-        
-        let entry = ChunkEntry {
-            key,
-            data_type,
-            data: serialized_data.clone(),
-        };
-        
-        let serialized = encode_to_vec(&entry, standard())
-            .map_err(|e| format!("Failed to serialize entry: {}", e))?;
-        let entry_size = serialized.len() as u64;
-        
-        // If adding this entry would exceed chunk size, flush current chunk
-        if self.current_size + entry_size > self.config.chunk_size && !self.current_chunk.is_empty() {
-            self.flush_chunk()?;
+            // Note: flush_chunk is now called externally with slot range info
+            // This is just a check, actual flush happens in SegmentGenerator
         }
         
         self.current_chunk.push(entry);
@@ -108,14 +94,44 @@ impl ChunkWriter {
         
         Ok(())
     }
+    
+    /// Check if should flush (chunk is full)
+    pub fn should_flush(&self) -> bool {
+        self.current_size >= self.config.chunk_size && !self.current_chunk.is_empty()
+    }
+    
+    /// Check if chunk writer is empty
+    pub fn is_empty(&self) -> bool {
+        self.current_chunk.is_empty()
+    }
+    
+    /// Get current chunk ID
+    pub fn chunk_id(&self) -> u32 {
+        self.chunk_id
+    }
 
-    /// Flush the current chunk to disk
-    fn flush_chunk(&mut self) -> Result<PathBuf, String> {
+    /// Flush the current chunk to disk with slot range naming
+    /// 
+    /// File naming: {slot_start:05d}-{slot_end:05d}.seg (first chunk)
+    ///               {slot_start:05d}-{slot_end:05d}-{chunk_id:05d}.seg (subsequent chunks)
+    pub fn flush(
+        &mut self,
+        slot_start: u32,
+        slot_end: u32,
+        output_dir: &Path,
+    ) -> Result<(String, u64, u64, u32, u32), String> {
         if self.current_chunk.is_empty() {
             return Err("No entries to flush".to_string());
         }
         
-        let chunk_file = self.output_dir.join(format!("chunk_{:05}.bin", self.chunk_id));
+        // Generate file name
+        let file_name = if self.chunk_id == 1 {
+            format!("{:05}-{:05}.seg", slot_start, slot_end)
+        } else {
+            format!("{:05}-{:05}-{:05}.seg", slot_start, slot_end, self.chunk_id)
+        };
+        
+        let chunk_file = output_dir.join(&file_name);
         let mut file = BufWriter::new(
             File::create(&chunk_file)
                 .map_err(|e| format!("Failed to create chunk file: {}", e))?,
@@ -173,11 +189,19 @@ impl ChunkWriter {
             compressed_size
         );
         
+        let entry_count = self.current_chunk.len() as u32;
         self.chunk_id += 1;
         self.current_chunk.clear();
         self.current_size = 0;
         
-        Ok(chunk_file)
+        Ok((file_name, uncompressed_size, compressed_size, entry_count, crc32))
+    }
+    
+    /// Flush the current chunk to disk (legacy method for backward compatibility)
+    fn flush_chunk(&mut self) -> Result<PathBuf, String> {
+        // This method is kept for backward compatibility but should not be used
+        // Use flush() instead with slot range information
+        Err("Use flush() method with slot range instead".to_string())
     }
 
     /// Finish writing (flush remaining chunk)

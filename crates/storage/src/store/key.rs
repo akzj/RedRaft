@@ -92,10 +92,7 @@ impl KeyStore for HybridStore {
             // Clear all memory data - need to clear all keys
             let memory = store_guard.memory_mut();
             // Get all keys and delete them
-            let keys: Vec<Vec<u8>> = {
-                let base = memory.base.read();
-                base.keys().cloned().collect()
-            };
+            let keys: Vec<Vec<u8>> = memory.iter().map(|(k, _)| k.clone()).collect();
             for key in keys {
                 memory.del(&key);
             }
