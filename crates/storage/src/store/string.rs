@@ -21,7 +21,7 @@ impl StringStore for HybridStore {
             .rocksdb_mut()
             .set(key, value.to_vec())
             .map_err(|e| StoreError::Internal(e.to_string()))?;
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
         Ok(())
     }
 
@@ -36,7 +36,7 @@ impl StringStore for HybridStore {
             .rocksdb_mut()
             .set(key, value.to_vec())
             .map_err(|e| StoreError::Internal(e.to_string()))?;
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
         Ok(true)
     }
 
@@ -48,7 +48,7 @@ impl StringStore for HybridStore {
             .rocksdb_mut()
             .set(key, value.to_vec())
             .map_err(|e| StoreError::Internal(e.to_string()))?;
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
         Ok(())
     }
 
@@ -59,7 +59,7 @@ impl StringStore for HybridStore {
             .rocksdb_mut()
             .incrby(key, delta)
             .map_err(|e| StoreError::Internal(e.to_string()))?;
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
         Ok(result)
     }
 
@@ -67,7 +67,7 @@ impl StringStore for HybridStore {
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
         let result = store_guard.rocksdb_mut().append(key, value);
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
         Ok(result)
     }
 

@@ -23,7 +23,7 @@ impl KeyStore for HybridStore {
                 count += 1;
             }
 
-            HybridStore::update_slot_metadata(&mut store_guard, ctx);
+            store_guard.metadata_mut().update_from_context(ctx);
         }
         Ok(count)
     }

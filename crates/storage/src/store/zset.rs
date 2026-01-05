@@ -42,7 +42,7 @@ impl ZSetStore for HybridStore {
             }
         }
 
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
 
         Ok(count)
     }
@@ -64,7 +64,7 @@ impl ZSetStore for HybridStore {
             }
         }
 
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
 
         Ok(count)
     }
@@ -306,7 +306,7 @@ impl ZSetStore for HybridStore {
         let new_score = old_score + delta;
         zset.add(Bytes::copy_from_slice(member), new_score);
 
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
 
         Ok(new_score)
     }

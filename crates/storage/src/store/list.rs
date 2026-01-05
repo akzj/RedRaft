@@ -9,7 +9,7 @@ impl ListStore for HybridStore {
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
         let result = store_guard.memory_mut().lpush(key, values)?;
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
         Ok(result)
     }
 
@@ -17,7 +17,7 @@ impl ListStore for HybridStore {
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
         let result = store_guard.memory_mut().rpush(key, values)?;
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
         Ok(result)
     }
 
@@ -55,7 +55,7 @@ impl ListStore for HybridStore {
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
         store_guard.memory_mut().lset(key, index, value)?;
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
         Ok(())
     }
 

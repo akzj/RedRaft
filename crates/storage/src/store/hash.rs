@@ -20,7 +20,7 @@ impl HashStore for HybridStore {
         let result = store_guard
             .rocksdb_mut()
             .hset(key, field.as_ref(), value);
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
         Ok(result)
     }
 
@@ -42,7 +42,7 @@ impl HashStore for HybridStore {
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
         store_guard.rocksdb_mut().hmset(key, fvs);
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
         Ok(())
     }
 
@@ -77,7 +77,7 @@ impl HashStore for HybridStore {
             return Ok(false);
         }
         let result = store_guard.rocksdb_mut().hset(key, field, value);
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
         Ok(result)
     }
 
@@ -85,7 +85,7 @@ impl HashStore for HybridStore {
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
         let result = store_guard.rocksdb_mut().hdel(key, fields);
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
         Ok(result)
     }
 
@@ -101,7 +101,7 @@ impl HashStore for HybridStore {
         let result = store_guard
             .rocksdb_mut()
             .hincrby(key, field, delta)?;
-        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        store_guard.metadata_mut().update_from_context(ctx);
         Ok(result)
     }
 }

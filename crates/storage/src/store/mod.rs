@@ -57,6 +57,19 @@ impl SlotMetadata {
             log_seq: 0,
         }
     }
+
+    /// Update metadata from ApplyContext
+    /// 
+    /// Updates the slot's metadata (log_seq and applied_index) from the ApplyContext.
+    /// Called after write operations to keep metadata synchronized with the Raft log.
+    pub fn update_from_context(&mut self, ctx: &crate::traits::ApplyContext) {
+        if let Some(log_seq) = ctx.log_seq {
+            self.log_seq = log_seq;
+        }
+        if let Some(apply_index) = ctx.apply_index {
+            self.applied_index = apply_index;
+        }
+    }
 }
 
 /// Sharded Store with RocksDB and Memory backends
@@ -201,22 +214,6 @@ impl HybridStore {
         RoutingTable::slot_for_key(key)
     }
 
-    /// Update slot metadata from ApplyContext
-    /// 
-    /// This helper function updates the slot's metadata (log_seq and applied_index)
-    /// from the ApplyContext. It's called after write operations to keep metadata
-    /// synchronized with the Raft log.
-    pub(crate) fn update_slot_metadata(
-        store_guard: &mut parking_lot::RwLockWriteGuard<'_, SlotStore>,
-        ctx: &crate::traits::ApplyContext,
-    ) {
-        if let Some(log_seq) = ctx.log_seq {
-            store_guard.metadata_mut().log_seq = log_seq;
-        }
-        if let Some(apply_index) = ctx.apply_index {
-            store_guard.metadata_mut().applied_index = apply_index;
-        }
-    }
 
     /// Get shard ID for a key using routing table
     /// Note: This is kept for backward compatibility (e.g., snapshot interface)
