@@ -44,17 +44,17 @@ pub struct SlotMetadata {
     /// Slot number
     pub slot: u32,
     /// Last applied log index for this slot
-    pub last_applied_index: u64,
-    /// Last segment index (used to determine if segment generation is needed)
-    pub last_segment_index: Option<u64>,
+    pub applied_index: u64,
+    /// Last log sequence number
+    pub log_seq: u64,
 }
 
 impl SlotMetadata {
     pub fn new(slot: u32) -> Self {
         Self {
             slot,
-            last_applied_index: 0,
-            last_segment_index: None,
+            applied_index: 0,
+            log_seq: 0,
         }
     }
 }
@@ -144,6 +144,10 @@ pub struct HybridStore {
 
     last_applied_index: Arc<AtomicU64>,
 
+    /// Global log sequence number (incremented for each WAL entry written)
+    /// Used for log compression and segment generation
+    log_seq: Arc<AtomicU64>,
+
     /// Snapshot configuration
     snapshot_config: SnapshotConfig,
 
@@ -184,6 +188,7 @@ impl HybridStore {
             rocksdb_path,
             snapshot_config,
             last_applied_index: Arc::new(AtomicU64::new(0)),
+            log_seq: Arc::new(AtomicU64::new(0)),
             slots: Arc::new(RwLock::new(HashMap::new())),
             wal_writer: Arc::new(RwLock::new(wal_writer)),
             segment_generator: Arc::new(RwLock::new(segment_generator)),
@@ -194,6 +199,23 @@ impl HybridStore {
     /// Get slot number for a key
     pub(crate) fn slot_for_key(&self, key: &[u8]) -> u32 {
         RoutingTable::slot_for_key(key)
+    }
+
+    /// Update slot metadata from ApplyContext
+    /// 
+    /// This helper function updates the slot's metadata (log_seq and applied_index)
+    /// from the ApplyContext. It's called after write operations to keep metadata
+    /// synchronized with the Raft log.
+    pub(crate) fn update_slot_metadata(
+        store_guard: &mut parking_lot::RwLockWriteGuard<'_, SlotStore>,
+        ctx: &crate::traits::ApplyContext,
+    ) {
+        if let Some(log_seq) = ctx.log_seq {
+            store_guard.metadata_mut().log_seq = log_seq;
+        }
+        if let Some(apply_index) = ctx.apply_index {
+            store_guard.metadata_mut().applied_index = apply_index;
+        }
     }
 
     /// Get shard ID for a key using routing table
@@ -210,7 +232,7 @@ impl HybridStore {
     /// Creates a new slot store if it doesn't exist
     pub(crate) fn get_slot_store(&self, key: &[u8]) -> Result<LockedSlotStore, StoreError> {
         let slot = self.slot_for_key(key);
-        
+
         // Try to get existing slot store
         {
             let slots = self.slots.read();
@@ -218,14 +240,14 @@ impl HybridStore {
                 return Ok(Arc::clone(slot_store));
             }
         }
-        
+
         // Create new slot store if it doesn't exist
         let mut slots = self.slots.write();
         // Double-check after acquiring write lock (another thread might have created it)
         if let Some(slot_store) = slots.get(&slot) {
             return Ok(Arc::clone(slot_store));
         }
-        
+
         // Create new slot store
         // RocksDB is shared across all slots, so we clone it
         use crate::memory::MemStore;
@@ -297,8 +319,14 @@ impl HybridStore {
     ///
     /// # Arguments
     /// - `apply_index`: Raft apply index for WAL logging
+    /// - `log_seq`: Log sequence number for this slot
     /// - `command`: Command to write
-    pub fn write_wal_if_needed(&self, apply_index: u64, command: &Command) -> Result<()> {
+    pub fn write_wal_if_needed(
+        &self,
+        apply_index: u64,
+        log_seq: u64,
+        command: &Command,
+    ) -> Result<()> {
         if !Self::needs_wal_logging(command) {
             return Ok(());
         }
@@ -307,7 +335,7 @@ impl HybridStore {
             if let Err(e) = self
                 .wal_writer
                 .write()
-                .write_entry(apply_index, command, key)
+                .write_entry(apply_index, log_seq, command, key)
             {
                 error!("Failed to write WAL entry at index {}: {}", apply_index, e);
                 // Don't fail the command execution if WAL write fails
@@ -332,20 +360,54 @@ impl HybridStore {
         apply_index: u64,
         command: &Command,
     ) -> crate::traits::ApplyResult {
-        // 1. Execute command using RedisStore trait's apply method
-        let _read_index = read_index; // Currently not used, but kept for future use
-        let result = crate::traits::RedisStore::apply(self, _read_index, apply_index, command);
+        // 1. Generate log_seq before applying (for write commands that need WAL)
+        let log_seq = if Self::needs_wal_logging(command) {
+            // Increment global log sequence number atomically before applying
+            self.log_seq
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1
+        } else {
+            0
+        };
 
-        // 2. Write to WAL if needed (only for memory store write commands)
-        if let Err(e) = self.write_wal_if_needed(apply_index, command) {
-            error!("Failed to write WAL entry at index {}: {}", apply_index, e);
-            return crate::traits::ApplyResult::Error(StoreError::Internal(e.to_string()));
+        // 2. Create context with all metadata
+        let mut ctx = crate::traits::ApplyContext {
+            read_index: Some(read_index),
+            apply_index: Some(apply_index),
+            log_seq: Some(log_seq),
+            ..Default::default()
+        };
+
+        // 3. Set slot if command has a key
+        if let Some(key) = command.get_key() {
+            ctx.slot = Some(self.slot_for_key(key));
         }
 
-        // 3. Update last_applied_index for write commands
+        // 4. Execute command using RedisStore trait's apply_with_context method
+        let result = crate::traits::RedisStore::apply_with_context(self, &ctx, command);
+
+        // 5. Write to WAL if needed (only for memory store write commands)
+        // Note: log_seq was generated above, use it here
+        if Self::needs_wal_logging(command) {
+            if let Err(e) = self.write_wal_if_needed(apply_index, log_seq, command) {
+                error!("Failed to write WAL entry at index {}: {}", apply_index, e);
+                return crate::traits::ApplyResult::Error(StoreError::Internal(e.to_string()));
+            }
+        }
+
+        // 6. Update last_applied_index for write commands (also update slot metadata when executing changes)
         if command.is_write() {
             self.last_applied_index
                 .store(apply_index, std::sync::atomic::Ordering::SeqCst);
+
+            // Update slot's last_applied_index when executing changes
+            if let Some(slot) = ctx.slot {
+                let slots = self.slots.read();
+                if let Some(slot_store) = slots.get(&slot) {
+                    let mut store = slot_store.write();
+                    store.metadata_mut().applied_index = apply_index;
+                }
+            }
         }
 
         result
@@ -411,10 +473,9 @@ impl HybridStore {
 
         // Generate segments for all slots (new implementation)
         // Convert HashMap to format expected by new SegmentGenerator
-        let slots_map: HashMap<u32, LockedSlotStore> = slots.iter()
-            .map(|(k, v)| (*k, Arc::clone(v)))
-            .collect();
-        
+        let slots_map: HashMap<u32, LockedSlotStore> =
+            slots.iter().map(|(k, v)| (*k, Arc::clone(v))).collect();
+
         match segment_generator.generate_segments(&slots_map) {
             Ok(segments) => {
                 segments_generated = segments.len();
@@ -423,7 +484,8 @@ impl HybridStore {
                 }
                 info!(
                     "Generated {} segments for {} slots",
-                    segments_generated, slots_map.len()
+                    segments_generated,
+                    slots_map.len()
                 );
             }
             Err(e) => {

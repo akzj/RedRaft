@@ -1,20 +1,24 @@
 //! List Store implementation for HybridStore
 
 use crate::store::HybridStore;
-use crate::traits::{ListStore, StoreResult};
+use crate::traits::{ApplyContext, ListStore, StoreResult};
 use bytes::Bytes;
 
 impl ListStore for HybridStore {
-    fn lpush(&self, key: &[u8], values: Vec<Bytes>) -> StoreResult<usize> {
+    fn lpush(&self, key: &[u8], values: Vec<Bytes>, ctx: &ApplyContext) -> StoreResult<usize> {
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
-        store_guard.memory_mut().lpush(key, values)
+        let result = store_guard.memory_mut().lpush(key, values)?;
+        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        Ok(result)
     }
 
-    fn rpush(&self, key: &[u8], values: Vec<Bytes>) -> StoreResult<usize> {
+    fn rpush(&self, key: &[u8], values: Vec<Bytes>, ctx: &ApplyContext) -> StoreResult<usize> {
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
-        store_guard.memory_mut().rpush(key, values)
+        let result = store_guard.memory_mut().rpush(key, values)?;
+        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        Ok(result)
     }
 
     fn lpop(&self, key: &[u8]) -> StoreResult<Option<Bytes>> {
@@ -47,10 +51,12 @@ impl ListStore for HybridStore {
         store_guard.memory().lindex(key, index)
     }
 
-    fn lset(&self, key: &[u8], index: i64, value: Bytes) -> StoreResult<()> {
+    fn lset(&self, key: &[u8], index: i64, value: Bytes, ctx: &ApplyContext) -> StoreResult<()> {
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
-        store_guard.memory_mut().lset(key, index, value)
+        store_guard.memory_mut().lset(key, index, value)?;
+        HybridStore::update_slot_metadata(&mut store_guard, ctx);
+        Ok(())
     }
 
     fn ltrim(&self, key: &[u8], start: i64, stop: i64) -> StoreResult<()> {

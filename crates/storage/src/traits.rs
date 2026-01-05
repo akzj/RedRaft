@@ -88,6 +88,88 @@ impl std::error::Error for StoreError {}
 pub type StoreResult<T> = Result<T, StoreError>;
 
 // ============================================================================
+// Apply Context (for extensible metadata passing)
+// ============================================================================
+
+/// Context information for command execution
+///
+/// This structure allows passing metadata (like log_seq, apply_index, etc.)
+/// to storage operations without modifying every method signature.
+///
+/// # Design Rationale
+///
+/// Instead of adding individual parameters (log_seq, apply_index, read_index, etc.)
+/// to every trait method, we use a context structure that can be extended
+/// without breaking API compatibility.
+///
+/// # Usage
+///
+/// ```rust,ignore
+/// // Create context with required fields
+/// let ctx = ApplyContext {
+///     log_seq: Some(123),
+///     apply_index: Some(456),
+///     ..Default::default()
+/// };
+///
+/// // Pass to methods (only where needed)
+/// store.set_with_context(key, value, &ctx)?;
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct ApplyContext {
+    /// Global log sequence number (for WAL logging and log compression)
+    pub log_seq: Option<u64>,
+    
+    /// Raft apply index (for WAL logging)
+    pub apply_index: Option<u64>,
+    
+    /// Raft read index (for linearizability verification)
+    pub read_index: Option<u64>,
+    
+    /// Slot number (for slot-specific operations)
+    pub slot: Option<u32>,
+    
+    /// Raft term (for consistency checks)
+    pub term: Option<u64>,
+    
+    // Future extensions can be added here without breaking existing code
+    // For example:
+    // pub shard_id: Option<ShardId>,
+    // pub client_id: Option<String>,
+    // pub trace_id: Option<String>,
+}
+
+impl ApplyContext {
+    /// Create a new context with log_seq
+    pub fn with_log_seq(log_seq: u64) -> Self {
+        Self {
+            log_seq: Some(log_seq),
+            ..Default::default()
+        }
+    }
+    
+    /// Create a new context with apply_index and log_seq
+    pub fn with_apply(apply_index: u64, log_seq: u64) -> Self {
+        Self {
+            apply_index: Some(apply_index),
+            log_seq: Some(log_seq),
+            ..Default::default()
+        }
+    }
+    
+    /// Create a full context with all fields
+    pub fn full(read_index: u64, apply_index: u64, log_seq: u64, slot: u32, term: u64) -> Self {
+        Self {
+            read_index: Some(read_index),
+            apply_index: Some(apply_index),
+            log_seq: Some(log_seq),
+            slot: Some(slot),
+            term: Some(term),
+        }
+    }
+}
+
+// ============================================================================
 // String Store Trait
 // ============================================================================
 
@@ -101,13 +183,13 @@ pub trait StringStore: Send + Sync {
     fn get(&self, key: &[u8]) -> StoreResult<Option<Bytes>>;
 
     /// SET: Set string value
-    fn set(&self, key: &[u8], value: Bytes) -> StoreResult<()>;
+    fn set(&self, key: &[u8], value: Bytes, ctx: &ApplyContext) -> StoreResult<()>;
 
     /// SETNX: Set only if key does not exist
-    fn setnx(&self, key: &[u8], value: Bytes) -> StoreResult<bool>;
+    fn setnx(&self, key: &[u8], value: Bytes, ctx: &ApplyContext) -> StoreResult<bool>;
 
     /// SETEX: Set value with expiration time (seconds)
-    fn setex(&self, key: &[u8], value: Bytes, ttl_secs: u64) -> StoreResult<()>;
+    fn setex(&self, key: &[u8], value: Bytes, ttl_secs: u64, ctx: &ApplyContext) -> StoreResult<()>;
 
     /// MGET: Batch get
     fn mget(&self, keys: &[&[u8]]) -> StoreResult<Vec<Option<Bytes>>> {
@@ -122,41 +204,41 @@ pub trait StringStore: Send + Sync {
     }
 
     /// MSET: Batch set
-    fn mset(&self, kvs: Vec<(&[u8], Bytes)>) -> StoreResult<()> {
+    fn mset(&self, kvs: Vec<(&[u8], Bytes)>, ctx: &ApplyContext) -> StoreResult<()> {
         for (k, v) in kvs {
-            self.set(k, v)?;
+            self.set(k, v, ctx)?;
         }
         Ok(())
     }
 
     /// INCR: Increment integer by 1
-    fn incr(&self, key: &[u8]) -> StoreResult<i64> {
-        self.incrby(key, 1)
+    fn incr(&self, key: &[u8], ctx: &ApplyContext) -> StoreResult<i64> {
+        self.incrby(key, 1, ctx)
     }
 
     /// INCRBY: Increment integer by specified value
-    fn incrby(&self, key: &[u8], delta: i64) -> StoreResult<i64>;
+    fn incrby(&self, key: &[u8], delta: i64, ctx: &ApplyContext) -> StoreResult<i64>;
 
     /// DECR: Decrement integer by 1
-    fn decr(&self, key: &[u8]) -> StoreResult<i64> {
-        self.incrby(key, -1)
+    fn decr(&self, key: &[u8], ctx: &ApplyContext) -> StoreResult<i64> {
+        self.incrby(key, -1, ctx)
     }
 
     /// DECRBY: Decrement integer by specified value
-    fn decrby(&self, key: &[u8], delta: i64) -> StoreResult<i64> {
-        self.incrby(key, -delta)
+    fn decrby(&self, key: &[u8], delta: i64, ctx: &ApplyContext) -> StoreResult<i64> {
+        self.incrby(key, -delta, ctx)
     }
 
     /// APPEND: Append string
-    fn append(&self, key: &[u8], value: &[u8]) -> StoreResult<usize>;
+    fn append(&self, key: &[u8], value: &[u8], ctx: &ApplyContext) -> StoreResult<usize>;
 
     /// STRLEN: Get string length
     fn strlen(&self, key: &[u8]) -> StoreResult<usize>;
 
     /// GETSET: Set new value and return old value
-    fn getset(&self, key: &[u8], value: Bytes) -> StoreResult<Option<Bytes>> {
+    fn getset(&self, key: &[u8], value: Bytes, ctx: &ApplyContext) -> StoreResult<Option<Bytes>> {
         let old = self.get(&key)?;
-        self.set(key, value)?;
+        self.set(key, value, ctx)?;
         Ok(old)
     }
 }
@@ -172,10 +254,10 @@ pub trait StringStore: Send + Sync {
 /// Recommended backend: Memory (high performance)
 pub trait ListStore: Send + Sync {
     /// LPUSH: Insert elements from left
-    fn lpush(&self, key: &[u8], values: Vec<Bytes>) -> StoreResult<usize>;
+    fn lpush(&self, key: &[u8], values: Vec<Bytes>, ctx: &ApplyContext) -> StoreResult<usize>;
 
     /// RPUSH: Insert elements from right
-    fn rpush(&self, key: &[u8], values: Vec<Bytes>) -> StoreResult<usize>;
+    fn rpush(&self, key: &[u8], values: Vec<Bytes>, ctx: &ApplyContext) -> StoreResult<usize>;
 
     /// LPOP: Pop element from left
     fn lpop(&self, key: &[u8]) -> StoreResult<Option<Bytes>>;
@@ -193,7 +275,7 @@ pub trait ListStore: Send + Sync {
     fn lindex(&self, key: &[u8], index: i64) -> StoreResult<Option<Bytes>>;
 
     /// LSET: Set element at specified index
-    fn lset(&self, key: &[u8], index: i64, value: Bytes) -> StoreResult<()>;
+    fn lset(&self, key: &[u8], index: i64, value: Bytes, ctx: &ApplyContext) -> StoreResult<()>;
 
     /// LTRIM: Trim list to specified range
     fn ltrim(&self, key: &[u8], start: i64, stop: i64) -> StoreResult<()> {
@@ -244,7 +326,7 @@ pub trait HashStore: Send + Sync {
     fn hget(&self, key: &[u8], field: &[u8]) -> StoreResult<Option<Bytes>>;
 
     /// HSET: Set hash field value, returns true if field is new
-    fn hset(&self, key: &[u8], field: &[u8], value: Bytes) -> StoreResult<bool>;
+    fn hset(&self, key: &[u8], field: &[u8], value: Bytes, ctx: &ApplyContext) -> StoreResult<bool>;
 
     /// HMGET: Batch get hash fields
     fn hmget(&self, key: &[u8], fields: &[&[u8]]) -> StoreResult<Vec<Option<Bytes>>> {
@@ -259,15 +341,15 @@ pub trait HashStore: Send + Sync {
     }
 
     /// HMSET: Batch set hash fields
-    fn hmset(&self, key: &[u8], fvs: Vec<(&[u8], Bytes)>) -> StoreResult<()> {
+    fn hmset(&self, key: &[u8], fvs: Vec<(&[u8], Bytes)>, ctx: &ApplyContext) -> StoreResult<()> {
         for (f, v) in fvs {
-            self.hset(key, f, v)?;
+            self.hset(key, f, v, ctx)?;
         }
         Ok(())
     }
 
     /// HDEL: Delete hash fields
-    fn hdel(&self, key: &[u8], fields: &[&[u8]]) -> StoreResult<usize>;
+    fn hdel(&self, key: &[u8], fields: &[&[u8]], ctx: &ApplyContext) -> StoreResult<usize>;
 
     /// HEXISTS: Check if hash field exists
     fn hexists(&self, key: &[u8], field: &[u8]) -> StoreResult<bool> {
@@ -287,14 +369,14 @@ pub trait HashStore: Send + Sync {
     fn hlen(&self, key: &[u8]) -> StoreResult<usize>;
 
     /// HINCRBY: Increment hash field integer
-    fn hincrby(&self, key: &[u8], field: &[u8], delta: i64) -> StoreResult<i64>;
+    fn hincrby(&self, key: &[u8], field: &[u8], delta: i64, ctx: &ApplyContext) -> StoreResult<i64>;
 
     /// HSETNX: Set hash field only if it does not exist
-    fn hsetnx(&self, key: &[u8], field: &[u8], value: Bytes) -> StoreResult<bool> {
+    fn hsetnx(&self, key: &[u8], field: &[u8], value: Bytes, ctx: &ApplyContext) -> StoreResult<bool> {
         if self.hexists(key, &field)? {
             Ok(false)
         } else {
-            self.hset(key, field, value)?;
+            self.hset(key, field, value, ctx)?;
             Ok(true)
         }
     }
@@ -311,10 +393,10 @@ pub trait HashStore: Send + Sync {
 /// Recommended backend: Memory (high performance)
 pub trait SetStore: Send + Sync {
     /// SADD: Add set members
-    fn sadd(&self, key: &[u8], members: Vec<Bytes>) -> StoreResult<usize>;
+    fn sadd(&self, key: &[u8], members: Vec<Bytes>, ctx: &ApplyContext) -> StoreResult<usize>;
 
     /// SREM: Remove set members
-    fn srem(&self, key: &[u8], members: &[&[u8]]) -> StoreResult<usize>;
+    fn srem(&self, key: &[u8], members: &[&[u8]], ctx: &ApplyContext) -> StoreResult<usize>;
 
     /// SMEMBERS: Get all set members
     fn smembers(&self, key: &[u8]) -> StoreResult<Vec<Bytes>>;
@@ -367,10 +449,10 @@ pub trait SetStore: Send + Sync {
 /// Recommended backend: Memory (high performance)
 pub trait ZSetStore: Send + Sync {
     /// ZADD: Add members with scores
-    fn zadd(&self, key: &[u8], members: Vec<(f64, Bytes)>) -> StoreResult<usize>;
+    fn zadd(&self, key: &[u8], members: Vec<(f64, Bytes)>, ctx: &ApplyContext) -> StoreResult<usize>;
 
     /// ZREM: Remove members
-    fn zrem(&self, key: &[u8], members: &[&[u8]]) -> StoreResult<usize>;
+    fn zrem(&self, key: &[u8], members: &[&[u8]], ctx: &ApplyContext) -> StoreResult<usize>;
 
     /// ZSCORE: Get member score
     fn zscore(&self, key: &[u8], member: &[u8]) -> StoreResult<Option<f64>>;
@@ -429,7 +511,7 @@ pub trait ZSetStore: Send + Sync {
     }
 
     /// ZINCRBY: Increment member score
-    fn zincrby(&self, key: &[u8], delta: f64, member: &[u8]) -> StoreResult<f64>;
+    fn zincrby(&self, key: &[u8], delta: f64, member: &[u8], ctx: &ApplyContext) -> StoreResult<f64>;
 
     /// ZINTERSTORE: Store intersection of sorted sets
     fn zinterstore(
@@ -463,7 +545,7 @@ pub trait ZSetStore: Send + Sync {
 /// Supports: DEL, EXISTS, KEYS, TYPE, TTL, EXPIRE, PERSIST, DBSIZE, FLUSHDB, RENAME
 pub trait KeyStore: Send + Sync {
     /// DEL: Delete keys (supports multiple)
-    fn del(&self, keys: &[&[u8]]) -> StoreResult<usize>;
+    fn del(&self, keys: &[&[u8]], ctx: &ApplyContext) -> StoreResult<usize>;
 
     /// EXISTS: Check if keys exist (supports multiple)
     fn exists(&self, keys: &[&[u8]]) -> StoreResult<usize>;
@@ -478,10 +560,10 @@ pub trait KeyStore: Send + Sync {
     fn ttl(&self, key: &[u8]) -> StoreResult<i64>;
 
     /// EXPIRE: Set expiration time (seconds)
-    fn expire(&self, key: &[u8], ttl_secs: u64) -> StoreResult<bool>;
+    fn expire(&self, key: &[u8], ttl_secs: u64, ctx: &ApplyContext) -> StoreResult<bool>;
 
     /// PERSIST: Remove expiration time
-    fn persist(&self, key: &[u8]) -> StoreResult<bool>;
+    fn persist(&self, key: &[u8], ctx: &ApplyContext) -> StoreResult<bool>;
 
     /// DBSIZE: Get number of key-value pairs
     fn dbsize(&self) -> StoreResult<usize>;
@@ -490,14 +572,14 @@ pub trait KeyStore: Send + Sync {
     fn flushdb(&self) -> StoreResult<()>;
 
     /// RENAME: Rename key
-    fn rename(&self, key: &[u8], new_key: &[u8]) -> StoreResult<()>;
+    fn rename(&self, key: &[u8], new_key: &[u8], ctx: &ApplyContext) -> StoreResult<()>;
 
     /// RENAMENX: Rename key only if new key does not exist
-    fn renamenx(&self, key: &[u8], new_key: &[u8]) -> StoreResult<bool> {
+    fn renamenx(&self, key: &[u8], new_key: &[u8], ctx: &ApplyContext) -> StoreResult<bool> {
         if self.exists(&[&new_key])? > 0 {
             Ok(false)
         } else {
-            self.rename(key, new_key.as_ref())?;
+            self.rename(key, new_key.as_ref(), ctx)?;
             Ok(true)
         }
     }
@@ -622,18 +704,30 @@ pub trait SnapshotStore: Send + Sync {
 pub trait RedisStore:
     StringStore + ListStore + HashStore + SetStore + ZSetStore + KeyStore + SnapshotStore + Send + Sync
 {
+    /// Execute Redis command with context
+    ///
+    /// Unified command execution entry, calls corresponding operation method based on Command type.
+    /// This is the preferred method as it allows passing extensible metadata.
+    ///
+    /// # Arguments
+    /// - `ctx`: Apply context containing metadata (log_seq, apply_index, etc.)
+    /// - `cmd`: Command to execute
+    ///
+    /// For read-only commands, context fields can be None or 0.
+    /// For write commands, log_seq and apply_index should be set.
+    fn apply_with_context(&self, ctx: &ApplyContext, cmd: &Command) -> ApplyResult {
+        // Default implementation: call apply() with context
+        self.apply(ctx, cmd)
+    }
+    
     /// Execute Redis command
     ///
     /// Unified command execution entry, calls corresponding operation method based on Command type
     ///
     /// # Arguments
-    /// - `read_index`: Raft read index for linearizability verification (used for read operations)
-    /// - `apply_index`: Raft apply index for WAL logging (used for write operations)
+    /// - `ctx`: Apply context containing metadata (log_seq, apply_index, etc.)
     /// - `cmd`: Command to execute
-    ///
-    /// For read-only commands, `apply_index` can be 0.
-    /// For write commands, `read_index` can be 0 (or same as `apply_index` for consistency checks).
-    fn apply(&self, read_index: u64, apply_index: u64, cmd: &Command) -> ApplyResult {
+    fn apply(&self, ctx: &ApplyContext, cmd: &Command) -> ApplyResult {
         match cmd {
             // ==================== Connection/Management Commands ====================
             Command::Ping { message } => {
@@ -694,26 +788,26 @@ pub trait RedisStore:
                 }
                 // Handle NX condition: key must not exist
                 if *nx {
-                    match self.setnx(key.as_ref(), Bytes::from(value.clone())) {
+                    match self.setnx(key.as_ref(), Bytes::from(value.clone()), ctx) {
                         Ok(false) => return ApplyResult::Value(None),
                         Err(e) => return ApplyResult::Error(e),
                         Ok(true) => {}
                     }
                 } else {
-                    if let Err(e) = self.set(key.as_ref(), Bytes::from(value.clone())) {
+                    if let Err(e) = self.set(key.as_ref(), Bytes::from(value.clone()), ctx) {
                         return ApplyResult::Error(e);
                     }
                 }
                 // Handle expiration time
                 if let Some(secs) = ex {
-                    let _ = self.expire(key, *secs);
+                    let _ = self.expire(key, *secs, ctx);
                 } else if let Some(ms) = px {
-                    let _ = self.expire(key, *ms / 1000);
+                    let _ = self.expire(key, *ms / 1000, ctx);
                 }
                 ApplyResult::Ok
             }
             Command::SetNx { key, value } => {
-                match self.setnx(key.as_ref(), Bytes::from(value.clone())) {
+                match self.setnx(key.as_ref(), Bytes::from(value.clone()), ctx) {
                     Ok(result) => ApplyResult::Integer(if result { 1 } else { 0 }),
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -722,7 +816,7 @@ pub trait RedisStore:
                 key,
                 seconds,
                 value,
-            } => match self.setex(key.as_ref(), Bytes::from(value.clone()), *seconds) {
+            } => match self.setex(key.as_ref(), Bytes::from(value.clone()), *seconds, ctx) {
                 Ok(()) => ApplyResult::Ok,
                 Err(e) => ApplyResult::Error(e),
             },
@@ -734,6 +828,7 @@ pub trait RedisStore:
                 key.as_ref(),
                 Bytes::from(value.clone()),
                 *milliseconds / 1000,
+                ctx,
             ) {
                 Ok(()) => ApplyResult::Ok,
                 Err(e) => ApplyResult::Error(e),
@@ -743,7 +838,7 @@ pub trait RedisStore:
                     .iter()
                     .map(|(k, v)| (k.as_ref(), Bytes::from(v.clone())))
                     .collect();
-                match self.mset(kvs_converted) {
+                match self.mset(kvs_converted, ctx) {
                     Ok(()) => ApplyResult::Ok,
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -766,7 +861,7 @@ pub trait RedisStore:
                         .iter()
                         .map(|(k, v)| (k.as_ref(), Bytes::from(v.clone())))
                         .collect();
-                    match self.mset(kvs_converted) {
+                    match self.mset(kvs_converted, ctx) {
                         Ok(()) => ApplyResult::Integer(1),
                         Err(e) => ApplyResult::Error(e),
                     }
@@ -774,11 +869,11 @@ pub trait RedisStore:
                     ApplyResult::Integer(0)
                 }
             }
-            Command::Incr { key } => match self.incr(key) {
+            Command::Incr { key } => match self.incr(key, ctx) {
                 Ok(v) => ApplyResult::Integer(v),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::IncrBy { key, delta } => match self.incrby(key, *delta) {
+            Command::IncrBy { key, delta } => match self.incrby(key, *delta, ctx) {
                 Ok(v) => ApplyResult::Integer(v),
                 Err(e) => ApplyResult::Error(e),
             },
@@ -786,20 +881,20 @@ pub trait RedisStore:
                 // TODO: Implement INCRBYFLOAT
                 ApplyResult::Error(StoreError::Internal("INCRBYFLOAT not implemented".into()))
             }
-            Command::Decr { key } => match self.decr(key) {
+            Command::Decr { key } => match self.decr(key, ctx) {
                 Ok(v) => ApplyResult::Integer(v),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::DecrBy { key, delta } => match self.decrby(key, *delta) {
+            Command::DecrBy { key, delta } => match self.decrby(key, *delta, ctx) {
                 Ok(v) => ApplyResult::Integer(v),
                 Err(e) => ApplyResult::Error(e),
             },
-            Command::Append { key, value } => match self.append(key, value) {
+            Command::Append { key, value } => match self.append(key, value, ctx) {
                 Ok(len) => ApplyResult::Integer(len as i64),
                 Err(e) => ApplyResult::Error(e),
             },
             Command::GetSet { key, value } => {
-                match self.getset(key.as_ref(), Bytes::from(value.clone())) {
+                match self.getset(key.as_ref(), Bytes::from(value.clone()), ctx) {
                     Ok(old) => ApplyResult::Value(old),
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -830,7 +925,7 @@ pub trait RedisStore:
             Command::LPush { key, values } => {
                 let values_converted: Vec<Bytes> =
                     values.iter().map(|v| Bytes::from(v.clone())).collect();
-                match self.lpush(key, values_converted) {
+                match self.lpush(key, values_converted, ctx) {
                     Ok(len) => ApplyResult::Integer(len as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -838,7 +933,7 @@ pub trait RedisStore:
             Command::RPush { key, values } => {
                 let values_converted: Vec<Bytes> =
                     values.iter().map(|v| Bytes::from(v.clone())).collect();
-                match self.rpush(key, values_converted) {
+                match self.rpush(key, values_converted, ctx) {
                     Ok(len) => ApplyResult::Integer(len as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -852,7 +947,7 @@ pub trait RedisStore:
                 Err(e) => ApplyResult::Error(e),
             },
             Command::LSet { key, index, value } => {
-                match self.lset(key, *index, Bytes::from(value.clone())) {
+                match self.lset(key, *index, Bytes::from(value.clone()), ctx) {
                     Ok(()) => ApplyResult::Ok,
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -907,7 +1002,7 @@ pub trait RedisStore:
                     .iter()
                     .map(|(f, v)| (f.as_ref(), Bytes::from(v.clone())))
                     .collect();
-                match self.hmset(key, fvs_converted) {
+                match self.hmset(key, fvs_converted, ctx) {
                     Ok(()) => ApplyResult::Integer(fvs.len() as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -917,6 +1012,7 @@ pub trait RedisStore:
                     key.as_ref(),
                     field.as_ref(),
                     Bytes::from(value.clone()),
+                    ctx,
                 ) {
                     Ok(result) => ApplyResult::Integer(if result { 1 } else { 0 }),
                     Err(e) => ApplyResult::Error(e),
@@ -927,20 +1023,20 @@ pub trait RedisStore:
                     .iter()
                     .map(|(f, v)| (f.as_ref(), Bytes::from(v.clone())))
                     .collect();
-                match self.hmset(key, fvs_converted) {
+                match self.hmset(key, fvs_converted, ctx) {
                     Ok(()) => ApplyResult::Ok,
                     Err(e) => ApplyResult::Error(e),
                 }
             }
             Command::HDel { key, fields } => {
                 let fields_refs: Vec<&[u8]> = fields.iter().map(|f| f.as_ref()).collect();
-                match self.hdel(key, &fields_refs) {
+                match self.hdel(key, &fields_refs, ctx) {
                     Ok(count) => ApplyResult::Integer(count as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
             Command::HIncrBy { key, field, delta } => {
-                match self.hincrby(key, field, *delta) {
+                match self.hincrby(key, field, *delta, ctx) {
                     Ok(v) => ApplyResult::Integer(v),
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -989,14 +1085,14 @@ pub trait RedisStore:
             Command::SAdd { key, members } => {
                 let members_converted: Vec<Bytes> =
                     members.iter().map(|m| Bytes::from(m.clone())).collect();
-                match self.sadd(key, members_converted) {
+                match self.sadd(key, members_converted, ctx) {
                     Ok(count) => ApplyResult::Integer(count as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
             Command::SRem { key, members } => {
                 let members_refs: Vec<&[u8]> = members.iter().map(|m| m.as_ref()).collect();
-                match self.srem(key, &members_refs) {
+                match self.srem(key, &members_refs, ctx) {
                     Ok(count) => ApplyResult::Integer(count as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -1063,14 +1159,14 @@ pub trait RedisStore:
                     .iter()
                     .map(|(score, member)| (*score, Bytes::from(member.clone())))
                     .collect();
-                match self.zadd(key, members_vec) {
+                match self.zadd(key, members_vec, ctx) {
                     Ok(count) => ApplyResult::Integer(count as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
             Command::ZRem { key, members } => {
                 let members_refs: Vec<&[u8]> = members.iter().map(|m| m.as_ref()).collect();
-                match self.zrem(key, &members_refs) {
+                match self.zrem(key, &members_refs, ctx) {
                     Ok(count) => ApplyResult::Integer(count as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
@@ -1082,7 +1178,7 @@ pub trait RedisStore:
                     Ok(Some(current_score)) => {
                         let new_score = current_score + increment;
                         let members_vec = vec![(new_score, Bytes::from(member.clone()))];
-                        match self.zadd(key, members_vec) {
+                        match self.zadd(key, members_vec, ctx) {
                             Ok(_) => ApplyResult::Value(Some(Bytes::from(new_score.to_string()))),
                             Err(e) => ApplyResult::Error(e),
                         }
@@ -1090,7 +1186,7 @@ pub trait RedisStore:
                     Ok(None) => {
                         // Member doesn't exist, add with increment as score
                         let members_vec = vec![(*increment, Bytes::from(member.clone()))];
-                        match self.zadd(key, members_vec) {
+                        match self.zadd(key, members_vec, ctx) {
                             Ok(_) => ApplyResult::Value(Some(Bytes::from(increment.to_string()))),
                             Err(e) => ApplyResult::Error(e),
                         }
@@ -1131,33 +1227,33 @@ pub trait RedisStore:
             // ==================== Key Write Commands ====================
             Command::Del { keys } => {
                 let keys_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_ref()).collect();
-                match self.del(&keys_refs) {
+                match self.del(&keys_refs, ctx) {
                     Ok(count) => ApplyResult::Integer(count as i64),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
-            Command::Expire { key, seconds } => match self.expire(key, *seconds) {
+            Command::Expire { key, seconds } => match self.expire(key, *seconds, ctx) {
                 Ok(result) => ApplyResult::Integer(if result { 1 } else { 0 }),
                 Err(e) => ApplyResult::Error(e),
             },
             Command::PExpire { key, milliseconds } => {
-                match self.expire(key, *milliseconds / 1000) {
+                match self.expire(key, *milliseconds / 1000, ctx) {
                     Ok(result) => ApplyResult::Integer(if result { 1 } else { 0 }),
                     Err(e) => ApplyResult::Error(e),
                 }
             }
-            Command::Persist { key } => match self.persist(key) {
+            Command::Persist { key } => match self.persist(key, ctx) {
                 Ok(result) => ApplyResult::Integer(if result { 1 } else { 0 }),
                 Err(e) => ApplyResult::Error(e),
             },
             Command::Rename { key, new_key } => {
-                match self.rename(key.as_ref(), new_key.as_ref()) {
+                match self.rename(key.as_ref(), new_key.as_ref(), ctx) {
                     Ok(()) => ApplyResult::Ok,
                     Err(e) => ApplyResult::Error(e),
                 }
             }
             Command::RenameNx { key, new_key } => {
-                match self.renamenx(key.as_ref(), new_key.as_ref()) {
+                match self.renamenx(key.as_ref(), new_key.as_ref(), ctx) {
                     Ok(true) => ApplyResult::Integer(1),
                     Ok(false) => ApplyResult::Integer(0),
                     Err(e) => ApplyResult::Error(e),
@@ -1179,8 +1275,14 @@ pub trait RedisStore:
     /// # Returns
     /// Command execution result
     fn apply_with_index(&self, read_index: u64, apply_index: u64, cmd: &Command) -> ApplyResult {
-        // Default implementation: just call apply (for stores without WAL support)
+        // Default implementation: create context and call apply_with_context
         // Stores with WAL support (like HybridStore) should override this method
-        self.apply(read_index, apply_index, cmd)
+        let ctx = ApplyContext {
+            read_index: Some(read_index),
+            apply_index: Some(apply_index),
+            log_seq: None, // Will be set by HybridStore
+            ..Default::default()
+        };
+        self.apply_with_context(&ctx, cmd)
     }
 }

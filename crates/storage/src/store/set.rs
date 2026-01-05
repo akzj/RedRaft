@@ -2,11 +2,11 @@
 
 use crate::memory::DataCow;
 use crate::store::HybridStore;
-use crate::traits::{SetStore, StoreError, StoreResult};
+use crate::traits::{ApplyContext, SetStore, StoreError, StoreResult};
 use bytes::Bytes;
 
 impl SetStore for HybridStore {
-    fn sadd(&self, key: &[u8], members: Vec<Bytes>) -> StoreResult<usize> {
+    fn sadd(&self, key: &[u8], members: Vec<Bytes>, ctx: &ApplyContext) -> StoreResult<usize> {
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
         let mut count = 0;
@@ -15,10 +15,11 @@ impl SetStore for HybridStore {
                 count += 1;
             }
         }
+        HybridStore::update_slot_metadata(&mut store_guard, ctx);
         Ok(count)
     }
 
-    fn srem(&self, key: &[u8], members: &[&[u8]]) -> StoreResult<usize> {
+    fn srem(&self, key: &[u8], members: &[&[u8]], ctx: &ApplyContext) -> StoreResult<usize> {
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
         let mut count = 0;
@@ -27,6 +28,7 @@ impl SetStore for HybridStore {
                 count += 1;
             }
         }
+        HybridStore::update_slot_metadata(&mut store_guard, ctx);
         Ok(count)
     }
 

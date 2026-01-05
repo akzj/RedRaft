@@ -1,11 +1,11 @@
 //! Key Store implementation for HybridStore
 
 use crate::store::HybridStore;
-use crate::traits::{KeyStore, StoreError, StoreResult};
+use crate::traits::{ApplyContext, KeyStore, StoreError, StoreResult};
 use bytes::Bytes;
 
 impl KeyStore for HybridStore {
-    fn del(&self, keys: &[&[u8]]) -> StoreResult<usize> {
+    fn del(&self, keys: &[&[u8]], ctx: &ApplyContext) -> StoreResult<usize> {
         let mut count = 0;
         for key in keys {
             let slot_store = self.get_slot_store(key)?;
@@ -22,6 +22,8 @@ impl KeyStore for HybridStore {
                 store_guard.memory_mut().del(key);
                 count += 1;
             }
+
+            HybridStore::update_slot_metadata(&mut store_guard, ctx);
         }
         Ok(count)
     }
@@ -63,12 +65,12 @@ impl KeyStore for HybridStore {
         Ok(-1)
     }
 
-    fn expire(&self, _key: &[u8], _ttl_secs: u64) -> StoreResult<bool> {
+    fn expire(&self, _key: &[u8], _ttl_secs: u64, _ctx: &ApplyContext) -> StoreResult<bool> {
         // TODO: Implement expiration
         Ok(false)
     }
 
-    fn persist(&self, _key: &[u8]) -> StoreResult<bool> {
+    fn persist(&self, _key: &[u8], _ctx: &ApplyContext) -> StoreResult<bool> {
         // TODO: Implement persistence
         Ok(false)
     }
@@ -100,7 +102,7 @@ impl KeyStore for HybridStore {
         Ok(())
     }
 
-    fn rename(&self, _key: &[u8], _new_key: &[u8]) -> StoreResult<()> {
+    fn rename(&self, _key: &[u8], _new_key: &[u8], _ctx: &ApplyContext) -> StoreResult<()> {
         // TODO: Implement rename
         Err(StoreError::NotSupported)
     }

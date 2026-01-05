@@ -29,6 +29,9 @@ pub struct WalEntry {
     /// Shard ID (calculated from key)
     pub shard_id: ShardId,
 
+    /// Log sequence number (per-slot sequence number for WAL entries)
+    pub log_seq: u64,
+
     /// Redis command (serialized with bincode)
     pub command: Vec<u8>, // Serialized Command
 }
@@ -67,6 +70,7 @@ enum WalRequest {
     /// Write a WAL entry
     WriteEntry {
         apply_index: u64,
+        log_seq: u64,
         command: Command,
         key: Vec<u8>,
     },
@@ -175,10 +179,11 @@ impl WalWriter {
             match rx.recv() {
                 Ok(WalRequest::WriteEntry {
                     apply_index,
+                    log_seq,
                     command,
                     key,
                 }) => {
-                    if let Err(e) = Self::write_entry_inner(&mut inner, apply_index, &command, &key)
+                    if let Err(e) = Self::write_entry_inner(&mut inner, apply_index, log_seq, &command, &key)
                     {
                         error!("Failed to write WAL entry at index {}: {}", apply_index, e);
                     }
@@ -212,6 +217,7 @@ impl WalWriter {
     fn write_entry_inner(
         inner: &mut WalWriterInner,
         apply_index: u64,
+        log_seq: u64,
         command: &Command,
         key: &[u8],
     ) -> Result<()> {
@@ -227,6 +233,7 @@ impl WalWriter {
         let entry = WalEntry {
             apply_index,
             shard_id,
+            log_seq,
             command: command_bytes,
         };
 
@@ -255,10 +262,11 @@ impl WalWriter {
     }
 
     /// Write a WAL entry (sends to channel)
-    pub fn write_entry(&self, apply_index: u64, command: &Command, key: &[u8]) -> Result<()> {
+    pub fn write_entry(&self, apply_index: u64, log_seq: u64, command: &Command, key: &[u8]) -> Result<()> {
         self.tx
             .send(WalRequest::WriteEntry {
                 apply_index,
+                log_seq,
                 command: command.clone(),
                 key: key.to_vec(),
             })
@@ -556,6 +564,7 @@ mod tests {
         writer
             .write_entry(
                 1,
+                1,
                 &Command::Set {
                     key: Bytes::from(b"test_key_1" as &[u8]),
                     value: Bytes::from(b"value1" as &[u8]),
@@ -569,6 +578,7 @@ mod tests {
             .unwrap();
         writer
             .write_entry(
+                2,
                 2,
                 &Command::Set {
                     key: Bytes::from(b"test_key_2" as &[u8]),
@@ -621,6 +631,7 @@ mod tests {
         writer
             .write_entry(
                 1,
+                1,
                 &Command::Set {
                     key: key1.clone(),
                     value: Bytes::from(b"value1" as &[u8]),
@@ -634,6 +645,7 @@ mod tests {
             .unwrap();
         writer
             .write_entry(
+                2,
                 2,
                 &Command::Set {
                     key: key2.clone(),

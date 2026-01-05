@@ -157,8 +157,8 @@ impl SegmentGenerator {
             };
 
             // 记录该 slot 的 apply_index
-            current_slot_apply_indices.insert(slot, metadata.last_applied_index);
-            current_max_apply_index = current_max_apply_index.max(metadata.last_applied_index);
+            current_slot_apply_indices.insert(slot, metadata.applied_index);
+            current_max_apply_index = current_max_apply_index.max(metadata.applied_index);
 
             // 添加该 slot 的数据到当前 segment
             for (key, data) in memory_clone.iter() {
@@ -204,8 +204,8 @@ impl SegmentGenerator {
                 current_max_apply_index = 0;
 
                 // 重新添加当前 slot 的数据到新 segment
-                current_slot_apply_indices.insert(slot, metadata.last_applied_index);
-                current_max_apply_index = current_max_apply_index.max(metadata.last_applied_index);
+                current_slot_apply_indices.insert(slot, metadata.applied_index);
+                current_max_apply_index = current_max_apply_index.max(metadata.applied_index);
 
                 for (key, data) in memory_clone.iter() {
                     current_chunk_writer.add_entry(key.clone(), data)?;
@@ -243,7 +243,7 @@ impl SegmentGenerator {
                 if let Some(slot_store) = slots.get(&slot) {
                     let mut guard = slot_store.write();
                     if let Some(&apply_index) = segment.slot_apply_indices.get(&slot) {
-                        guard.metadata_mut().last_segment_index = Some(apply_index);
+                        guard.metadata_mut().log_seq = apply_index;
                     }
                 }
             }
