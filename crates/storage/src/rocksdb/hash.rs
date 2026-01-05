@@ -12,7 +12,7 @@ use crate::rocksdb::key_encoding::{
     extract_hash_field, hash_field_key, hash_field_prefix, hash_meta_key,
 };
 use crate::rocksdb::SlotRocksDB;
-use crate::traits::{StoreError, StoreResult};
+use crate::traits::{ApplyContext, StoreError, StoreResult};
 use bytes::Bytes;
 use rocksdb::WriteBatch;
 use rr_core::routing::RoutingTable;
@@ -28,7 +28,7 @@ impl SlotRocksDB {
 
     /// HSET
     pub fn hset(&self, key: &[u8], field: &[u8], value: Bytes) -> bool {
-        self.hset_with_index(key, field.as_ref(), value, None)
+        self.hset_with_context(key, field.as_ref(), value, &ApplyContext::default())
     }
 
     /// HSET with apply_index: Atomically set hash field and update apply_index
@@ -39,6 +39,21 @@ impl SlotRocksDB {
         value: Bytes,
         apply_index: Option<u64>,
     ) -> bool {
+        let ctx = ApplyContext {
+            apply_index,
+            ..Default::default()
+        };
+        self.hset_with_context(key, field, value, &ctx)
+    }
+
+    /// HSET with ApplyContext: Atomically set hash field, update apply_index and slot metadata
+    pub fn hset_with_context(
+        &self,
+        key: &[u8],
+        field: &[u8],
+        value: Bytes,
+        ctx: &ApplyContext,
+    ) -> bool {
         let Some(cf) = self.get_cf() else {
             return false;
         };
@@ -46,56 +61,40 @@ impl SlotRocksDB {
         let db_key = hash_field_key(slot, key, &field);
         let is_new = self.db.get_cf(cf, &db_key).ok().flatten().is_none();
 
-        if let Some(new_index) = apply_index {
-            if self.should_skip_apply_index(new_index).unwrap_or(false) {
-                return is_new; // Already applied, skip
-            }
+        // Write data, slot metadata and field count atomically using batch
+        let mut batch = WriteBatch::default();
+        batch.put_cf(cf, &db_key, &value);
+        self.add_slot_meta_to_batch(&mut batch, slot, ctx);
+        if is_new {
+            self.add_hash_field_count_to_batch(&mut batch, key, 1);
+        }
 
-            // Atomic write: data + apply_index + field_count in single batch
-            let mut batch = WriteBatch::default();
-            batch.put_cf(cf, &db_key, &value);
-            self.add_apply_index_to_batch(&mut batch, new_index);
-            if is_new {
-                self.add_hash_field_count_to_batch(&mut batch, key, 1);
-            }
-
-            if self.db.write_opt(batch, &self.write_opts).is_ok() {
-                return is_new;
-            }
-        } else {
-            // Normal write without apply_index - use batch for atomicity
-            let mut batch = WriteBatch::default();
-            batch.put_cf(cf, &db_key, &value);
-            if is_new {
-                self.add_hash_field_count_to_batch(&mut batch, key, 1);
-            }
-            if self.db.write_opt(batch, &self.write_opts).is_ok() {
-                return is_new;
-            }
+        if self.db.write_opt(batch, &self.write_opts).is_ok() {
+            return is_new;
         }
         false
     }
 
     /// HMSET
     pub fn hmset(&self, key: &[u8], fvs: Vec<(&[u8], Bytes)>) {
-        self.hmset_with_index(key, fvs, None)
+        self.hmset_with_context(key, fvs, &ApplyContext::default())
     }
 
     /// HMSET with apply_index: Atomically set multiple hash fields and update apply_index
     pub fn hmset_with_index(&self, key: &[u8], fvs: Vec<(&[u8], Bytes)>, apply_index: Option<u64>) {
+        let ctx = ApplyContext {
+            apply_index,
+            ..Default::default()
+        };
+        self.hmset_with_context(key, fvs, &ctx)
+    }
+
+    /// HMSET with ApplyContext: Atomically set multiple hash fields, update apply_index and slot metadata
+    pub fn hmset_with_context(&self, key: &[u8], fvs: Vec<(&[u8], Bytes)>, ctx: &ApplyContext) {
         let Some(cf) = self.get_cf() else {
             return;
         };
-        // Check apply_index first (idempotent)
-        let should_skip = if let Some(new_index) = apply_index {
-            self.should_skip_apply_index(new_index).unwrap_or(false)
-        } else {
-            false
-        };
-
-        if should_skip {
-            return; // Already applied, skip
-        }
+        // No idempotent check needed - apply_index is per-slot
 
         let slot = RoutingTable::slot_for_key(key);
         let mut batch = WriteBatch::default();
@@ -109,9 +108,7 @@ impl SlotRocksDB {
             batch.put_cf(cf, &db_key, &value);
         }
 
-        if let Some(new_index) = apply_index {
-            self.add_apply_index_to_batch(&mut batch, new_index);
-        }
+        self.add_slot_meta_to_batch(&mut batch, slot, ctx);
         if new_fields > 0 {
             self.add_hash_field_count_to_batch(&mut batch, key, new_fields);
         }
@@ -123,34 +120,25 @@ impl SlotRocksDB {
 
     /// HDEL
     pub fn hdel(&self, key: &[u8], fields: &[&[u8]]) -> usize {
-        self.hdel_with_index(key, fields, None)
+        self.hdel_with_context(key, fields, &ApplyContext::default())
     }
 
     /// HDEL with apply_index: Atomically delete hash fields and update apply_index
     pub fn hdel_with_index(&self, key: &[u8], fields: &[&[u8]], apply_index: Option<u64>) -> usize {
+        let ctx = ApplyContext {
+            apply_index,
+            ..Default::default()
+        };
+        self.hdel_with_context(key, fields, &ctx)
+    }
+
+    /// HDEL with ApplyContext: Atomically delete hash fields, update apply_index and slot metadata
+    pub fn hdel_with_context(&self, key: &[u8], fields: &[&[u8]], ctx: &ApplyContext) -> usize {
         let Some(cf) = self.get_cf() else {
             return 0;
         };
-        // Check apply_index first (idempotent)
-        let should_skip = if let Some(new_index) = apply_index {
-            self.should_skip_apply_index(new_index).unwrap_or(false)
-        } else {
-            false
-        };
-
+        // No idempotent check needed - apply_index is per-slot
         let slot = RoutingTable::slot_for_key(key);
-
-        if should_skip {
-            // Count existing fields to return correct count
-            let mut count = 0;
-            for field in fields {
-                let db_key = hash_field_key(slot, key, field);
-                if self.db.get_cf(cf, &db_key).ok().flatten().is_some() {
-                    count += 1;
-                }
-            }
-            return count;
-        }
         let mut batch = WriteBatch::default();
         let mut deleted = 0;
 
@@ -163,8 +151,8 @@ impl SlotRocksDB {
         }
 
         if deleted > 0 {
-            if let Some(new_index) = apply_index {
-                self.add_apply_index_to_batch(&mut batch, new_index);
+            if let Some(_new_index) = ctx.apply_index {
+                self.add_slot_meta_to_batch(&mut batch, slot, ctx);
             }
             self.add_hash_field_count_to_batch(&mut batch, key, -(deleted as i64));
 
@@ -268,7 +256,7 @@ impl SlotRocksDB {
 
     /// HINCRBY
     pub fn hincrby(&self, key: &[u8], field: &[u8], delta: i64) -> StoreResult<i64> {
-        self.hincrby_with_index(key, field, delta, None)
+        self.hincrby_with_context(key, field, delta, &ApplyContext::default())
     }
 
     /// HINCRBY with apply_index: Atomically increment hash field and update apply_index
@@ -278,6 +266,21 @@ impl SlotRocksDB {
         field: &[u8],
         delta: i64,
         apply_index: Option<u64>,
+    ) -> StoreResult<i64> {
+        let ctx = ApplyContext {
+            apply_index,
+            ..Default::default()
+        };
+        self.hincrby_with_context(key, field, delta, &ctx)
+    }
+
+    /// HINCRBY with ApplyContext: Atomically increment hash field, update apply_index and slot metadata
+    pub fn hincrby_with_context(
+        &self,
+        key: &[u8],
+        field: &[u8],
+        delta: i64,
+        ctx: &ApplyContext,
     ) -> StoreResult<i64> {
         let cf = self.get_cf()
             .ok_or_else(|| StoreError::Internal("Default column family not found".to_string()))?;
@@ -300,36 +303,17 @@ impl SlotRocksDB {
             .checked_add(delta)
             .ok_or_else(|| StoreError::InvalidArgument("integer overflow".to_string()))?;
 
-        if let Some(new_index) = apply_index {
-            if self
-                .should_skip_apply_index(new_index)
-                .map_err(|e| StoreError::Internal(e.to_string()))?
-            {
-                return Ok(new_value); // Already applied, skip
-            }
-
-            // Atomic write: data + apply_index + field_count in single batch
-            let mut batch = WriteBatch::default();
-            batch.put_cf(cf, &db_key, new_value.to_string().as_bytes());
-            self.add_apply_index_to_batch(&mut batch, new_index);
-            if is_new {
-                self.add_hash_field_count_to_batch(&mut batch, key, 1);
-            }
-
-            self.db
-                .write_opt(batch, &self.write_opts)
-                .map_err(|e| StoreError::Internal(e.to_string()))?;
-        } else {
-            // Normal write without apply_index - use batch for atomicity
-            let mut batch = WriteBatch::default();
-            batch.put_cf(cf, &db_key, new_value.to_string().as_bytes());
-            if is_new {
-                self.add_hash_field_count_to_batch(&mut batch, key, 1);
-            }
-            self.db
-                .write_opt(batch, &self.write_opts)
-                .map_err(|e| StoreError::Internal(e.to_string()))?;
+        // Write data, slot metadata and field count atomically using batch
+        let mut batch = WriteBatch::default();
+        batch.put_cf(cf, &db_key, new_value.to_string().as_bytes());
+        self.add_slot_meta_to_batch(&mut batch, slot, ctx);
+        if is_new {
+            self.add_hash_field_count_to_batch(&mut batch, key, 1);
         }
+
+        self.db
+            .write_opt(batch, &self.write_opts)
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         Ok(new_value)
     }

@@ -392,21 +392,6 @@ impl HybridStore {
             }
         }
 
-        // 6. Update last_applied_index for write commands (also update slot metadata when executing changes)
-        if command.is_write() {
-            self.last_applied_index
-                .store(apply_index, std::sync::atomic::Ordering::SeqCst);
-
-            // Update slot's last_applied_index when executing changes
-            if let Some(slot) = ctx.slot {
-                let slots = self.slots.read();
-                if let Some(slot_store) = slots.get(&slot) {
-                    let mut store = slot_store.write();
-                    store.metadata_mut().applied_index = apply_index;
-                }
-            }
-        }
-
         result
     }
 

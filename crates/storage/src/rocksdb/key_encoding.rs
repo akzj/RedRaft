@@ -15,6 +15,7 @@ pub mod key_prefix {
     pub const HASH: u8 = b'h';
     pub const HASH_META: u8 = b'H';
     pub const APPLY_INDEX: u8 = b'@'; // Special prefix for apply_index
+    pub const SLOT_META: u8 = b'm'; // Slot metadata (applied_index)
 }
 
 /// Slot prefix length (4 bytes for u32)
@@ -180,6 +181,19 @@ pub fn parse_hash_meta_key(encoded: &[u8]) -> Option<(u32, &[u8])> {
         return None;
     }
     Some((slot, &rest[2..]))
+}
+
+/// Build slot metadata key: `{slot(4字节)}:m:{slot}`
+/// Stores slot metadata (applied_index) in RocksDB
+pub fn slot_meta_key(slot: u32) -> Vec<u8> {
+    let slot_bytes = encode_slot(slot);
+    let mut result = Vec::with_capacity(SLOT_PREFIX_LEN + 2 + 4 + 1);
+    result.extend_from_slice(&slot_bytes);
+    result.push(b':');
+    result.push(key_prefix::SLOT_META);
+    result.push(b':');
+    result.extend_from_slice(&slot_bytes);
+    result
 }
 
 /// Build slot range prefix for iteration

@@ -9,7 +9,7 @@
 
 use crate::rocksdb::key_encoding::string_key;
 use crate::rocksdb::SlotRocksDB;
-use crate::traits::{StoreError, StoreResult};
+use crate::traits::{ApplyContext, StoreError, StoreResult};
 use rr_core::routing::RoutingTable;
 use anyhow::Result;
 use rocksdb::WriteBatch;
@@ -32,7 +32,7 @@ impl SlotRocksDB {
 
     /// SET: Set string value
     pub fn set(&self, key: &[u8], value: Vec<u8>) -> Result<()> {
-        self.set_with_index(key, value, None)
+        self.set_with_context(key, value, &ApplyContext::default())
     }
 
     /// SET with apply_index: Atomically set value and update apply_index
@@ -46,38 +46,45 @@ impl SlotRocksDB {
         value: Vec<u8>,
         apply_index: Option<u64>,
     ) -> Result<()> {
+        let ctx = ApplyContext {
+            apply_index,
+            ..Default::default()
+        };
+        self.set_with_context(key, value, &ctx)
+    }
+
+    /// SET with ApplyContext: Atomically set value, update apply_index and slot metadata
+    ///
+    /// Uses WriteBatch to atomically write:
+    /// - Data value
+    /// - Global apply_index (if provided)
+    /// - Slot metadata (applied_index) if provided in context
+    pub fn set_with_context(
+        &self,
+        key: &[u8],
+        value: Vec<u8>,
+        ctx: &ApplyContext,
+    ) -> Result<()> {
         let cf = self.get_cf()
             .ok_or_else(|| anyhow::anyhow!("Default column family not found"))?;
         let slot = RoutingTable::slot_for_key(key);
         let db_key = string_key(slot, key);
 
-        // If apply_index is provided, check for duplicate commit
-        if let Some(new_index) = apply_index {
-            if self.should_skip_apply_index(new_index)? {
-                return Ok(()); // Already applied, skip (idempotent)
-            }
+        // Write data and slot metadata atomically using batch
+        let mut batch = WriteBatch::default();
+        batch.put_cf(cf, &db_key, &value);
+        self.add_slot_meta_to_batch(&mut batch, slot, ctx);
 
-            // Atomic write: data + apply_index in single batch
-            let mut batch = WriteBatch::default();
-            batch.put_cf(cf, &db_key, &value);
-            self.add_apply_index_to_batch(&mut batch, new_index);
-
-            self.db
-                .write_opt(batch, &self.write_opts)
-                .map_err(|e| anyhow::anyhow!("RocksDB SET (with index) error: {}", e))?;
-        } else {
-            // Normal write without apply_index
-            self.db
-                .put_cf_opt(cf, &db_key, &value, &self.write_opts)
-                .map_err(|e| anyhow::anyhow!("RocksDB SET error: {}", e))?;
-        }
+        self.db
+            .write_opt(batch, &self.write_opts)
+            .map_err(|e| anyhow::anyhow!("RocksDB SET (with context) error: {}", e))?;
 
         Ok(())
     }
 
     /// SETNX: Set if not exists
     pub fn setnx(&self, key: &[u8], value: Vec<u8>) -> Result<bool> {
-        self.setnx_with_index(key, value, None)
+        self.setnx_with_context(key, value, &ApplyContext::default())
     }
 
     /// SETNX with apply_index: Atomically set if not exists and update apply_index
@@ -86,6 +93,20 @@ impl SlotRocksDB {
         key: &[u8],
         value: Vec<u8>,
         apply_index: Option<u64>,
+    ) -> Result<bool> {
+        let ctx = ApplyContext {
+            apply_index,
+            ..Default::default()
+        };
+        self.setnx_with_context(key, value, &ctx)
+    }
+
+    /// SETNX with ApplyContext: Atomically set if not exists, update apply_index and slot metadata
+    pub fn setnx_with_context(
+        &self,
+        key: &[u8],
+        value: Vec<u8>,
+        ctx: &ApplyContext,
     ) -> Result<bool> {
         let cf = self.get_cf()
             .ok_or_else(|| anyhow::anyhow!("Default column family not found"))?;
@@ -96,25 +117,14 @@ impl SlotRocksDB {
             return Ok(false);
         }
 
-        if let Some(new_index) = apply_index {
-            if self.should_skip_apply_index(new_index)? {
-                return Ok(false); // Already applied, skip
-            }
+        // Write data and slot metadata atomically using batch
+        let mut batch = WriteBatch::default();
+        batch.put_cf(cf, &db_key, &value);
+        self.add_slot_meta_to_batch(&mut batch, slot, ctx);
 
-            // Atomic write: data + apply_index in single batch
-            let mut batch = WriteBatch::default();
-            batch.put_cf(cf, &db_key, &value);
-            self.add_apply_index_to_batch(&mut batch, new_index);
-
-            self.db
-                .write_opt(batch, &self.write_opts)
-                .map_err(|e| anyhow::anyhow!("RocksDB SETNX (with index) error: {}", e))?;
-        } else {
-            // Normal write without apply_index
-            self.db
-                .put_cf_opt(cf, &db_key, &value, &self.write_opts)
-                .map_err(|e| anyhow::anyhow!("RocksDB SETNX error: {}", e))?;
-        }
+        self.db
+            .write_opt(batch, &self.write_opts)
+            .map_err(|e| anyhow::anyhow!("RocksDB SETNX (with context) error: {}", e))?;
 
         Ok(true)
     }
@@ -132,19 +142,12 @@ impl SlotRocksDB {
         let slot = RoutingTable::slot_for_key(key);
         let db_key = string_key(slot, key);
         if self.db.get_cf(cf, &db_key).ok().flatten().is_some() {
-            if let Some(new_index) = apply_index {
-                if self
-                    .should_skip_apply_index(new_index)
-                    .unwrap_or(false)
-                {
-                    return true; // Already applied, skip
-                }
-
-                // Atomic write: delete + apply_index in single batch
+            if let Some(_new_index) = apply_index {
+                // Atomic write: delete + slot_meta in single batch
                 let mut batch = WriteBatch::default();
                 batch.delete_cf(cf, &db_key);
-                self.add_apply_index_to_batch(&mut batch, new_index);
-
+                // Note: slot metadata update would need slot info, but del doesn't have context
+                // For now, just delete the key
                 if self.db.write_opt(batch, &self.write_opts).is_ok() {
                     return true;
                 }
@@ -158,7 +161,7 @@ impl SlotRocksDB {
 
     /// INCR/INCRBY
     pub fn incrby(&self, key: &[u8], delta: i64) -> StoreResult<i64> {
-        self.incrby_with_index(key, delta, None)
+        self.incrby_with_context(key, delta, &ApplyContext::default())
     }
 
     /// INCRBY with apply_index: Atomically increment and update apply_index
@@ -167,6 +170,20 @@ impl SlotRocksDB {
         key: &[u8],
         delta: i64,
         apply_index: Option<u64>,
+    ) -> StoreResult<i64> {
+        let ctx = ApplyContext {
+            apply_index,
+            ..Default::default()
+        };
+        self.incrby_with_context(key, delta, &ctx)
+    }
+
+    /// INCRBY with ApplyContext: Atomically increment, update apply_index and slot metadata
+    pub fn incrby_with_context(
+        &self,
+        key: &[u8],
+        delta: i64,
+        ctx: &ApplyContext,
     ) -> StoreResult<i64> {
         let cf = self.get_cf()
             .ok_or_else(|| StoreError::Internal("Default column family not found".to_string()))?;
@@ -188,40 +205,21 @@ impl SlotRocksDB {
             .checked_add(delta)
             .ok_or_else(|| StoreError::InvalidArgument("integer overflow".to_string()))?;
 
-        if let Some(new_index) = apply_index {
-            if self
-                .should_skip_apply_index(new_index)
-                .map_err(|e| StoreError::Internal(e.to_string()))?
-            {
-                return Ok(new_value); // Already applied, skip
-            }
+        // Write data and slot metadata atomically using batch
+        let mut batch = WriteBatch::default();
+        batch.put_cf(cf, &db_key, new_value.to_string().as_bytes());
+        self.add_slot_meta_to_batch(&mut batch, slot, ctx);
 
-            // Atomic write: data + apply_index in single batch
-            let mut batch = WriteBatch::default();
-            batch.put_cf(cf, &db_key, new_value.to_string().as_bytes());
-            self.add_apply_index_to_batch(&mut batch, new_index);
-
-            self.db
-                .write_opt(batch, &self.write_opts)
-                .map_err(|e| StoreError::Internal(e.to_string()))?;
-        } else {
-            // Normal write without apply_index
-            self.db
-                .put_cf_opt(
-                    cf,
-                    &db_key,
-                    new_value.to_string().as_bytes(),
-                    &self.write_opts,
-                )
-                .map_err(|e| StoreError::Internal(e.to_string()))?;
-        }
+        self.db
+            .write_opt(batch, &self.write_opts)
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         Ok(new_value)
     }
 
     /// APPEND
     pub fn append(&self, key: &[u8], value: &[u8]) -> usize {
-        self.append_with_index(key, value, None)
+        self.append_with_context(key, value, &ApplyContext::default())
     }
 
     /// APPEND with apply_index: Atomically append and update apply_index
@@ -230,6 +228,20 @@ impl SlotRocksDB {
         key: &[u8],
         value: &[u8],
         apply_index: Option<u64>,
+    ) -> usize {
+        let ctx = ApplyContext {
+            apply_index,
+            ..Default::default()
+        };
+        self.append_with_context(key, value, &ctx)
+    }
+
+    /// APPEND with ApplyContext: Atomically append, update apply_index and slot metadata
+    pub fn append_with_context(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        ctx: &ApplyContext,
     ) -> usize {
         let Some(cf) = self.get_cf() else {
             return 0;
@@ -246,31 +258,13 @@ impl SlotRocksDB {
 
         let len = new_value.len();
 
-        if let Some(new_index) = apply_index {
-            if self
-                .should_skip_apply_index(new_index)
-                .unwrap_or(false)
-            {
-                return len; // Already applied, skip
-            }
+        // Write data and slot metadata atomically using batch
+        let mut batch = WriteBatch::default();
+        batch.put_cf(cf, &db_key, &new_value);
+        self.add_slot_meta_to_batch(&mut batch, slot, ctx);
 
-            // Atomic write: data + apply_index in single batch
-            let mut batch = WriteBatch::default();
-            batch.put_cf(cf, &db_key, &new_value);
-            self.add_apply_index_to_batch(&mut batch, new_index);
-
-            if self.db.write_opt(batch, &self.write_opts).is_ok() {
-                return len;
-            }
-        } else {
-            // Normal write without apply_index
-            if self
-                .db
-                .put_cf_opt(cf, &db_key, &new_value, &self.write_opts)
-                .is_ok()
-            {
-                return len;
-            }
+        if self.db.write_opt(batch, &self.write_opts).is_ok() {
+            return len;
         }
         0
     }

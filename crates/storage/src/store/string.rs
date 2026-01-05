@@ -17,10 +17,12 @@ impl StringStore for HybridStore {
     fn set(&self, key: &[u8], value: Bytes, ctx: &ApplyContext) -> StoreResult<()> {
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
+        // Use set_with_context to atomically write data and slot metadata
         store_guard
             .rocksdb_mut()
-            .set(key, value.to_vec())
+            .set_with_context(key, value.to_vec(), ctx)
             .map_err(|e| StoreError::Internal(e.to_string()))?;
+        // Also update in-memory metadata for fast access
         store_guard.metadata_mut().update_from_context(ctx);
         Ok(())
     }
@@ -28,26 +30,26 @@ impl StringStore for HybridStore {
     fn setnx(&self, key: &[u8], value: Bytes, ctx: &ApplyContext) -> StoreResult<bool> {
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
-        // Check if key exists
-        if store_guard.rocksdb().get(key).is_some() {
-            return Ok(false);
-        }
-        store_guard
+        // Use setnx_with_context to atomically write data and slot metadata
+        let result = store_guard
             .rocksdb_mut()
-            .set(key, value.to_vec())
+            .setnx_with_context(key, value.to_vec(), ctx)
             .map_err(|e| StoreError::Internal(e.to_string()))?;
+        // Also update in-memory metadata for fast access
         store_guard.metadata_mut().update_from_context(ctx);
-        Ok(true)
+        Ok(result)
     }
 
     fn setex(&self, key: &[u8], value: Bytes, _ttl_secs: u64, ctx: &ApplyContext) -> StoreResult<()> {
         // TODO: Implement expiration
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
+        // Use set_with_context to atomically write data and slot metadata
         store_guard
             .rocksdb_mut()
-            .set(key, value.to_vec())
+            .set_with_context(key, value.to_vec(), ctx)
             .map_err(|e| StoreError::Internal(e.to_string()))?;
+        // Also update in-memory metadata for fast access
         store_guard.metadata_mut().update_from_context(ctx);
         Ok(())
     }
@@ -55,10 +57,12 @@ impl StringStore for HybridStore {
     fn incrby(&self, key: &[u8], delta: i64, ctx: &ApplyContext) -> StoreResult<i64> {
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
+        // Use incrby_with_context to atomically write data and slot metadata
         let result = store_guard
             .rocksdb_mut()
-            .incrby(key, delta)
+            .incrby_with_context(key, delta, ctx)
             .map_err(|e| StoreError::Internal(e.to_string()))?;
+        // Also update in-memory metadata for fast access
         store_guard.metadata_mut().update_from_context(ctx);
         Ok(result)
     }
@@ -66,7 +70,11 @@ impl StringStore for HybridStore {
     fn append(&self, key: &[u8], value: &[u8], ctx: &ApplyContext) -> StoreResult<usize> {
         let slot_store = self.get_slot_store(key)?;
         let mut store_guard = slot_store.write();
-        let result = store_guard.rocksdb_mut().append(key, value);
+        // Use append_with_context to atomically write data and slot metadata
+        let result = store_guard
+            .rocksdb_mut()
+            .append_with_context(key, value, ctx);
+        // Also update in-memory metadata for fast access
         store_guard.metadata_mut().update_from_context(ctx);
         Ok(result)
     }

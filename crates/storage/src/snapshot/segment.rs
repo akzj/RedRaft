@@ -9,6 +9,7 @@
 use crate::memory::{Data, MemStore};
 use crate::snapshot::{chunk::ChunkWriter, SnapshotConfig};
 use crate::store::{LockedSlotStore, SlotMetadata};
+use rr_core::routing::RoutingTable;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,7 +24,7 @@ pub struct SegmentMetadata {
     pub slot_end: u32,
     /// Apply index for this segment (max apply_index of all slots in range)
     pub apply_index: u64,
-    /// Round number (轮次)
+    /// Round number
     pub round: u64,
     /// Chunk files information
     pub chunks: Vec<ChunkFileInfo>,
@@ -33,7 +34,7 @@ pub struct SegmentMetadata {
     pub total_compressed_size: u64,
     /// Created timestamp
     pub created_at: u64,
-    /// Slot -> apply_index mapping (记录每个 slot 的 apply_index)
+    /// Slot -> apply_index mapping (records apply_index for each slot)
     pub slot_apply_indices: HashMap<u32, u64>,
 }
 
@@ -115,7 +116,7 @@ impl SegmentGenerator {
     }
 
     /// Generate segments for log compression
-    /// 按 slot 顺序遍历，写入后检查大小，超过 64MB 则下一个 slot 创建新 segment
+    /// Iterate slots in order, check size after writing, create new segment for next slot if exceeds 64MB
     pub fn generate_segments(
         &mut self,
         slots: &HashMap<u32, LockedSlotStore>,
@@ -123,7 +124,7 @@ impl SegmentGenerator {
         // Mark as generating
         self.is_generating = true;
 
-        // 1. 获取所有 slot 编号并排序
+        // 1. Get all slot numbers and sort them
         let mut slot_list: Vec<u32> = slots.keys().copied().collect();
         slot_list.sort();
 
@@ -143,48 +144,48 @@ impl SegmentGenerator {
         let mut current_slot_apply_indices = HashMap::new();
         let mut current_max_apply_index = 0u64;
 
-        // 2. 按 slot 顺序遍历
+        // 2. Iterate slots in order
         for &slot in &slot_list {
-            // 获取 slot 数据
+            // Get slot data
             let (memory_clone, metadata) = {
                 if let Some(slot_store) = slots.get(&slot) {
                     let guard = slot_store.read();
                     (guard.memory().clone(), guard.metadata().clone())
                 } else {
-                    // Slot 不存在，使用空数据
+                    // Slot doesn't exist, use empty data
                     (MemStore::new(), SlotMetadata::new(slot))
                 }
             };
 
-            // 记录该 slot 的 apply_index
+            // Record this slot's apply_index
             current_slot_apply_indices.insert(slot, metadata.applied_index);
             current_max_apply_index = current_max_apply_index.max(metadata.applied_index);
 
-            // 添加该 slot 的数据到当前 segment
+            // Add this slot's data to current segment
             for (key, data) in memory_clone.iter() {
                 current_chunk_writer.add_entry(key.clone(), data)?;
 
-                // 如果当前 chunk 已满，flush
+                // If current chunk is full, flush it
                 if current_chunk_writer.should_flush() {
                     let chunk_info = self.flush_chunk(
                         &mut current_chunk_writer,
                         current_segment_start,
-                        slot + 1, // 临时 slot_end，实际会在 finish_segment 时确定
+                        slot + 1, // Temporary slot_end, will be finalized in finish_segment
                         &round_dir,
                     )?;
                     current_chunks.push(chunk_info);
                 }
             }
 
-            // 3. 写入后检查当前 segment 大小
+            // 3. Check current segment size after writing
             let current_segment_size = self.calculate_segment_size(&current_chunks)?;
 
-            // 4. 如果超过 64MB，且当前 segment 已有数据，则关闭当前 segment
+            // 4. If exceeds 64MB and current segment has data, close current segment
             if current_segment_size > self.config.chunk_size as u64
                 && (!current_chunks.is_empty() || !current_slot_apply_indices.is_empty())
             {
-                // 关闭当前 segment（不包含当前 slot，因为已经超过限制了）
-                let segment_end = slot; // 当前 slot 不包含在内
+                // Close current segment (excluding current slot, as it exceeds the limit)
+                let segment_end = slot; // Current slot is not included
                 let segment = self.finish_segment(
                     current_segment_start,
                     segment_end,
@@ -196,14 +197,14 @@ impl SegmentGenerator {
                 )?;
                 segments.push(segment);
 
-                // 重置状态，开始新 segment（包含当前 slot）
+                // Reset state, start new segment (including current slot)
                 current_segment_start = slot;
                 current_chunk_writer = ChunkWriter::new(self.config.clone(), round_dir.clone());
                 current_chunks.clear();
                 current_slot_apply_indices.clear();
                 current_max_apply_index = 0;
 
-                // 重新添加当前 slot 的数据到新 segment
+                // Re-add current slot's data to new segment
                 current_slot_apply_indices.insert(slot, metadata.applied_index);
                 current_max_apply_index = current_max_apply_index.max(metadata.applied_index);
 
@@ -222,7 +223,7 @@ impl SegmentGenerator {
             }
         }
 
-        // 5. 关闭最后一个 segment（即使为空也要生成）
+        // 5. Close the last segment (generate even if empty)
         if !current_chunk_writer.is_empty() || !current_slot_apply_indices.is_empty() {
             let last_slot = slot_list[slot_list.len() - 1];
             let segment = self.finish_segment(
@@ -237,7 +238,7 @@ impl SegmentGenerator {
             segments.push(segment);
         }
 
-        // 6. 更新 slot metadata
+        // 6. Update slot metadata
         for segment in &segments {
             for slot in segment.slot_start..segment.slot_end {
                 if let Some(slot_store) = slots.get(&slot) {
@@ -249,7 +250,7 @@ impl SegmentGenerator {
             }
         }
 
-        // 7. 开始新轮次
+        // 7. Start new round
         self.start_new_round();
 
         // Mark as complete
@@ -265,7 +266,7 @@ impl SegmentGenerator {
     }
 
     /// Finish current segment and create metadata
-    /// 即使为空也要生成 segment（至少要有 metadata JSON）
+    /// Generate segment even if empty (at least metadata JSON is required)
     fn finish_segment(
         &self,
         slot_start: u32,
@@ -276,17 +277,17 @@ impl SegmentGenerator {
         max_apply_index: u64,
         round_dir: &Path,
     ) -> Result<SegmentMetadata, String> {
-        // Flush 最后一个 chunk（如果有）
+        // Flush the last chunk (if any)
         if !chunk_writer.is_empty() {
             let chunk_info = self.flush_chunk(chunk_writer, slot_start, slot_end, round_dir)?;
             chunks.push(chunk_info);
         }
 
-        // 计算总大小
+        // Calculate total size
         let total_uncompressed: u64 = chunks.iter().map(|c| c.uncompressed_size).sum();
         let total_compressed: u64 = chunks.iter().map(|c| c.compressed_size).sum();
 
-        // 即使没有 chunks（空 segment），也要生成 metadata
+        // Generate metadata even if there are no chunks (empty segment)
         let metadata = SegmentMetadata {
             slot_start,
             slot_end,
@@ -302,7 +303,7 @@ impl SegmentGenerator {
             slot_apply_indices,
         };
 
-        // 写入 JSON 文件（即使为空也要写入）
+        // Write JSON file (write even if empty)
         let json_path = round_dir.join(format!("{:05}-{:05}.seg.json", slot_start, slot_end));
         let json_content = serde_json::to_string_pretty(&metadata)
             .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
@@ -337,7 +338,7 @@ impl SegmentGenerator {
     /// Start new round
     pub fn start_new_round(&mut self) {
         self.current_round += 1;
-        // 更新 current_round.txt
+        // Update current_round.txt
         let round_file = self.segments_dir.join("current_round.txt");
         std::fs::write(&round_file, self.current_round.to_string()).ok();
     }
@@ -349,13 +350,180 @@ impl SegmentGenerator {
     }
 }
 
-/// Segment Reader (placeholder for future implementation)
+/// Segment Reader for loading segments and restoring MemStore
 pub struct SegmentReader {
-    // TODO: Implement segment reading
+    config: SnapshotConfig,
+    segments_dir: PathBuf,
 }
 
 impl SegmentReader {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(config: SnapshotConfig, segments_dir: PathBuf) -> Self {
+        Self {
+            config,
+            segments_dir,
+        }
+    }
+
+    /// Load all segments for a given slot and restore MemStore
+    ///
+    /// Returns (MemStore, max_apply_index) for the slot
+    pub fn load_slot_segment(&self, slot: u32) -> Result<(MemStore, u64), String> {
+        // Find the latest segment that contains this slot
+        let latest_segment = self.find_latest_segment_for_slot(slot)?;
+        
+        if let Some(segment_meta) = latest_segment {
+            // Load segment data
+            let mut mem_store = MemStore::new();
+            let mut max_apply_index = 0u64;
+
+            let round_dir = self.segments_dir.join(format!("{}", segment_meta.round));
+            
+            // Load all chunks for this segment
+            for chunk_info in &segment_meta.chunks {
+                let chunk_file = round_dir.join(&chunk_info.file_name);
+                let chunk_reader = crate::snapshot::chunk::ChunkReader::new(self.config.clone());
+                let entries = chunk_reader.read_chunk(&chunk_file)?;
+
+                // Deserialize and insert entries into MemStore
+                for entry in entries {
+                    let data = Data::deserialize(&entry.data_type, &entry.data)
+                        .map_err(|e| format!("Failed to deserialize data: {}", e))?;
+                    mem_store.insert(entry.key, data);
+                }
+            }
+
+            // Get apply_index for this slot
+            if let Some(&apply_index) = segment_meta.slot_apply_indices.get(&slot) {
+                max_apply_index = apply_index;
+            }
+
+            Ok((mem_store, max_apply_index))
+        } else {
+            // No segment found, return empty store
+            Ok((MemStore::new(), 0))
+        }
+    }
+
+    /// Find the latest segment that contains a given slot
+    fn find_latest_segment_for_slot(&self, slot: u32) -> Result<Option<SegmentMetadata>, String> {
+        // Find the latest round
+        let current_round = SegmentGenerator::load_current_round(&self.segments_dir);
+        
+        // Search from latest round backwards
+        for round in (1..=current_round).rev() {
+            let round_dir = self.segments_dir.join(format!("{}", round));
+            if !round_dir.exists() {
+                continue;
+            }
+
+            // Find all segment metadata files in this round
+            let entries = std::fs::read_dir(&round_dir)
+                .map_err(|e| format!("Failed to read round directory: {}", e))?;
+
+            let mut segments = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if ext == "json" {
+                        let content = std::fs::read_to_string(&path)
+                            .map_err(|e| format!("Failed to read segment metadata: {}", e))?;
+                        let meta: SegmentMetadata = serde_json::from_str(&content)
+                            .map_err(|e| format!("Failed to parse segment metadata: {}", e))?;
+                        segments.push(meta);
+                    }
+                }
+            }
+
+            // Find segment that contains this slot
+            for segment in segments {
+                if slot >= segment.slot_start && slot < segment.slot_end {
+                    return Ok(Some(segment));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Load all segments and restore MemStore for all slots
+    ///
+    /// Returns HashMap<slot, (MemStore, apply_index)>
+    pub fn load_all_segments(&self) -> Result<HashMap<u32, (MemStore, u64)>, String> {
+        let mut result = HashMap::new();
+        
+        // Find all slots from all segments
+        let current_round = SegmentGenerator::load_current_round(&self.segments_dir);
+        
+        for round in 1..=current_round {
+            let round_dir = self.segments_dir.join(format!("{}", round));
+            if !round_dir.exists() {
+                continue;
+            }
+
+            let entries = std::fs::read_dir(&round_dir)
+                .map_err(|e| format!("Failed to read round directory: {}", e))?;
+
+            for entry in entries {
+                let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if ext == "json" {
+                        let content = std::fs::read_to_string(&path)
+                            .map_err(|e| format!("Failed to read segment metadata: {}", e))?;
+                        let segment_meta: SegmentMetadata = serde_json::from_str(&content)
+                            .map_err(|e| format!("Failed to parse segment metadata: {}", e))?;
+
+                        // Load segment data for all slots in range
+                        for slot in segment_meta.slot_start..segment_meta.slot_end {
+                            // Only load if we haven't loaded a newer version
+                            if result.contains_key(&slot) {
+                                continue;
+                            }
+
+                            let (mem_store, apply_index) = self.load_segment_data(&segment_meta, &round_dir, slot)?;
+                            result.insert(slot, (mem_store, apply_index));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Load segment data for a specific slot
+    ///
+    /// Only loads entries that belong to the specified slot (based on key slot calculation)
+    fn load_segment_data(
+        &self,
+        segment_meta: &SegmentMetadata,
+        round_dir: &Path,
+        slot: u32,
+    ) -> Result<(MemStore, u64), String> {
+        let mut mem_store = MemStore::new();
+        let chunk_reader = crate::snapshot::chunk::ChunkReader::new(self.config.clone());
+
+        // Load all chunks for this segment
+        for chunk_info in &segment_meta.chunks {
+            let chunk_file = round_dir.join(&chunk_info.file_name);
+            let entries = chunk_reader.read_chunk(&chunk_file)?;
+
+            // Deserialize and insert entries into MemStore (only for this slot)
+            for entry in entries {
+                // Check if this entry belongs to the target slot
+                let entry_slot = RoutingTable::slot_for_key(&entry.key);
+                if entry_slot == slot {
+                    let data = Data::deserialize(&entry.data_type, &entry.data)
+                        .map_err(|e| format!("Failed to deserialize data: {}", e))?;
+                    mem_store.insert(entry.key, data);
+                }
+            }
+        }
+
+        // Get apply_index for this slot
+        let apply_index = segment_meta.slot_apply_indices.get(&slot).copied().unwrap_or(0);
+
+        Ok((mem_store, apply_index))
     }
 }

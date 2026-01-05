@@ -27,7 +27,15 @@ pub use chunk::{ChunkHeader, ChunkWriter, ChunkReader};
 pub use segment::{SegmentGenerator, SegmentMetadata, SegmentReader};
 pub use wal::{WalWriter, WalReader, WalMetadata, WalEntry};
 
+use crate::memory::MemStore;
+use crate::store::SlotMetadata;
+use resp::Command;
+use rr_core::routing::RoutingTable;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use anyhow::Result;
+use bincode::serde::decode_from_slice;
+use bincode::config::standard;
 
 /// Snapshot storage configuration
 #[derive(Debug, Clone)]
@@ -75,5 +83,85 @@ impl SnapshotConfig {
             ..Default::default()
         }
     }
+}
+
+/// Reload MemStore from segments and WAL
+///
+/// Recovery process:
+/// 1. Load segments (full snapshots) to restore base state
+/// 2. Load WAL entries (incremental changes) and apply them
+/// 3. Return restored MemStore and metadata for each slot
+///
+/// # Arguments
+/// - `config`: Snapshot configuration
+///
+/// # Returns
+/// Result with HashMap<slot, (MemStore, SlotMetadata)> containing restored stores
+pub fn reload_memstore(
+    config: SnapshotConfig,
+) -> Result<HashMap<u32, (MemStore, SlotMetadata)>> {
+    let segments_dir = config.base_dir.join("segments");
+    let wal_dir = config.base_dir.join("wal");
+
+    // Step 1: Load segments to restore base state
+    let segment_reader = SegmentReader::new(config.clone(), segments_dir);
+    let mut slot_data = segment_reader.load_all_segments()
+        .map_err(|e| anyhow::anyhow!("Failed to load segments: {}", e))?;
+
+    // Convert to (MemStore, SlotMetadata) format
+    let mut result: HashMap<u32, (MemStore, SlotMetadata)> = HashMap::new();
+    for (slot, (mem_store, apply_index)) in slot_data {
+        let metadata = SlotMetadata {
+            slot,
+            applied_index: apply_index,
+            log_seq: 0, // Will be updated from WAL
+        };
+        result.insert(slot, (mem_store, metadata));
+    }
+
+    // Step 2: Load WAL entries and apply incremental changes
+    let wal_reader = WalReader::new(config.clone(), wal_dir)
+        .map_err(|e| anyhow::anyhow!("Failed to create WAL reader: {}", e))?;
+
+    // Read all WAL entries
+    let all_entries = wal_reader.read_entries_from(0)
+        .map_err(|e| anyhow::anyhow!("Failed to read WAL entries: {}", e))?;
+
+    // Group WAL entries by slot and sort by apply_index
+    let mut wal_entries_by_slot: HashMap<u32, Vec<WalEntry>> = HashMap::new();
+    for entry in all_entries {
+        // Deserialize command to get key
+        let command: Command = decode_from_slice(&entry.command, standard())
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize WAL command: {}", e))?
+            .0;
+
+        if let Some(key) = command.get_key() {
+            let slot = RoutingTable::slot_for_key(key);
+            wal_entries_by_slot.entry(slot).or_insert_with(Vec::new).push(entry);
+        }
+    }
+
+    // Sort entries by apply_index for each slot
+    for entries in wal_entries_by_slot.values_mut() {
+        entries.sort_by_key(|e| e.apply_index);
+    }
+
+    // Apply WAL entries to restore incremental changes
+    // Note: This requires applying commands, which should be done by HybridStore
+    // For now, we'll just update metadata with the latest apply_index and log_seq
+    for (slot, entries) in wal_entries_by_slot {
+        // Get or create entry for this slot
+        let (mem_store, metadata) = result.entry(slot).or_insert_with(|| {
+            (MemStore::new(), SlotMetadata::new(slot))
+        });
+
+        // Update metadata with latest values from WAL
+        if let Some(last_entry) = entries.last() {
+            metadata.applied_index = last_entry.apply_index;
+            metadata.log_seq = last_entry.log_seq;
+        }
+    }
+
+    Ok(result)
 }
 

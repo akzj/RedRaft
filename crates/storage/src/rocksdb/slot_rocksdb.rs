@@ -10,7 +10,9 @@
 //! - **Hash Operations**: See `hash.rs` for hash operations
 //! - **Snapshot Operations**: See `snapshot.rs` for snapshot operations
 
-use crate::rocksdb::key_encoding::apply_index_key;
+use crate::rocksdb::key_encoding::slot_meta_key;
+use crate::store::SlotMetadata;
+use crate::traits::ApplyContext;
 use anyhow::Result;
 use rocksdb::{ColumnFamily, Options, WriteBatch, WriteOptions, DB};
 use rr_core::routing::RoutingTable;
@@ -52,8 +54,8 @@ impl SlotRocksDB {
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
         // Open database with default column family
-        let db = DB::open(&opts, &path_str)
-            .map_err(|e| format!("Failed to open RocksDB: {}", e))?;
+        let db =
+            DB::open(&opts, &path_str).map_err(|e| format!("Failed to open RocksDB: {}", e))?;
 
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(false);
@@ -76,84 +78,26 @@ impl SlotRocksDB {
         self.db.cf_handle("default")
     }
 
-    /// Get apply index from RocksDB
-    pub fn get_apply_index(&self) -> Option<u64> {
-        self.get_apply_index_from_db().ok().flatten()
-    }
-
-    /// Get apply_index from RocksDB
-    fn get_apply_index_from_db(&self) -> Result<Option<u64>> {
-        let cf = self.get_cf()
-            .ok_or_else(|| anyhow::anyhow!("Default column family not found"))?;
-        let index_key = apply_index_key();
-
-        match self.db.get_cf(cf, &index_key) {
-            Ok(Some(bytes)) => {
-                if bytes.len() == 8 {
-                    let index = u64::from_le_bytes([
-                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
-                        bytes[7],
-                    ]);
-                    Ok(Some(index))
-                } else {
-                    Ok(None)
-                }
-            }
-            Ok(None) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!("Failed to read apply_index: {}", e)),
-        }
-    }
-
-    /// Helper: Check if apply_index should be skipped (idempotent check)
-    pub(crate) fn should_skip_apply_index(&self, new_index: u64) -> Result<bool> {
-        let current_index = self.get_apply_index_from_db()?;
-        if let Some(current) = current_index {
-            if new_index <= current {
-                return Ok(true); // Already applied, skip
-            }
-        }
-        Ok(false)
-    }
-
-    /// Helper: Add apply_index to WriteBatch
-    pub(crate) fn add_apply_index_to_batch(
+    /// Helper: Add slot metadata to WriteBatch
+    ///
+    /// Stores slot metadata (applied_index) atomically with data writes.
+    /// Format: applied_index (8 bytes)
+    pub(crate) fn add_slot_meta_to_batch(
         &self,
         batch: &mut WriteBatch,
-        apply_index: u64,
+        slot: u32,
+        ctx: &ApplyContext,
     ) {
         let Some(cf) = self.get_cf() else {
             return;
         };
-        let index_key = apply_index_key();
-        batch.put_cf(cf, &index_key, apply_index.to_le_bytes().as_slice());
-    }
 
-    /// Atomically update apply_index in RocksDB (without data write)
-    pub fn update_apply_index(&self, apply_index: u64) -> Result<()> {
-        let cf = self.get_cf()
-            .ok_or_else(|| anyhow::anyhow!("Default column family not found"))?;
-        let index_key = apply_index_key();
-
-        // Check for duplicate commit
-        let current_index = self.get_apply_index_from_db()?;
-        if let Some(current) = current_index {
-            if apply_index <= current {
-                // Already applied, skip (idempotent)
-                return Ok(());
-            }
+        // Only add if apply_index is present
+        if let Some(apply_index) = ctx.apply_index {
+            let meta_key = slot_meta_key(slot);
+            // Serialize: applied_index (8 bytes)
+            batch.put_cf(cf, &meta_key, apply_index.to_le_bytes().as_slice());
         }
-
-        // Write apply_index
-        self.db
-            .put_cf_opt(
-                cf,
-                &index_key,
-                apply_index.to_le_bytes().as_slice(),
-                &self.write_opts,
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to update apply_index: {}", e))?;
-
-        Ok(())
     }
 
     /// Flush to disk

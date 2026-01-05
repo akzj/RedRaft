@@ -77,6 +77,40 @@ impl Data {
                 .map_err(|e| format!("Failed to serialize BitmapData: {}", e)),
         }
     }
+
+    /// Deserialize data from bytes
+    pub fn deserialize(data_type: &str, data: &[u8]) -> Result<Self, String> {
+        use bincode::config::standard;
+        use bincode::serde::decode_from_slice;
+
+        match data_type {
+            "list" => {
+                let list: ListData = decode_from_slice(data, standard())
+                    .map_err(|e| format!("Failed to deserialize ListData: {}", e))?
+                    .0;
+                Ok(Data::List(list))
+            }
+            "set" => {
+                let set: SetData = decode_from_slice(data, standard())
+                    .map_err(|e| format!("Failed to deserialize SetData: {}", e))?
+                    .0;
+                Ok(Data::Set(set))
+            }
+            "zset" => {
+                let zset: ZSetData = decode_from_slice(data, standard())
+                    .map_err(|e| format!("Failed to deserialize ZSetData: {}", e))?
+                    .0;
+                Ok(Data::ZSet(zset))
+            }
+            "bitmap" => {
+                let bitmap: BitmapData = decode_from_slice(data, standard())
+                    .map_err(|e| format!("Failed to deserialize BitmapData: {}", e))?
+                    .0;
+                Ok(Data::Bitmap(bitmap))
+            }
+            _ => Err(format!("Unknown data type: {}", data_type)),
+        }
+    }
 }
 
 /// Unified Memory Store (simple HashMap, no COW)
