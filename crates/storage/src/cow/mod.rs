@@ -284,7 +284,7 @@ where
                 if overlay_guard.removed.remove(&key) {
                     keys_to_remove.push((overlay_idx, key));
                     processed_count += 1;
-                }
+        }
                 drop(overlay_guard);
             }
 

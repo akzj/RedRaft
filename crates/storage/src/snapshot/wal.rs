@@ -1,19 +1,15 @@
 //! Write-Ahead Log (WAL) implementation
 //!
 //! WAL format:
-//! - Single file for all shards
-//! - Entry format: apply_index (u64) + shard_id (ShardId) + Command (serialized)
-//! - Metadata: shard_id -> [apply_index_begin, apply_index_end)
+//! - Single file for all slots
+//! - Entry format: apply_index (u64) + log_seq (u64) + Command (serialized)
 //! - Timed rotation + metadata file
 
 use crate::snapshot::SnapshotConfig;
 use anyhow::Result;
 use crossbeam_channel;
 use resp::Command;
-use rr_core::routing::RoutingTable;
-use rr_core::shard::ShardId;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -26,43 +22,11 @@ pub struct WalEntry {
     /// Raft apply index
     pub apply_index: u64,
 
-    /// Shard ID (calculated from key)
-    pub shard_id: ShardId,
-
     /// Log sequence number (per-slot sequence number for WAL entries)
     pub log_seq: u64,
 
     /// Redis command (serialized with bincode)
     pub command: Vec<u8>, // Serialized Command
-}
-
-/// WAL Metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WalMetadata {
-    /// WAL files with their shard ranges
-    pub files: Vec<WalFileMetadata>,
-
-    /// Current active WAL file name
-    pub current_file: String,
-}
-
-/// WAL File Metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WalFileMetadata {
-    /// File name
-    pub file_name: String,
-
-    /// Shard ranges: shard_id -> [apply_index_begin, apply_index_end)
-    pub shard_ranges: HashMap<ShardId, (u64, u64)>, // (begin, end)
-
-    /// File size in bytes
-    pub file_size: u64,
-
-    /// File checksum (CRC32)
-    pub checksum: u32,
-
-    /// Created timestamp
-    pub created_at: u64,
 }
 
 /// WAL write request
@@ -89,8 +53,8 @@ struct WalWriterInner {
     current_file: BufWriter<File>,
     current_file_name: String,
     current_file_size: u64,
-    metadata: WalMetadata,
-    metadata_path: PathBuf,
+    first_log_seq: Option<u64>,
+    last_log_seq: Option<u64>,
 }
 
 /// WAL Writer with channel-based writes
@@ -106,28 +70,8 @@ impl WalWriter {
         std::fs::create_dir_all(&wal_dir)
             .map_err(|e| anyhow::anyhow!("Failed to create WAL directory: {}", e))?;
 
-        let metadata_path = wal_dir.join("wal_metadata.json");
-
-        // Load or create metadata
-        let mut metadata = if metadata_path.exists() {
-            let content = std::fs::read_to_string(&metadata_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read WAL metadata: {}", e))?;
-            serde_json::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse WAL metadata: {}", e))?
-        } else {
-            WalMetadata {
-                files: Vec::new(),
-                current_file: String::new(),
-            }
-        };
-
-        // Open or create current WAL file
-        let current_file_name = if metadata.current_file.is_empty() {
-            format!("wal_{:04}.log", 1)
-        } else {
-            metadata.current_file.clone()
-        };
-
+        // Current writing file is always "write.log"
+        let current_file_name = "write.log".to_string();
         let current_file_path = wal_dir.join(&current_file_name);
         let current_file = BufWriter::new(
             OpenOptions::new()
@@ -145,10 +89,6 @@ impl WalWriter {
             0
         };
 
-        if metadata.current_file.is_empty() {
-            metadata.current_file = current_file_name.clone();
-        }
-
         // Create channel for write requests (unbounded for high throughput)
         let (tx, rx) = crossbeam_channel::unbounded();
 
@@ -159,8 +99,8 @@ impl WalWriter {
             current_file,
             current_file_name: current_file_name.clone(),
             current_file_size,
-            metadata,
-            metadata_path: metadata_path.clone(),
+            first_log_seq: None,
+            last_log_seq: None,
         };
 
         // Spawn background thread for batch writing
@@ -183,7 +123,8 @@ impl WalWriter {
                     command,
                     key,
                 }) => {
-                    if let Err(e) = Self::write_entry_inner(&mut inner, apply_index, log_seq, &command, &key)
+                    if let Err(e) =
+                        Self::write_entry_inner(&mut inner, apply_index, log_seq, &command, &key)
                     {
                         error!("Failed to write WAL entry at index {}: {}", apply_index, e);
                     }
@@ -219,12 +160,8 @@ impl WalWriter {
         apply_index: u64,
         log_seq: u64,
         command: &Command,
-        key: &[u8],
+        _key: &[u8],
     ) -> Result<()> {
-        // Calculate shard_id from key using slot_for_key
-        let slot = RoutingTable::slot_for_key(key);
-        let shard_id = format!("shard_{}", slot % inner.config.shard_count);
-
         // Serialize command
         let command_bytes = bincode::serde::encode_to_vec(command, bincode::config::standard())
             .map_err(|e| anyhow::anyhow!("Failed to serialize command: {}", e))?;
@@ -232,10 +169,15 @@ impl WalWriter {
         // Create entry
         let entry = WalEntry {
             apply_index,
-            shard_id,
             log_seq,
             command: command_bytes,
         };
+
+        // Update first and last log_seq
+        if inner.first_log_seq.is_none() {
+            inner.first_log_seq = Some(log_seq);
+        }
+        inner.last_log_seq = Some(log_seq);
 
         // Serialize entry
         let entry_bytes = bincode::serde::encode_to_vec(&entry, bincode::config::standard())
@@ -262,7 +204,13 @@ impl WalWriter {
     }
 
     /// Write a WAL entry (sends to channel)
-    pub fn write_entry(&self, apply_index: u64, log_seq: u64, command: &Command, key: &[u8]) -> Result<()> {
+    pub fn write_entry(
+        &self,
+        apply_index: u64,
+        log_seq: u64,
+        command: &Command,
+        key: &[u8],
+    ) -> Result<()> {
         self.tx
             .send(WalRequest::WriteEntry {
                 apply_index,
@@ -282,44 +230,52 @@ impl WalWriter {
             .flush()
             .map_err(|e| anyhow::anyhow!("Failed to flush WAL file: {}", e))?;
 
-        // Calculate checksum of current file
-        let current_file_path = inner.wal_dir.join(&inner.current_file_name);
-        let checksum = Self::calculate_file_checksum_inner(&current_file_path)?;
+        // Get the file path before dropping the BufWriter
+        let write_log_path = inner.wal_dir.join("write.log");
 
-        // Update metadata for current file
-        let file_metadata = WalFileMetadata {
-            file_name: inner.current_file_name.clone(),
-            shard_ranges: Self::calculate_shard_ranges_inner(&current_file_path)?,
-            file_size: inner.current_file_size,
-            checksum,
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+        // Get first and last log_seq from tracked values
+        let (first_log_seq, last_log_seq) = match (inner.first_log_seq, inner.last_log_seq) {
+            (Some(first), Some(last)) => (first, last),
+            _ => {
+                // Empty file, nothing to rotate
+                return Ok(());
+            }
         };
 
-        inner.metadata.files.push(file_metadata);
+        // Drop the BufWriter to close the file
+        drop(std::mem::replace(
+            &mut inner.current_file,
+            BufWriter::new(
+                OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .open(&write_log_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to create temporary file: {}", e))?,
+            ),
+        ));
 
-        // Create new file
-        let file_number = inner.metadata.files.len() + 1;
-        inner.current_file_name = format!("wal_{:04}.log", file_number);
-        let new_file_path = inner.wal_dir.join(&inner.current_file_name);
+        // Rename write.log to {first_log_seq}-{last_log_seq}.log
+        let new_file_name = format!("{}-{}.log", first_log_seq, last_log_seq);
+        let new_file_path = inner.wal_dir.join(&new_file_name);
+        std::fs::rename(&write_log_path, &new_file_path)
+            .map_err(|e| anyhow::anyhow!("Failed to rename WAL file: {}", e))?;
 
+        // Create new write.log file
         inner.current_file = BufWriter::new(
             OpenOptions::new()
                 .create(true)
                 .write(true)
-                .open(&new_file_path)
+                .open(&write_log_path)
                 .map_err(|e| anyhow::anyhow!("Failed to create new WAL file: {}", e))?,
         );
 
         inner.current_file_size = 0;
-        inner.metadata.current_file = inner.current_file_name.clone();
+        inner.current_file_name = "write.log".to_string();
+        // Reset log_seq tracking for new file
+        inner.first_log_seq = None;
+        inner.last_log_seq = None;
 
-        // Save metadata
-        Self::save_metadata_inner(inner)?;
-
-        info!("Rotated WAL file to {}", inner.current_file_name);
+        info!("Rotated WAL file to {}", new_file_name);
 
         Ok(())
     }
@@ -332,45 +288,6 @@ impl WalWriter {
             .map_err(|e| anyhow::anyhow!("Failed to send flush request: {}", e))?;
         rx.recv()
             .map_err(|e| anyhow::anyhow!("Failed to receive flush response: {}", e))?
-    }
-
-    /// Calculate shard ranges for a WAL file (internal)
-    fn calculate_shard_ranges_inner(file_path: &Path) -> Result<HashMap<ShardId, (u64, u64)>> {
-        let mut ranges: HashMap<ShardId, (u64, u64)> = HashMap::new();
-        let mut file = BufReader::new(
-            File::open(file_path)
-                .map_err(|e| anyhow::anyhow!("Failed to open WAL file for reading: {}", e))?,
-        );
-
-        loop {
-            // Read entry size
-            let mut size_bytes = [0u8; 4];
-            match file.read_exact(&mut size_bytes) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(anyhow::anyhow!("Failed to read entry size: {}", e)),
-            }
-
-            let entry_size = u32::from_le_bytes(size_bytes) as usize;
-
-            // Read entry data
-            let mut entry_bytes = vec![0u8; entry_size];
-            file.read_exact(&mut entry_bytes)
-                .map_err(|e| anyhow::anyhow!("Failed to read entry data: {}", e))?;
-
-            // Deserialize entry
-            let entry: WalEntry =
-                bincode::serde::decode_from_slice(&entry_bytes, bincode::config::standard())
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize entry: {}", e))?
-                    .0;
-
-            // Update range for this shard
-            let range = ranges.entry(entry.shard_id).or_insert((u64::MAX, 0));
-            range.0 = range.0.min(entry.apply_index);
-            range.1 = range.1.max(entry.apply_index + 1); // end is exclusive
-        }
-
-        Ok(ranges)
     }
 
     /// Calculate file checksum (CRC32) (internal)
@@ -393,22 +310,6 @@ impl WalWriter {
         }
 
         Ok(hasher.finalize())
-    }
-
-    /// Save metadata to file (internal)
-    fn save_metadata_inner(inner: &WalWriterInner) -> Result<()> {
-        let content = serde_json::to_string_pretty(&inner.metadata)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize metadata: {}", e))?;
-        std::fs::write(&inner.metadata_path, content)
-            .map_err(|e| anyhow::anyhow!("Failed to write metadata: {}", e))?;
-        Ok(())
-    }
-
-    /// Save metadata to file (public, for external use)
-    pub fn save_metadata(&self) -> Result<()> {
-        // Note: This is a best-effort operation since metadata is managed by the writer task
-        // For critical operations, consider adding a metadata sync request to the channel
-        Ok(())
     }
 
     /// Get current WAL size (all files)
@@ -439,30 +340,50 @@ impl WalWriter {
 pub struct WalReader {
     config: SnapshotConfig,
     wal_dir: PathBuf,
-    metadata: WalMetadata,
 }
 
 impl WalReader {
     pub fn new(config: SnapshotConfig, wal_dir: PathBuf) -> Result<Self> {
-        let metadata_path = wal_dir.join("wal_metadata.json");
+        Ok(Self { config, wal_dir })
+    }
 
-        let metadata = if metadata_path.exists() {
-            let content = std::fs::read_to_string(&metadata_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read WAL metadata: {}", e))?;
-            serde_json::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse WAL metadata: {}", e))?
-        } else {
-            WalMetadata {
-                files: Vec::new(),
-                current_file: String::new(),
+    /// Find all WAL files in the directory, sorted by first log_seq
+    /// Returns read-only files (n-m.log format) sorted by first log_seq, then write.log if it exists
+    fn find_wal_files(&self) -> Result<Vec<PathBuf>> {
+        let entries = std::fs::read_dir(&self.wal_dir)
+            .map_err(|e| anyhow::anyhow!("Failed to read WAL directory: {}", e))?;
+
+        let mut read_only_files: Vec<(u64, PathBuf)> = Vec::new();
+        let mut write_log_path: Option<PathBuf> = None;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                if file_name == "write.log" {
+                    write_log_path = Some(path);
+                } else if file_name.ends_with(".log") {
+                    // Parse n-m.log format
+                    if let Some(name_without_ext) = file_name.strip_suffix(".log") {
+                        if let Some((first_str, _)) = name_without_ext.split_once('-') {
+                            if let Ok(first_log_seq) = first_str.parse::<u64>() {
+                                read_only_files.push((first_log_seq, path));
+                            }
+                        }
+                    }
+                }
             }
-        };
+        }
 
-        Ok(Self {
-            config,
-            wal_dir,
-            metadata,
-        })
+        // Sort read-only files by first log_seq
+        read_only_files.sort_by_key(|(first_log_seq, _)| *first_log_seq);
+        let mut result: Vec<PathBuf> = read_only_files.into_iter().map(|(_, path)| path).collect();
+
+        // Append write.log at the end if it exists
+        if let Some(path) = write_log_path {
+            result.push(path);
+        }
+
+        Ok(result)
     }
 
     /// Read WAL entries starting from a given apply_index
@@ -472,20 +393,10 @@ impl WalReader {
         let mut entries = Vec::new();
 
         // Read from all files in order
-        for file_meta in &self.metadata.files {
-            let file_path = self.wal_dir.join(&file_meta.file_name);
+        let wal_files = self.find_wal_files()?;
+        for file_path in wal_files {
             let file_entries = self.read_file_entries(&file_path, last_applied_index)?;
             entries.extend(file_entries);
-        }
-
-        // Read from current file if it exists
-        if !self.metadata.current_file.is_empty() {
-            let current_file_path = self.wal_dir.join(&self.metadata.current_file);
-            if current_file_path.exists() {
-                let file_entries =
-                    self.read_file_entries(&current_file_path, last_applied_index)?;
-                entries.extend(file_entries);
-            }
         }
 
         Ok(entries)
@@ -531,6 +442,112 @@ impl WalReader {
         }
 
         Ok(entries)
+    }
+
+    /// Iterate over WAL entries starting from a given apply_index
+    ///
+    /// Returns an iterator that yields entries one at a time, avoiding loading all entries into memory.
+    /// Skips entries with apply_index <= last_applied_index.
+    pub fn iter_entries_from(&self, last_applied_index: u64) -> WalEntryIterator {
+        let wal_files = match self.find_wal_files() {
+            Ok(files) => files,
+            Err(_) => Vec::new(),
+        };
+        WalEntryIterator {
+            reader: self,
+            last_applied_index,
+            wal_files,
+            file_index: 0,
+            current_file_reader: None,
+        }
+    }
+}
+
+/// Iterator over WAL entries
+pub struct WalEntryIterator<'a> {
+    reader: &'a WalReader,
+    last_applied_index: u64,
+    wal_files: Vec<PathBuf>,
+    file_index: usize,
+    current_file_reader: Option<BufReader<File>>,
+}
+
+impl<'a> Iterator for WalEntryIterator<'a> {
+    type Item = Result<WalEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            // Try to read from current file
+            if let Some(ref mut reader) = self.current_file_reader {
+                match Self::read_next_entry(reader, self.last_applied_index) {
+                    Ok(Some(entry)) => return Some(Ok(entry)),
+                    Ok(None) => {
+                        // End of current file, move to next
+                        self.current_file_reader = None;
+                        self.file_index += 1;
+                    }
+                    Err(e) => return Some(Err(e)),
+                }
+            } else {
+                // Need to open next file
+                if self.file_index < self.wal_files.len() {
+                    let file_path = &self.wal_files[self.file_index];
+                    match File::open(file_path) {
+                        Ok(file) => {
+                            self.current_file_reader = Some(BufReader::new(file));
+                            continue; // Try reading from this file
+                        }
+                        Err(e) => {
+                            return Some(Err(anyhow::anyhow!(
+                                "Failed to open WAL file {:?}: {}",
+                                file_path,
+                                e
+                            )));
+                        }
+                    }
+                } else {
+                    // No more files
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+impl<'a> WalEntryIterator<'a> {
+    fn read_next_entry(
+        reader: &mut BufReader<File>,
+        last_applied_index: u64,
+    ) -> Result<Option<WalEntry>> {
+        // Read entry size
+        let mut size_bytes = [0u8; 4];
+        match reader.read_exact(&mut size_bytes) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(anyhow::anyhow!("Failed to read entry size: {}", e)),
+        }
+
+        let entry_size = u32::from_le_bytes(size_bytes) as usize;
+
+        // Read entry data
+        let mut entry_bytes = vec![0u8; entry_size];
+        reader
+            .read_exact(&mut entry_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to read entry data: {}", e))?;
+
+        // Deserialize entry
+        let entry: WalEntry =
+            bincode::serde::decode_from_slice(&entry_bytes, bincode::config::standard())
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize entry: {}", e))?
+                .0;
+
+        // Skip entries with apply_index <= last_applied_index
+        if entry.apply_index > last_applied_index {
+            Ok(Some(entry))
+        } else {
+            // Continue reading next entry
+            Self::read_next_entry(reader, last_applied_index)
+        }
     }
 }
 
@@ -592,7 +609,6 @@ mod tests {
             )
             .unwrap();
         writer.flush().unwrap();
-        writer.save_metadata().unwrap(); // Save metadata before reading
         drop(writer); // Ensure file is closed
 
         // Read entries
@@ -659,7 +675,6 @@ mod tests {
             )
             .unwrap();
         writer.flush().unwrap();
-        writer.save_metadata().unwrap(); // Save metadata before reading
         drop(writer); // Ensure file is closed
 
         // Read entries with last_applied_index = 1 (should skip entry 1)

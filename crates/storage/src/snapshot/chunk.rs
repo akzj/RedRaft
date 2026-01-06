@@ -38,7 +38,7 @@ pub struct ChunkHeader {
 /// For now, we store the serialized data as Vec<u8>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkEntry {
-    pub key: Vec<u8>,
+    pub key: Vec<u8>, 
     pub data_type: String, // "list", "set", "zset", "bitmap"
     pub data: Vec<u8>,     // Serialized DataCow (to be implemented)
 }
@@ -125,9 +125,11 @@ impl ChunkWriter {
             format!("{:05}-{:05}-{:05}.seg", slot_start, slot_end, self.chunk_id)
         };
 
+        // Use temporary file + rename for atomic writes
         let chunk_file = output_dir.join(&file_name);
+        let temp_file = output_dir.join(format!("{}.tmp", file_name));
         let mut file = BufWriter::new(
-            File::create(&chunk_file).map_err(|e| format!("Failed to create chunk file: {}", e))?,
+            File::create(&temp_file).map_err(|e| format!("Failed to create temporary chunk file: {}", e))?,
         );
 
         // Serialize entries
@@ -169,6 +171,17 @@ impl ChunkWriter {
 
         file.flush()
             .map_err(|e| format!("Failed to flush chunk file: {}", e))?;
+        
+        // Sync to ensure data is written to disk
+        file.get_mut().sync_all()
+            .map_err(|e| format!("Failed to sync chunk file: {}", e))?;
+        
+        // Drop file handle to ensure it's closed before rename
+        drop(file);
+
+        // Atomically rename temporary file to final name
+        std::fs::rename(&temp_file, &chunk_file)
+            .map_err(|e| format!("Failed to rename temporary chunk file to final name: {}", e))?;
 
         debug!(
             "Flushed chunk {}: {} entries, {} bytes (uncompressed) -> {} bytes (compressed)",

@@ -15,6 +15,15 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
+/// Slot segment information (apply_index and log_seq)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlotSegmentInfo {
+    /// Apply index for this slot
+    pub apply_index: u64,
+    /// Log sequence number for this slot
+    pub log_seq: u64,
+}
+
 /// Segment Metadata (JSON file)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentMetadata {
@@ -34,8 +43,8 @@ pub struct SegmentMetadata {
     pub total_compressed_size: u64,
     /// Created timestamp
     pub created_at: u64,
-    /// Slot -> apply_index mapping (records apply_index for each slot)
-    pub slot_apply_indices: HashMap<u32, u64>,
+    /// Slot -> segment info mapping (records apply_index and log_seq for each slot)
+    pub slot_infos: HashMap<u32, SlotSegmentInfo>,
 }
 
 /// Chunk file information
@@ -141,7 +150,7 @@ impl SegmentGenerator {
         let mut current_segment_start = slot_list[0];
         let mut current_chunk_writer = ChunkWriter::new(self.config.clone(), round_dir.clone());
         let mut current_chunks = Vec::new();
-        let mut current_slot_apply_indices = HashMap::new();
+        let mut current_slot_infos = HashMap::new();
         let mut current_max_apply_index = 0u64;
 
         // 2. Iterate slots in order
@@ -157,8 +166,11 @@ impl SegmentGenerator {
                 }
             };
 
-            // Record this slot's apply_index
-            current_slot_apply_indices.insert(slot, metadata.applied_index);
+            // Record this slot's apply_index and log_seq
+            current_slot_infos.insert(slot, SlotSegmentInfo {
+                apply_index: metadata.applied_index,
+                log_seq: metadata.log_seq,
+            });
             current_max_apply_index = current_max_apply_index.max(metadata.applied_index);
 
             // Add this slot's data to current segment
@@ -182,7 +194,7 @@ impl SegmentGenerator {
 
             // 4. If exceeds 64MB and current segment has data, close current segment
             if current_segment_size > self.config.chunk_size as u64
-                && (!current_chunks.is_empty() || !current_slot_apply_indices.is_empty())
+                && (!current_chunks.is_empty() || !current_slot_infos.is_empty())
             {
                 // Close current segment (excluding current slot, as it exceeds the limit)
                 let segment_end = slot; // Current slot is not included
@@ -191,7 +203,7 @@ impl SegmentGenerator {
                     segment_end,
                     &mut current_chunk_writer,
                     &mut current_chunks,
-                    current_slot_apply_indices.clone(),
+                    current_slot_infos.clone(),
                     current_max_apply_index,
                     &round_dir,
                 )?;
@@ -201,11 +213,14 @@ impl SegmentGenerator {
                 current_segment_start = slot;
                 current_chunk_writer = ChunkWriter::new(self.config.clone(), round_dir.clone());
                 current_chunks.clear();
-                current_slot_apply_indices.clear();
+                current_slot_infos.clear();
                 current_max_apply_index = 0;
 
                 // Re-add current slot's data to new segment
-                current_slot_apply_indices.insert(slot, metadata.applied_index);
+                current_slot_infos.insert(slot, SlotSegmentInfo {
+                    apply_index: metadata.applied_index,
+                    log_seq: metadata.log_seq,
+                });
                 current_max_apply_index = current_max_apply_index.max(metadata.applied_index);
 
                 for (key, data) in memory_clone.iter() {
@@ -224,14 +239,14 @@ impl SegmentGenerator {
         }
 
         // 5. Close the last segment (generate even if empty)
-        if !current_chunk_writer.is_empty() || !current_slot_apply_indices.is_empty() {
+        if !current_chunk_writer.is_empty() || !current_slot_infos.is_empty() {
             let last_slot = slot_list[slot_list.len() - 1];
             let segment = self.finish_segment(
                 current_segment_start,
                 last_slot + 1, // slot_end (exclusive)
                 &mut current_chunk_writer,
                 &mut current_chunks,
-                current_slot_apply_indices,
+                current_slot_infos,
                 current_max_apply_index,
                 &round_dir,
             )?;
@@ -243,8 +258,8 @@ impl SegmentGenerator {
             for slot in segment.slot_start..segment.slot_end {
                 if let Some(slot_store) = slots.get(&slot) {
                     let mut guard = slot_store.write();
-                    if let Some(&apply_index) = segment.slot_apply_indices.get(&slot) {
-                        guard.metadata_mut().log_seq = apply_index;
+                    if let Some(slot_info) = segment.slot_infos.get(&slot) {
+                        guard.metadata_mut().log_seq = slot_info.log_seq;
                     }
                 }
             }
@@ -273,7 +288,7 @@ impl SegmentGenerator {
         slot_end: u32,
         chunk_writer: &mut ChunkWriter,
         chunks: &mut Vec<ChunkFileInfo>,
-        slot_apply_indices: HashMap<u32, u64>,
+        slot_infos: HashMap<u32, SlotSegmentInfo>,
         max_apply_index: u64,
         round_dir: &Path,
     ) -> Result<SegmentMetadata, String> {
@@ -300,15 +315,29 @@ impl SegmentGenerator {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
-            slot_apply_indices,
+            slot_infos,
         };
 
-        // Write JSON file (write even if empty)
+        // Write JSON file using temporary file + rename for atomic writes
         let json_path = round_dir.join(format!("{:05}-{:05}.seg.json", slot_start, slot_end));
+        let temp_json_path = round_dir.join(format!("{:05}-{:05}.seg.json.tmp", slot_start, slot_end));
         let json_content = serde_json::to_string_pretty(&metadata)
             .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
-        std::fs::write(&json_path, json_content)
-            .map_err(|e| format!("Failed to write metadata: {}", e))?;
+        
+        // Write to temporary file
+        std::fs::write(&temp_json_path, json_content)
+            .map_err(|e| format!("Failed to write temporary metadata file: {}", e))?;
+        
+        // Sync to ensure data is written to disk
+        let temp_file = std::fs::File::open(&temp_json_path)
+            .map_err(|e| format!("Failed to open temporary metadata file for sync: {}", e))?;
+        temp_file.sync_all()
+            .map_err(|e| format!("Failed to sync temporary metadata file: {}", e))?;
+        drop(temp_file);
+        
+        // Atomically rename temporary file to final name
+        std::fs::rename(&temp_json_path, &json_path)
+            .map_err(|e| format!("Failed to rename temporary metadata file to final name: {}", e))?;
 
         Ok(metadata)
     }
@@ -366,41 +395,18 @@ impl SegmentReader {
 
     /// Load all segments for a given slot and restore MemStore
     ///
-    /// Returns (MemStore, max_apply_index) for the slot
-    pub fn load_slot_segment(&self, slot: u32) -> Result<(MemStore, u64), String> {
+    /// Returns (MemStore, max_apply_index, log_seq) for the slot
+    pub fn load_slot_segment(&self, slot: u32) -> Result<(MemStore, u64, u64), String> {
         // Find the latest segment that contains this slot
         let latest_segment = self.find_latest_segment_for_slot(slot)?;
-        
+
         if let Some(segment_meta) = latest_segment {
-            // Load segment data
-            let mut mem_store = MemStore::new();
-            let mut max_apply_index = 0u64;
-
+            // Use load_segment_data to load data for this slot
             let round_dir = self.segments_dir.join(format!("{}", segment_meta.round));
-            
-            // Load all chunks for this segment
-            for chunk_info in &segment_meta.chunks {
-                let chunk_file = round_dir.join(&chunk_info.file_name);
-                let chunk_reader = crate::snapshot::chunk::ChunkReader::new(self.config.clone());
-                let entries = chunk_reader.read_chunk(&chunk_file)?;
-
-                // Deserialize and insert entries into MemStore
-                for entry in entries {
-                    let data = Data::deserialize(&entry.data_type, &entry.data)
-                        .map_err(|e| format!("Failed to deserialize data: {}", e))?;
-                    mem_store.insert(entry.key, data);
-                }
-            }
-
-            // Get apply_index for this slot
-            if let Some(&apply_index) = segment_meta.slot_apply_indices.get(&slot) {
-                max_apply_index = apply_index;
-            }
-
-            Ok((mem_store, max_apply_index))
+            self.load_segment_data(&segment_meta, &round_dir, slot)
         } else {
             // No segment found, return empty store
-            Ok((MemStore::new(), 0))
+            Ok((MemStore::new(), 0, 0))
         }
     }
 
@@ -408,7 +414,7 @@ impl SegmentReader {
     fn find_latest_segment_for_slot(&self, slot: u32) -> Result<Option<SegmentMetadata>, String> {
         // Find the latest round
         let current_round = SegmentGenerator::load_current_round(&self.segments_dir);
-        
+
         // Search from latest round backwards
         for round in (1..=current_round).rev() {
             let round_dir = self.segments_dir.join(format!("{}", round));
@@ -424,6 +430,14 @@ impl SegmentReader {
             for entry in entries {
                 let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
                 let path = entry.path();
+                
+                // Skip temporary files
+                if let Some(file_name) = path.file_name() {
+                    if file_name.to_string_lossy().ends_with(".tmp") {
+                        continue;
+                    }
+                }
+                
                 if let Some(ext) = path.extension() {
                     if ext == "json" {
                         let content = std::fs::read_to_string(&path)
@@ -448,13 +462,13 @@ impl SegmentReader {
 
     /// Load all segments and restore MemStore for all slots
     ///
-    /// Returns HashMap<slot, (MemStore, apply_index)>
-    pub fn load_all_segments(&self) -> Result<HashMap<u32, (MemStore, u64)>, String> {
+    /// Returns HashMap<slot, (MemStore, apply_index, log_seq)>
+    pub fn load_all_segments(&self) -> Result<HashMap<u32, (MemStore, u64, u64)>, String> {
         let mut result = HashMap::new();
-        
+
         // Find all slots from all segments
         let current_round = SegmentGenerator::load_current_round(&self.segments_dir);
-        
+
         for round in 1..=current_round {
             let round_dir = self.segments_dir.join(format!("{}", round));
             if !round_dir.exists() {
@@ -467,6 +481,14 @@ impl SegmentReader {
             for entry in entries {
                 let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
                 let path = entry.path();
+                
+                // Skip temporary files
+                if let Some(file_name) = path.file_name() {
+                    if file_name.to_string_lossy().ends_with(".tmp") {
+                        continue;
+                    }
+                }
+                
                 if let Some(ext) = path.extension() {
                     if ext == "json" {
                         let content = std::fs::read_to_string(&path)
@@ -481,8 +503,9 @@ impl SegmentReader {
                                 continue;
                             }
 
-                            let (mem_store, apply_index) = self.load_segment_data(&segment_meta, &round_dir, slot)?;
-                            result.insert(slot, (mem_store, apply_index));
+                            let (mem_store, apply_index, log_seq) =
+                                self.load_segment_data(&segment_meta, &round_dir, slot)?;
+                            result.insert(slot, (mem_store, apply_index, log_seq));
                         }
                     }
                 }
@@ -500,7 +523,7 @@ impl SegmentReader {
         segment_meta: &SegmentMetadata,
         round_dir: &Path,
         slot: u32,
-    ) -> Result<(MemStore, u64), String> {
+    ) -> Result<(MemStore, u64, u64), String> {
         let mut mem_store = MemStore::new();
         let chunk_reader = crate::snapshot::chunk::ChunkReader::new(self.config.clone());
 
@@ -521,9 +544,13 @@ impl SegmentReader {
             }
         }
 
-        // Get apply_index for this slot
-        let apply_index = segment_meta.slot_apply_indices.get(&slot).copied().unwrap_or(0);
+        // Get apply_index and log_seq for this slot
+        let (apply_index, log_seq) = segment_meta
+            .slot_infos
+            .get(&slot)
+            .map(|info| (info.apply_index, info.log_seq))
+            .unwrap_or((0, 0));
 
-        Ok((mem_store, apply_index))
+        Ok((mem_store, apply_index, log_seq))
     }
 }
