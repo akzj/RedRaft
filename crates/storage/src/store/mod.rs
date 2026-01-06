@@ -143,6 +143,8 @@ impl SlotStore {
 /// Storage architecture:
 /// - RocksDB: Only String and Hash (persistent, don't need WAL)
 /// - Memory store: All other data structures (List, Set, ZSet, Bitmap, etc.) - need WAL for recovery
+///
+#[derive(Clone)]
 pub struct HybridStore {
     /// RocksDB for String and Hash only (shared across all slots)
     pub(crate) rocksdb: Arc<SlotRocksDB>,
@@ -169,11 +171,17 @@ impl HybridStore {
     /// - `snapshot_config`: Snapshot configuration
     /// - `data_dir`: Data directory path
     /// - `routing_table`: Routing table for slot calculation (only used for RocksDB initialization)
+    /// - `start_background_task`: Whether to start background segment generation task
+    ///
+    /// # Returns
+    /// - `Ok((store, handle))`: Store instance and optional background task handle
+    ///   If `start_background_task` is false, handle will be None
     pub fn new(
         snapshot_config: SnapshotConfig,
         data_dir: PathBuf,
         routing_table: Arc<rr_core::routing::RoutingTable>,
-    ) -> Result<Self, String> {
+        start_background_task: bool,
+    ) -> Result<(Self, Option<std::thread::JoinHandle<()>>), String> {
         // Initialize RocksDB
         let rocksdb_path = data_dir.join("rocksdb");
         let rocksdb = Arc::new(
@@ -239,13 +247,23 @@ impl HybridStore {
             }
         }
 
-        Ok(Self {
+        let store = Self {
             rocksdb,
             log_seq,
             slots,
             wal_writer: Arc::new(RwLock::new(wal_writer)),
             segment_generator: Arc::new(RwLock::new(segment_generator)),
-        })
+        };
+
+        // Start background segment generation task if requested
+        let handle = if start_background_task {
+            let check_interval = snapshot_config.segment_interval_secs;
+            Some(store.start_segment_generation_task(check_interval))
+        } else {
+            None
+        };
+
+        Ok((store, handle))
     }
 
     /// Get slot number for a key
@@ -538,26 +556,22 @@ impl HybridStore {
 
     /// Start background task for segment generation
     ///
-    /// This spawns a tokio task that periodically checks if segment generation
+    /// This spawns a thread that periodically checks if segment generation
     /// should be triggered and generates segments if needed.
     ///
     /// # Arguments
     /// - `check_interval_secs`: How often to check (in seconds)
     ///
     /// # Returns
-    /// Handle to the background task (can be used to cancel it)
+    /// Handle to the background thread (can be used to join it)
     pub fn start_segment_generation_task(
-        self: &Arc<Self>,
+        &self,
         check_interval_secs: u64,
-    ) -> tokio::task::JoinHandle<()> {
-        let store = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(check_interval_secs));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
+    ) -> std::thread::JoinHandle<()> {
+        let store = self.clone();
+        std::thread::spawn(move || {
             loop {
-                interval.tick().await;
+                std::thread::sleep(std::time::Duration::from_secs(check_interval_secs));
 
                 // Check if should generate segments
                 if store.should_generate_segment() {

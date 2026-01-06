@@ -365,7 +365,7 @@ impl RRNode {
                 // For read operations, use current apply_index as read_index
                 // apply_index can be 0 for read-only commands
                 let read_index = sm.apply_index().load(std::sync::atomic::Ordering::SeqCst);
-                let result = sm.store().apply(read_index, 0, &cmd);
+                let result = sm.store().apply_with_index(read_index, 0, &cmd);
                 return Ok(apply_result_to_resp(result));
             } else {
                 // No state machines available, but PING/ECHO can still work
@@ -400,7 +400,7 @@ impl RRNode {
             // For read operations, use current apply_index as read_index
             // apply_index can be 0 for read-only commands
             let read_index = sm.apply_index().load(std::sync::atomic::Ordering::SeqCst);
-            let result = sm.store().apply(read_index, 0, &cmd);
+            let result = sm.store().apply_with_index(read_index, 0, &cmd);
             Ok(apply_result_to_resp(result))
         } else {
             Err(anyhow::anyhow!("State machine not found"))

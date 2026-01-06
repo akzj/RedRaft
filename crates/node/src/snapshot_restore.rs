@@ -8,8 +8,8 @@ use tracing::{error, info, warn};
 
 use storage::store::HybridStore;
 use storage::traits::{
-    ApplyResult as StoreApplyResult, HashStore, KeyStore, ListStore, SetStore, SnapshotStoreEntry,
-    StringStore,
+    ApplyContext, ApplyResult as StoreApplyResult, HashStore, KeyStore, ListStore, SetStore,
+    SnapshotStoreEntry, StringStore,
 };
 
 /// Restore snapshot from compressed chunks in blocking context
@@ -124,23 +124,28 @@ fn apply_snapshot_entry(
             return Err(anyhow::anyhow!("Snapshot restore error: {}", err));
         }
         SnapshotStoreEntry::String(key, value) => {
+            // Create context for snapshot restore (no real apply_index/log_seq needed)
+            let ctx = ApplyContext::default();
             store
-                .set(&key, value)
+                .set(&key, value, &ctx)
                 .map_err(|e| anyhow::anyhow!("Failed to restore String entry: {}", e))?;
         }
         SnapshotStoreEntry::Hash(key, field, value) => {
+            let ctx = ApplyContext::default();
             store
-                .hset(&key, &field, value)
+                .hset(&key, &field, value, &ctx)
                 .map_err(|e| anyhow::anyhow!("Failed to restore Hash entry: {}", e))?;
         }
         SnapshotStoreEntry::List(key, element) => {
+            let ctx = ApplyContext::default();
             store
-                .rpush(&key, vec![element])
+                .rpush(&key, vec![element], &ctx)
                 .map_err(|e| anyhow::anyhow!("Failed to restore List entry: {}", e))?;
         }
         SnapshotStoreEntry::Set(key, member) => {
+            let ctx = ApplyContext::default();
             store
-                .sadd(&key, vec![member])
+                .sadd(&key, vec![member], &ctx)
                 .map_err(|e| anyhow::anyhow!("Failed to restore Set entry: {}", e))?;
         }
         SnapshotStoreEntry::ZSet(_key, _score, _member) => {
@@ -152,8 +157,9 @@ fn apply_snapshot_entry(
             // Bitmap is stored as bytes, need to set bits
             // For now, we'll store it as a string value
             // TODO: Implement proper bitmap restoration
+            let ctx = ApplyContext::default();
             store
-                .set(&key, bitmap)
+                .set(&key, bitmap, &ctx)
                 .map_err(|e| anyhow::anyhow!("Failed to restore Bitmap entry: {}", e))?;
         }
     }

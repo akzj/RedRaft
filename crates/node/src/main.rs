@@ -140,12 +140,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create routing table (managed by node, can be synced with pilot in the future)
     let routing_table = Arc::new(rr_core::routing::RoutingTable::new());
 
-    // Create Redis store
-    let redis_store = Arc::new(HybridStore::new(
+    // Create Redis store with background task enabled
+    let (redis_store, _background_handle) = HybridStore::new(
         storage::snapshot::SnapshotConfig::default(),
         config.storage.data_dir.clone(),
         routing_table.clone(),
-    )?);
+        true, // Start background segment generation task
+    )?;
+    let redis_store = Arc::new(redis_store);
 
     // Create RedRaft node (pass config for internal use)
     let node = Arc::new(RRNode::new(
