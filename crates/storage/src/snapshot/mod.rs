@@ -59,6 +59,10 @@ pub struct SnapshotConfig {
     /// Default: 3600 (1 hour)
     pub segment_interval_secs: u64,
 
+    /// Number of rounds to keep (older rounds will be deleted)
+    /// Default: 2 (keep latest 2 rounds for safety)
+    pub keep_rounds: u64,
+
     /// Zstd compression level (1-22)
     /// Default: 3 (balanced)
     pub zstd_level: i32,
@@ -72,6 +76,7 @@ impl Default for SnapshotConfig {
             chunk_size: 64 * 1024 * 1024,          // 64MB
             wal_size_threshold: 100 * 1024 * 1024, // 100MB
             segment_interval_secs: 3600,           // 1 hour
+            keep_rounds: 2,                        // Keep latest 2 rounds
             zstd_level: 3,
         }
     }
@@ -116,7 +121,8 @@ pub fn reload_memstore(config: SnapshotConfig) -> Result<HashMap<u32, (MemStore,
         let metadata = SlotMetadata {
             slot,
             applied_index: apply_index,
-            log_seq, // Load log_seq from segment
+            log_seq,                  // Load log_seq from segment
+            segment_log_seq: log_seq, // segment_log_seq equals log_seq when loaded from segment
         };
         segment_log_seqs.insert(slot, log_seq); // Store original segment log_seq
         result.insert(slot, (mem_store, metadata));
@@ -349,6 +355,7 @@ mod tests {
             chunk_size: 64 * 1024 * 1024,
             wal_size_threshold: 100 * 1024 * 1024,
             segment_interval_secs: 3600,
+            keep_rounds: 2,
             zstd_level: 3,
         };
 
@@ -622,6 +629,7 @@ mod tests {
             chunk_size: 64 * 1024 * 1024,
             wal_size_threshold: 100 * 1024 * 1024,
             segment_interval_secs: 3600,
+            keep_rounds: 2,
             zstd_level: 3,
         };
 
@@ -745,6 +753,7 @@ mod tests {
             chunk_size: 64 * 1024 * 1024,
             wal_size_threshold: 100 * 1024 * 1024,
             segment_interval_secs: 3600,
+            keep_rounds: 2,
             zstd_level: 3,
         };
 

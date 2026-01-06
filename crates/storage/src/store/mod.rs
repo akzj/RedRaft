@@ -47,6 +47,9 @@ pub struct SlotMetadata {
     pub applied_index: u64,
     /// Last log sequence number
     pub log_seq: u64,
+    /// Last log sequence number in segment (for log compression)
+    /// If log_seq == segment_log_seq, the slot hasn't changed since last segment generation
+    pub segment_log_seq: u64,
 }
 
 impl SlotMetadata {
@@ -55,6 +58,7 @@ impl SlotMetadata {
             slot,
             applied_index: 0,
             log_seq: 0,
+            segment_log_seq: 0,
         }
     }
 

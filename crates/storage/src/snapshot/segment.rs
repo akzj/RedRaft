@@ -154,6 +154,8 @@ impl SegmentGenerator {
         let mut current_max_apply_index = 0u64;
 
         // 2. Iterate slots in order
+        // TODO: Future optimization - use overlay-like approach to skip unchanged slots
+        // For now, generate segments for all slots to ensure consistency
         for &slot in &slot_list {
             // Get slot data
             let (memory_clone, metadata) = {
@@ -259,7 +261,7 @@ impl SegmentGenerator {
                 if let Some(slot_store) = slots.get(&slot) {
                     let mut guard = slot_store.write();
                     if let Some(slot_info) = segment.slot_infos.get(&slot) {
-                        guard.metadata_mut().log_seq = slot_info.log_seq;
+                        guard.metadata_mut().segment_log_seq = slot_info.log_seq;
                     }
                 }
             }
@@ -267,6 +269,9 @@ impl SegmentGenerator {
 
         // 7. Start new round
         self.start_new_round();
+
+        // 8. Clean up old rounds
+        self.cleanup_old_rounds()?;
 
         // Mark as complete
         self.is_generating = false;
@@ -376,6 +381,89 @@ impl SegmentGenerator {
     pub fn mark_complete(&mut self) {
         self.is_generating = false;
         self.last_generate_time = Some(std::time::Instant::now());
+    }
+
+    /// Clean up old round directories to free disk space
+    /// Keeps the latest `keep_rounds` rounds and deletes older ones
+    fn cleanup_old_rounds(&self) -> Result<(), String> {
+        let keep_rounds = self.config.keep_rounds;
+        if keep_rounds == 0 {
+            // Don't delete anything if keep_rounds is 0
+            return Ok(());
+        }
+
+        // Calculate the oldest round to keep
+        let oldest_round_to_keep = if self.current_round > keep_rounds {
+            self.current_round - keep_rounds + 1
+        } else {
+            1 // Keep all rounds if current_round <= keep_rounds
+        };
+
+        // Find all round directories
+        let entries = std::fs::read_dir(&self.segments_dir)
+            .map_err(|e| format!("Failed to read segments directory: {}", e))?;
+
+        let mut deleted_count = 0;
+        let mut deleted_size = 0u64;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+            let path = entry.path();
+
+            // Check if it's a round directory (numeric name)
+            if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                if let Ok(round) = dir_name.parse::<u64>() {
+                    // Delete rounds older than oldest_round_to_keep
+                    if round < oldest_round_to_keep {
+                        // Calculate size before deletion
+                        let size = Self::calculate_directory_size(&path)?;
+                        deleted_size += size;
+
+                        // Delete the round directory
+                        std::fs::remove_dir_all(&path)
+                            .map_err(|e| format!("Failed to delete round directory {:?}: {}", path, e))?;
+                        
+                        deleted_count += 1;
+                        info!("Deleted old round {} directory (size: {} bytes)", round, size);
+                    }
+                }
+            }
+        }
+
+        if deleted_count > 0 {
+            info!(
+                "Cleaned up {} old round directories, freed {} bytes",
+                deleted_count, deleted_size
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Calculate total size of a directory recursively
+    fn calculate_directory_size(path: &Path) -> Result<u64, String> {
+        let mut total_size = 0u64;
+
+        if path.is_dir() {
+            let entries = std::fs::read_dir(path)
+                .map_err(|e| format!("Failed to read directory {:?}: {}", path, e))?;
+
+            for entry in entries {
+                let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+                let entry_path = entry.path();
+
+                if entry_path.is_dir() {
+                    total_size += Self::calculate_directory_size(&entry_path)?;
+                } else {
+                    total_size += entry_path
+                        .metadata()
+                        .map_err(|e| format!("Failed to get metadata for {:?}: {}", entry_path, e))?
+                        .len();
+                }
+            }
+        }
+
+        Ok(total_size)
     }
 }
 

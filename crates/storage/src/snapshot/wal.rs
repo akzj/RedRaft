@@ -570,6 +570,7 @@ mod tests {
             chunk_size: 64 * 1024 * 1024,
             wal_size_threshold: 100 * 1024 * 1024,
             segment_interval_secs: 3600,
+            keep_rounds: 2,
             zstd_level: 3,
         };
 
@@ -636,6 +637,7 @@ mod tests {
             chunk_size: 64 * 1024 * 1024,
             wal_size_threshold: 100 * 1024 * 1024,
             segment_interval_secs: 3600,
+            keep_rounds: 2,
             zstd_level: 3,
         };
 
