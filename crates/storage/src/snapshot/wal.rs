@@ -14,7 +14,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// WAL Entry format
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +63,8 @@ pub struct WalWriter {
     tx: crossbeam_channel::Sender<WalRequest>,
     /// Background thread handle
     handle: thread::JoinHandle<Result<()>>,
+    /// WAL directory path (for cleanup operations)
+    wal_dir: PathBuf,
 }
 
 impl WalWriter {
@@ -106,7 +108,11 @@ impl WalWriter {
         // Spawn background thread for batch writing
         let handle = thread::spawn(move || Self::writer_task(inner, rx));
 
-        Ok(Self { tx, handle })
+        Ok(Self {
+            tx,
+            handle,
+            wal_dir,
+        })
     }
 
     /// Background writer task that processes write requests in batches
@@ -322,17 +328,66 @@ impl WalWriter {
 
     /// Clean up WAL files that are no longer needed
     ///
-    /// Note: This is a placeholder - actual implementation would need to send a cleanup request
-    /// to the writer task. For now, this is a no-op.
+    /// Deletes WAL files where last_log_seq < min_log_seq.
+    /// Uses filename parsing ({first_log_seq}-{last_log_seq}.log) for efficient cleanup
+    /// without reading file contents.
+    /// Only processes read-only files (n-m.log format), never deletes write.log.
     ///
     /// # Arguments
-    /// - `min_apply_index`: Minimum apply_index that should be kept
+    /// - `min_log_seq`: Minimum log_seq that should be kept
     ///
     /// # Returns
     /// Number of files deleted
-    pub fn cleanup_old_files(&mut self, _min_apply_index: u64) -> Result<usize> {
-        // TODO: Implement cleanup request to writer task
-        Ok(0)
+    pub fn cleanup_old_files(&mut self, min_log_seq: u64) -> Result<usize> {
+        // First, flush to ensure write.log is synced
+        self.flush()?;
+
+        // Find all WAL files (excluding write.log)
+        let entries = std::fs::read_dir(&self.wal_dir)
+            .map_err(|e| anyhow::anyhow!("Failed to read WAL directory: {}", e))?;
+
+        let mut deleted_count = 0;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                // Skip write.log (current writing file)
+                if file_name == "write.log" {
+                    continue;
+                }
+                // Only process .log files
+                if !file_name.ends_with(".log") {
+                    continue;
+                }
+
+                // Parse filename: {first_log_seq}-{last_log_seq}.log
+                if let Some(name_without_ext) = file_name.strip_suffix(".log") {
+                    if let Some((_first_str, last_str)) = name_without_ext.split_once('-') {
+                        if let Ok(last_log_seq) = last_str.parse::<u64>() {
+                            // If last_log_seq < min_log_seq, all entries in this file are old
+                            // and can be safely deleted (they're already in segments)
+                            if last_log_seq < min_log_seq {
+                                std::fs::remove_file(&path)
+                                    .map_err(|e| anyhow::anyhow!("Failed to delete WAL file {:?}: {}", path, e))?;
+                                deleted_count += 1;
+                                info!(
+                                    "Deleted old WAL file {:?} (last_log_seq: {}, min_log_seq: {})",
+                                    path, last_log_seq, min_log_seq
+                                );
+                            }
+                        } else {
+                            // Invalid filename format, skip
+                            warn!("Invalid WAL filename format: {:?}, skipping", path);
+                        }
+                    } else {
+                        // Invalid filename format, skip
+                        warn!("Invalid WAL filename format: {:?}, skipping", path);
+                    }
+                }
+            }
+        }
+
+        Ok(deleted_count)
     }
 }
 
@@ -403,7 +458,7 @@ impl WalReader {
     }
 
     /// Read entries from a single WAL file
-    fn read_file_entries(
+    pub(crate) fn read_file_entries(
         &self,
         file_path: &Path,
         last_applied_index: u64,

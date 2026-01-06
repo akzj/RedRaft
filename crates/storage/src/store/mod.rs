@@ -26,7 +26,7 @@ mod zset;
 
 use crate::memory::MemStoreCow;
 use crate::rocksdb::SlotRocksDB;
-use crate::snapshot::{SegmentGenerator, SnapshotConfig, WalWriter};
+use crate::snapshot::{reload_memstore, SegmentGenerator, SnapshotConfig, WalWriter};
 use crate::traits::StoreError;
 use anyhow::Result;
 use parking_lot::RwLock;
@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Slot metadata (stored in memory)
 #[derive(Debug, Clone)]
@@ -63,7 +63,7 @@ impl SlotMetadata {
     }
 
     /// Update metadata from ApplyContext
-    /// 
+    ///
     /// Updates the slot's metadata (log_seq and applied_index) from the ApplyContext.
     /// Called after write operations to keep metadata synchronized with the Raft log.
     pub fn update_from_context(&mut self, ctx: &crate::traits::ApplyContext) {
@@ -157,19 +157,9 @@ pub struct HybridStore {
     /// Segment Generator for periodic full snapshots
     segment_generator: Arc<RwLock<SegmentGenerator>>,
 
-    routing_table: Arc<RoutingTable>,
-
-    last_applied_index: Arc<AtomicU64>,
-
     /// Global log sequence number (incremented for each WAL entry written)
     /// Used for log compression and segment generation
     log_seq: Arc<AtomicU64>,
-
-    /// Snapshot configuration
-    snapshot_config: SnapshotConfig,
-
-    /// RocksDB path (for creating new slots)
-    rocksdb_path: PathBuf,
 }
 
 impl HybridStore {
@@ -178,7 +168,7 @@ impl HybridStore {
     /// # Arguments
     /// - `snapshot_config`: Snapshot configuration
     /// - `data_dir`: Data directory path
-    /// - `routing_table`: Routing table for slot management (managed by node)
+    /// - `routing_table`: Routing table for slot calculation (only used for RocksDB initialization)
     pub fn new(
         snapshot_config: SnapshotConfig,
         data_dir: PathBuf,
@@ -200,32 +190,67 @@ impl HybridStore {
         let segments_dir = snapshot_config.base_dir.join("segments");
         let segment_generator = SegmentGenerator::new(snapshot_config.clone(), segments_dir);
 
+        // Initialize slots map
+        let slots = Arc::new(RwLock::new(HashMap::new()));
+
+        // Initialize log_seq (will be updated after reload if data exists)
+        let log_seq = Arc::new(AtomicU64::new(0));
+
+        // Reload MemStore from segments and WAL if they exist
+        match reload_memstore(snapshot_config.clone()) {
+            Ok(restored_slots) => {
+                let mut max_log_seq = 0u64;
+                let mut slots_guard = slots.write();
+
+                for (slot, (mem_store, metadata)) in restored_slots {
+                    // Track max log_seq for global log_seq initialization
+                    max_log_seq = max_log_seq.max(metadata.log_seq);
+
+                    // Clone RocksDB for this slot
+                    let rocksdb = rocksdb.as_ref().clone();
+                    let slot_store = SlotStore {
+                        rocksdb,
+                        memory: mem_store,
+                        metadata,
+                    };
+                    let locked_store = Arc::new(RwLock::new(slot_store));
+                    slots_guard.insert(slot, locked_store);
+                }
+
+                // Set global log_seq to max restored log_seq (next write will increment)
+                // If no data was restored, log_seq remains 0
+                if max_log_seq > 0 {
+                    log_seq.store(max_log_seq, std::sync::atomic::Ordering::SeqCst);
+                }
+
+                info!(
+                    "Reloaded {} slots from segments and WAL, max log_seq: {}",
+                    slots_guard.len(),
+                    max_log_seq
+                );
+            }
+            Err(e) => {
+                // If reload fails (e.g., no segments/WAL exist), start fresh
+                // This is normal for first-time startup
+                warn!(
+                    "Failed to reload from segments/WAL (this is normal for first startup): {}",
+                    e
+                );
+            }
+        }
+
         Ok(Self {
             rocksdb,
-            rocksdb_path,
-            snapshot_config,
-            last_applied_index: Arc::new(AtomicU64::new(0)),
-            log_seq: Arc::new(AtomicU64::new(0)),
-            slots: Arc::new(RwLock::new(HashMap::new())),
+            log_seq,
+            slots,
             wal_writer: Arc::new(RwLock::new(wal_writer)),
             segment_generator: Arc::new(RwLock::new(segment_generator)),
-            routing_table,
         })
     }
 
     /// Get slot number for a key
     pub(crate) fn slot_for_key(&self, key: &[u8]) -> u32 {
         RoutingTable::slot_for_key(key)
-    }
-
-
-    /// Get shard ID for a key using routing table
-    /// Note: This is kept for backward compatibility (e.g., snapshot interface)
-    /// Storage layer no longer uses shard_id internally
-    pub(crate) fn shard_for_key(&self, key: &[u8]) -> Result<String, StoreError> {
-        self.routing_table
-            .find_shard_for_key(key)
-            .map_err(|e| StoreError::Internal(e.to_string()))
     }
 
     /// Get or create slot store for a key
@@ -454,43 +479,52 @@ impl HybridStore {
         }
 
         let slots = self.slots.read();
-        let mut segments_generated = 0;
-        let mut min_apply_index = u64::MAX;
 
         // Generate segments for all slots (new implementation)
         // Convert HashMap to format expected by new SegmentGenerator
         let slots_map: HashMap<u32, LockedSlotStore> =
             slots.iter().map(|(k, v)| (*k, Arc::clone(v))).collect();
 
-        match segment_generator.generate_segments(&slots_map) {
-            Ok(segments) => {
-                segments_generated = segments.len();
-                if let Some(min_idx) = segments.iter().map(|s| s.apply_index).min() {
-                    min_apply_index = min_idx;
+        let (segments_generated, min_log_seq) =
+            match segment_generator.generate_segments(&slots_map) {
+                Ok(segments) => {
+                    let count = segments.len();
+                    // Find minimum log_seq across all segments (for WAL cleanup)
+                    // This is the minimum log_seq that should be kept in WAL files
+                    let min_log_seq = segments
+                        .iter()
+                        .flat_map(|s| s.slot_infos.values().map(|info| info.log_seq))
+                        .min()
+                        .unwrap_or(u64::MAX);
+                    info!(
+                        "Generated {} segments for {} slots, min_log_seq: {}",
+                        count,
+                        slots_map.len(),
+                        if min_log_seq == u64::MAX {
+                            0
+                        } else {
+                            min_log_seq
+                        }
+                    );
+                    (count, min_log_seq)
                 }
-                info!(
-                    "Generated {} segments for {} slots",
-                    segments_generated,
-                    slots_map.len()
-                );
-            }
-            Err(e) => {
-                error!("Failed to generate segments: {}", e);
-                return Err(e);
-            }
-        }
+                Err(e) => {
+                    error!("Failed to generate segments: {}", e);
+                    return Err(e);
+                }
+            };
 
         // Mark generation as complete
         segment_generator.mark_complete();
 
         // Clean up old WAL files if we generated any segments
-        if segments_generated > 0 && min_apply_index < u64::MAX {
+        if segments_generated > 0 && min_log_seq < u64::MAX {
             let mut wal_writer = self.wal_writer.write();
-            match wal_writer.cleanup_old_files(min_apply_index) {
+            match wal_writer.cleanup_old_files(min_log_seq) {
                 Ok(deleted_count) => {
                     info!(
-                        "Cleaned up {} old WAL files after segment generation",
-                        deleted_count
+                        "Cleaned up {} old WAL files after segment generation (min_log_seq: {})",
+                        deleted_count, min_log_seq
                     );
                 }
                 Err(e) => {
